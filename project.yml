@@ -1,0 +1,40 @@
+name: UsageDock
+options:
+  bundleIdPrefix: com.uniplanck
+  deploymentTarget:
+    macOS: "14.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+targets:
+  UsageDock:
+    type: application
+    platform: macOS
+    sources:
+      - path: UsageDock
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.uniplanck.UsageDock
+        PRODUCT_NAME: UsageDock
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: UsageDock
+        INFOPLIST_KEY_LSUIElement: YES
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_HARDENED_RUNTIME: YES
+    scheme:
+      testTargets:
+        - UsageDockTests
+  UsageDockTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: UsageDockTests
+    dependencies:
+      - target: UsageDock
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.uniplanck.UsageDockTests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/UsageDock.app/Contents/MacOS/UsageDock"
+        BUNDLE_LOADER: "$(TEST_HOST)"
