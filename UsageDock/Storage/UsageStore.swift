@@ -608,7 +608,7 @@ final class UsageStore: ObservableObject {
     func displayMultiplier(for target: RailDisplayTarget) -> Int? {
         switch target {
         case .provider(let provider): return displayMultiplier(for: provider)
-        case .account(let id, _): return accounts.first(where: { $0.id == id })?.normalizedPlanMultiplier
+        case .account: return account(for: target)?.normalizedPlanMultiplier
         }
     }
 

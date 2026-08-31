@@ -1129,11 +1129,24 @@ struct RailView: View {
     @ViewBuilder
     private func providerAccountMenu(_ provider: ProviderID) -> some View {
         Menu(provider.displayName) {
-            Button {
-                usageStore.addAccount(provider: provider)
-                onOpenSettings()
-            } label: {
-                Label("Add Account", systemImage: "plus")
+            if UsageDockDistributionPolicy.allowsDevelopmentAccounts {
+                Button {
+                    usageStore.addAccount(provider: provider)
+                    onOpenSettings()
+                } label: {
+                    Label("Add Account", systemImage: "plus")
+                }
+            }
+
+            if provider.supportsProfileLogin {
+                Button {
+                    _ = usageStore.launchLoginProfile(provider: provider)
+                } label: {
+                    Label(
+                        provider == .antigravity ? "Open Antigravity Login" : "Login New Profile",
+                        systemImage: "person.crop.circle.badge.plus"
+                    )
+                }
             }
 
             if usageStore.canRegisterCurrentSession(provider: provider) {
@@ -1146,21 +1159,25 @@ struct RailView: View {
                 }
             }
 
-            if provider == .codex {
-                Menu("Add Synthetic") {
-                    Button("×1") { usageStore.addSyntheticAccount(provider: .codex, multiplier: 1) }
-                    Button("×5") { usageStore.addSyntheticAccount(provider: .codex, multiplier: 5) }
-                    Button("×20") { usageStore.addSyntheticAccount(provider: .codex, multiplier: 20) }
+            if UsageDockDistributionPolicy.allowsDevelopmentAccounts {
+                if provider == .codex {
+                    Menu("Add Synthetic") {
+                        Button("×1") { usageStore.addSyntheticAccount(provider: .codex, multiplier: 1) }
+                        Button("×5") { usageStore.addSyntheticAccount(provider: .codex, multiplier: 5) }
+                        Button("×20") { usageStore.addSyntheticAccount(provider: .codex, multiplier: 20) }
+                    }
+                } else {
+                    Button {
+                        usageStore.addSyntheticAccount(provider: provider, multiplier: provider == .claude ? 20 : 1)
+                    } label: {
+                        Label(provider == .claude ? "Add Synthetic ×20" : "Add Synthetic", systemImage: "sparkles")
+                    }
                 }
-            } else {
-                Button {
-                    usageStore.addSyntheticAccount(provider: provider, multiplier: provider == .claude ? 20 : 1)
-                } label: {
-                    Label(provider == .claude ? "Add Synthetic ×20" : "Add Synthetic", systemImage: "sparkles")
-                }
+            } else if !provider.supportsProfileLogin && !provider.supportsLiveUsage {
+                Label("Login unavailable", systemImage: "lock")
             }
 
-            let accounts = usageStore.accounts.filter { $0.provider == provider }
+            let accounts = usageStore.visibleAccounts(for: provider)
             if !accounts.isEmpty {
                 Divider()
                 ForEach(accounts) { account in

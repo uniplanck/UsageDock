@@ -13,7 +13,7 @@ struct ProviderDetailView: View {
 
     private var scopedAccounts: [UsageAccount] {
         if let account { return [account] }
-        return usageStore.accounts.filter { $0.provider == provider && $0.isEnabled }
+        return usageStore.visibleAccounts(for: provider).filter(\.isEnabled)
     }
 
     var body: some View {
