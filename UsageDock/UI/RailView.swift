@@ -24,11 +24,12 @@ enum RailMetrics {
     }
 
     static func minimumSafeIconEdgeInset(showRing: Bool, iconSize: Double) -> CGFloat {
-        // Keep a real safety gutter, but allow the icon cluster to sit visibly closer to
-        // the screen edge than F17.7's conservative 10pt ring minimum.
-        let base: CGFloat = showRing ? 6 : 5
-        let largeIconBonus = max(CGFloat(iconSize - 24) * 0.06, 0)
-        return min(base + largeIconBonus, 10)
+        // Keep only the gutter needed to avoid hard clipping. F17.16 deliberately lets
+        // the icon/ring cluster sit much closer to the screen edge while still keeping
+        // a tiny optical safety margin for large icons.
+        let base: CGFloat = showRing ? 2 : 1
+        let largeIconBonus = max(CGFloat(iconSize - 24) * 0.035, 0)
+        return min(base + largeIconBonus, 4)
     }
 
     static func effectiveIconEdgeInset(
@@ -463,6 +464,7 @@ struct RailView: View {
                 smoothing: usageStore.railScallopSmoothing,
                 stretchAmount: Double(dragPresentation.shapeStretch),
                 neckAmount: Double(dragPresentation.neck),
+                kineticAmount: Double(dragPresentation.kinetic),
                 screenEdgeOutset: screenEdgeVisualOutset
             )
             .fill(Color.white)
@@ -484,6 +486,7 @@ struct RailView: View {
                 smoothing: usageStore.railScallopSmoothing,
                 stretchAmount: Double(dragPresentation.shapeStretch),
                 neckAmount: Double(dragPresentation.neck),
+                kineticAmount: Double(dragPresentation.kinetic),
                 screenEdgeOutset: screenEdgeVisualOutset
             )
             let freeBorder = EdgeRailFreeBorderShape(
@@ -496,6 +499,7 @@ struct RailView: View {
                 smoothing: usageStore.railScallopSmoothing,
                 stretchAmount: Double(dragPresentation.shapeStretch),
                 neckAmount: Double(dragPresentation.neck),
+                kineticAmount: Double(dragPresentation.kinetic),
                 screenEdgeOutset: screenEdgeVisualOutset
             )
 
@@ -1359,6 +1363,7 @@ private struct EdgeRailShape: Shape {
     let smoothing: Double
     var stretchAmount: Double
     var neckAmount: Double
+    var kineticAmount: Double = 0
     let screenEdgeOutset: CGFloat
 
     var animatableData: AnimatablePair<Double, Double> {
@@ -1381,6 +1386,7 @@ private struct EdgeRailShape: Shape {
             smoothing: smoothing,
             stretchAmount: stretchAmount,
             neckAmount: neckAmount,
+            kineticAmount: kineticAmount,
             screenEdgeOutset: screenEdgeOutset,
             closesScreenEdge: true
         )
@@ -1397,6 +1403,7 @@ private struct EdgeRailFreeBorderShape: Shape {
     let smoothing: Double
     var stretchAmount: Double
     var neckAmount: Double
+    var kineticAmount: Double = 0
     let screenEdgeOutset: CGFloat
 
     var animatableData: AnimatablePair<Double, Double> {
@@ -1419,6 +1426,7 @@ private struct EdgeRailFreeBorderShape: Shape {
             smoothing: smoothing,
             stretchAmount: stretchAmount,
             neckAmount: neckAmount,
+            kineticAmount: kineticAmount,
             screenEdgeOutset: screenEdgeOutset,
             closesScreenEdge: false
         )
@@ -1437,11 +1445,13 @@ private enum EdgeRailGeometry {
         smoothing: Double,
         stretchAmount: Double,
         neckAmount: Double,
+        kineticAmount: Double,
         screenEdgeOutset: CGFloat,
         closesScreenEdge: Bool
     ) -> Path {
         let stretch = min(max(CGFloat(stretchAmount), 0), 1.2)
         let neck = min(max(CGFloat(neckAmount), 0), 1)
+        let kinetic = min(max(CGFloat(kineticAmount), 0), 1)
         let visualOutset = max(screenEdgeOutset, 0)
         let nominalMinY = rect.minY + visualOutset
         let nominalMaxY = rect.maxY - visualOutset
@@ -1457,8 +1467,13 @@ private enum EdgeRailGeometry {
         let innerRaw = shapeInset(innerEdgeAmount, depth: depth)
         let baseline = min(screenRaw, innerRaw)
         let screenInset = screenRaw - baseline
-        let freeEndCompression = min(nominalHeight * (0.025 * stretch + 0.045 * neck), nominalHeight * 0.10)
-        let innerInset = min(innerRaw - baseline + freeEndCompression, nominalHeight * 0.18)
+        // Preserve visible volume in the leading droplet. The bridge gets thin while the
+        // free head remains round, closer to a liquid surface under tension than rubber.
+        let freeEndCompression = min(
+            nominalHeight * (0.014 * stretch + 0.018 * neck + 0.008 * kinetic),
+            nominalHeight * 0.055
+        )
+        let innerInset = min(innerRaw - baseline + freeEndCompression, nominalHeight * 0.16)
         let pinchCurve = CGFloat(pow(Double(neck), 1.18))
         // Keep a visible liquid lobe attached to the Mac edge. The strong pinch belongs in
         // the throat between the edge and the body, not at the screen endpoint itself.
@@ -1483,25 +1498,30 @@ private enum EdgeRailGeometry {
         )
         let stretchNormalized = min(max(stretch / 1.05, 0), 1)
         let stretchRoundness = stretchNormalized * stretchNormalized * (3 - 2 * stretchNormalized)
-        let liquidRoundness = min(max(neck * 0.62 + stretchRoundness * 0.62, 0), 1)
+        let tensionRaw = min(max(neck * 0.68 + stretchRoundness * 0.54 + kinetic * 0.10, 0), 1)
+        let surfaceTension = tensionRaw * tensionRaw * (3 - 2 * tensionRaw)
+        let liquidRoundness = min(max(neck * 0.58 + stretchRoundness * 0.72 + kinetic * 0.12, 0), 1)
         let neckRun = min(
             max(
                 span * (
                     0.18 +
                     0.055 * edgeShapeStrength +
-                    0.145 * neck +
-                    0.105 * stretchRoundness
+                    0.160 * neck +
+                    0.120 * stretchRoundness +
+                    0.035 * kinetic
                 ),
                 radius * 1.10
             ),
-            span * 0.52
+            span * 0.56
         )
         let bodyArcSpan = max(span - neckRun, 1)
-        let bodyBellyProgress = 0.54 + 0.08 * liquidRoundness
-        let bodyBellyVerticalFactor = max(0.10, 0.24 - 0.12 * liquidRoundness)
+        // Shift apparent mass toward the free head as tension rises. The leading end
+        // becomes a bulb while the bridge narrows, which reads much more like a droplet.
+        let bodyBellyProgress = 0.58 + 0.13 * surfaceTension
+        let bodyBellyVerticalFactor = max(0.045, 0.20 - 0.135 * surfaceTension - 0.025 * kinetic)
         let bodyBellyTangentX = min(
-            bodyArcSpan * (0.12 + 0.11 * liquidRoundness),
-            bodyArcSpan * 0.25
+            bodyArcSpan * (0.15 + 0.14 * surfaceTension),
+            bodyArcSpan * 0.31
         )
         let throatProgress = min(0.72 + 0.18 * concavity, 0.90)
         // As the bridge stretches, the waist tangent becomes increasingly horizontal.
@@ -1509,28 +1529,28 @@ private enum EdgeRailGeometry {
         // instead of two long diagonal lines meeting at a pinch point.
         let throatTangentX = min(
             max(
-                span * (0.070 + 0.025 * blend + 0.055 * liquidRoundness),
-                bodyArcSpan * (0.16 + 0.13 * liquidRoundness)
+                span * (0.072 + 0.025 * blend + 0.070 * surfaceTension),
+                bodyArcSpan * (0.18 + 0.15 * surfaceTension)
             ),
             min(
-                neckRun * (0.48 + 0.30 * liquidRoundness),
-                bodyArcSpan * 0.44
+                neckRun * (0.50 + 0.32 * surfaceTension),
+                bodyArcSpan * 0.48
             )
         )
         let throatTangentYBase = max(nominalHeight * (0.010 + 0.012 * blend), 1.25)
-        let throatTangentY = throatTangentYBase * (1 - 0.96 * liquidRoundness)
+        let throatTangentY = throatTangentYBase * (1 - 0.975 * surfaceTension)
         // Keep the droplet head rounded even as the bridge gets thinner. The cap tangent
         // stays bounded by its local radius, while the long body arc gets its own belly point.
         let bodyCornerTangent = min(
-            max(radius * (0.58 + 0.18 * liquidRoundness), 2),
-            radius * 0.90
+            max(radius * (0.62 + 0.20 * surfaceTension), 2),
+            radius * 0.94
         )
         let freeCapControlY = min(
             max(
-                (innerBottomY - innerTopY) * (0.24 + 0.080 * liquidRoundness),
-                radius * 1.18
+                (innerBottomY - innerTopY) * (0.29 + 0.11 * surfaceTension + 0.035 * kinetic),
+                radius * 1.25
             ),
-            nominalHeight * 0.30
+            nominalHeight * 0.38
         )
         let topScreenHandleY = min(
             max(
@@ -1558,8 +1578,13 @@ private enum EdgeRailGeometry {
             let bottomScreen = CGPoint(x: screenX, y: screenBottomY)
 
             let throatPinch = min(
-                nominalHeight * (0.030 * stretch + 0.300 * pinchCurve),
-                nominalHeight * 0.335
+                nominalHeight * (
+                    0.028 * stretch +
+                    0.305 * pinchCurve +
+                    0.028 * surfaceTension +
+                    0.012 * kinetic
+                ),
+                nominalHeight * 0.36
             )
             let topThroat = CGPoint(
                 x: screenX - neckRun,
@@ -1631,8 +1656,13 @@ private enum EdgeRailGeometry {
             let bottomScreen = CGPoint(x: screenX, y: screenBottomY)
 
             let throatPinch = min(
-                nominalHeight * (0.030 * stretch + 0.300 * pinchCurve),
-                nominalHeight * 0.335
+                nominalHeight * (
+                    0.028 * stretch +
+                    0.305 * pinchCurve +
+                    0.028 * surfaceTension +
+                    0.012 * kinetic
+                ),
+                nominalHeight * 0.36
             )
             let topThroat = CGPoint(
                 x: screenX + neckRun,

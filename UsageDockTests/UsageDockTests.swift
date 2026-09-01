@@ -137,6 +137,22 @@ final class PersistenceTests: XCTestCase {
         XCTAssertFalse(restored.railHoverEnabled)
     }
 
+    func testF17IconEdgeSafeInsetAllowsNearEdgePlacement() {
+        XCTAssertEqual(RailMetrics.minimumSafeIconEdgeInset(showRing: true, iconSize: 24), 2, accuracy: 0.0001)
+        XCTAssertEqual(RailMetrics.minimumSafeIconEdgeInset(showRing: false, iconSize: 24), 1, accuracy: 0.0001)
+        XCTAssertLessThanOrEqual(RailMetrics.minimumSafeIconEdgeInset(showRing: true, iconSize: 44), 4)
+        XCTAssertEqual(
+            RailMetrics.effectiveIconEdgeInset(requested: 0, showRing: true, iconSize: 24),
+            2,
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(
+            RailMetrics.effectiveIconEdgeInset(requested: 12, showRing: true, iconSize: 24),
+            12,
+            accuracy: 0.0001
+        )
+    }
+
     func testSyntheticAccountsSupportAllProvidersAndRegeneration() {
         let suiteName = "UsageDockTests.SyntheticF14.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
