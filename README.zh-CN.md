@@ -13,11 +13,11 @@ UsageDock 是一款轻量级 macOS 屏幕边缘用量栏，可快速查看 AI �
 
 ## 动态演示
 
-<a href="https://drive.google.com/file/d/1hCO0oAMye-B4IhnjYHwatP7F_iUe9UIo/preview">
+<a href="https://drive.google.com/file/d/1I1TLPKhvvgevAjZ8R0ceHMxTLhVdE_f0/preview">
   <img src="docs/images/usagedock-rail.png" alt="观看 UsageDock 液态拖拽动态演示" width="763">
 </a>
 
-**▶ [观看 UsageDock 动态演示](https://drive.google.com/file/d/1hCO0oAMye-B4IhnjYHwatP7F_iUe9UIo/preview)**
+**▶ [观看 UsageDock 动态演示](https://drive.google.com/file/d/1I1TLPKhvvgevAjZ8R0ceHMxTLhVdE_f0/preview)**
 
 ## 预览
 

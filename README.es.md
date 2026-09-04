@@ -13,11 +13,11 @@ UsageDock es una barra ligera para el borde de la pantalla en macOS que permite 
 
 ## Demostración en movimiento
 
-<a href="https://drive.google.com/file/d/1hCO0oAMye-B4IhnjYHwatP7F_iUe9UIo/preview">
+<a href="https://drive.google.com/file/d/1I1TLPKhvvgevAjZ8R0ceHMxTLhVdE_f0/preview">
   <img src="docs/images/usagedock-rail.png" alt="Ver la demostración del arrastre líquido de UsageDock" width="763">
 </a>
 
-**▶ [Ver la demostración de UsageDock](https://drive.google.com/file/d/1hCO0oAMye-B4IhnjYHwatP7F_iUe9UIo/preview)**
+**▶ [Ver la demostración de UsageDock](https://drive.google.com/file/d/1I1TLPKhvvgevAjZ8R0ceHMxTLhVdE_f0/preview)**
 
 ## Vista previa
 

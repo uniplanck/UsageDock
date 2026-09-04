@@ -13,11 +13,11 @@ UsageDock은 AI 서비스의 사용량과 리셋 시간을 한눈에 확인할 �
 
 ## 동작 데모
 
-<a href="https://drive.google.com/file/d/1hCO0oAMye-B4IhnjYHwatP7F_iUe9UIo/preview">
+<a href="https://drive.google.com/file/d/1I1TLPKhvvgevAjZ8R0ceHMxTLhVdE_f0/preview">
   <img src="docs/images/usagedock-rail.png" alt="UsageDock의 액체 드래그 동작 데모 보기" width="763">
 </a>
 
-**▶ [UsageDock 동작 데모 보기](https://drive.google.com/file/d/1hCO0oAMye-B4IhnjYHwatP7F_iUe9UIo/preview)**
+**▶ [UsageDock 동작 데모 보기](https://drive.google.com/file/d/1I1TLPKhvvgevAjZ8R0ceHMxTLhVdE_f0/preview)**
 
 ## 미리보기
 

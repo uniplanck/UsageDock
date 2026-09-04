@@ -17,11 +17,11 @@ Claude、Codex、Antigravity、Kimiなどの利用状況を、画面の端とメ
 
 ## 動いているところを見る
 
-<a href="https://drive.google.com/file/d/1hCO0oAMye-B4IhnjYHwatP7F_iUe9UIo/preview">
+<a href="https://drive.google.com/file/d/1I1TLPKhvvgevAjZ8R0ceHMxTLhVdE_f0/preview">
   <img src="docs/images/usagedock-rail.png" alt="UsageDockの液体ドラッグ動作デモ" width="763">
 </a>
 
-**▶ [UsageDockの動作デモを見る](https://drive.google.com/file/d/1hCO0oAMye-B4IhnjYHwatP7F_iUe9UIo/preview)**
+**▶ [UsageDockの動作デモを見る](https://drive.google.com/file/d/1I1TLPKhvvgevAjZ8R0ceHMxTLhVdE_f0/preview)**
 
 レールは単に固定されたウィジェットではありません。画面端から引っ張ると形が伸び、表面張力のように変形し、切り離された後は水滴が落ちます。左右の画面端へ移動するときも、設定パネルを開くときも、常駐UIとしての軽さを崩さないことを重視しています。
 

@@ -13,11 +13,11 @@ UsageDock is a lightweight macOS edge rail for checking AI service usage and res
 
 ## Motion demo
 
-<a href="https://drive.google.com/file/d/1hCO0oAMye-B4IhnjYHwatP7F_iUe9UIo/preview">
+<a href="https://drive.google.com/file/d/1I1TLPKhvvgevAjZ8R0ceHMxTLhVdE_f0/preview">
   <img src="docs/images/usagedock-rail.png" alt="Watch the UsageDock liquid drag motion demo" width="763">
 </a>
 
-**▶ [Watch the UsageDock motion demo](https://drive.google.com/file/d/1hCO0oAMye-B4IhnjYHwatP7F_iUe9UIo/preview)**
+**▶ [Watch the UsageDock motion demo](https://drive.google.com/file/d/1I1TLPKhvvgevAjZ8R0ceHMxTLhVdE_f0/preview)**
 
 ## Preview
 
