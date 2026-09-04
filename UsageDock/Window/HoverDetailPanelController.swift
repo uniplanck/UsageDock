@@ -84,7 +84,17 @@ final class HoverDetailPanelController {
             showTitle: usageStore.railShowTitle,
             titleFontSize: usageStore.railAccountLabelFontSize
         )
-        let topInset = RailMetrics.verticalPadding(scale: usageStore.railScale, showRing: usageStore.railShowRing)
+        let topInset = RailMetrics.edgePadding(scale: usageStore.railScale, amount: usageStore.railInnerPaddingY)
+            + RailMetrics.screenEdgeVisualOutset(
+                screenEdgeShape: usageStore.railScreenEdgeShape,
+                scallopDepth: usageStore.railScallopDepth,
+                scale: usageStore.railScale
+            )
+            + RailMetrics.borderRenderPadding(
+                scale: usageStore.railScale,
+                edgeStyle: usageStore.railMaterialMode == .bar3D ? .off : usageStore.railEdgeStyle,
+                edgeWidth: usageStore.railEdgeWidth
+            )
         let spacing = RailMetrics.spacing(scale: usageStore.railScale, itemSpacing: usageStore.railItemSpacing)
         let rowCenterY = anchor.maxY - topInset - CGFloat(index) * (rowHeight + spacing) - rowHeight / 2
         let unclampedY = rowCenterY - height / 2

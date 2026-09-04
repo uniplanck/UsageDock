@@ -2,42 +2,207 @@ import AppKit
 import Foundation
 import SwiftUI
 
+struct SpaceSurfaceStar: Equatable {
+    let center: CGPoint
+    let radius: CGFloat
+    let opacity: Double
+    let coolTint: Bool
+}
+
+enum SpaceSurfaceGeometry {
+    static let seed: UInt64 = 0x5A0C_EF17_2609_0401
+
+    static func stars(in size: CGSize, count: Int = 36) -> [SpaceSurfaceStar] {
+        guard size.width > 0, size.height > 0, count > 0 else { return [] }
+        return (0..<count).map { index in
+            let starSeed = seed ^ (UInt64(index + 1) &* 0x9E37_79B9_7F4A_7C15)
+            let x = CGFloat(RailDragDropletEmitter.unit(starSeed, salt: 1)) * size.width
+            let y = CGFloat(RailDragDropletEmitter.unit(starSeed, salt: 2)) * size.height
+            let radius = 0.32 + CGFloat(RailDragDropletEmitter.unit(starSeed, salt: 3)) * 0.72
+            let opacity = 0.075 + RailDragDropletEmitter.unit(starSeed, salt: 4) * 0.16
+            return SpaceSurfaceStar(
+                center: CGPoint(x: x, y: y),
+                radius: radius,
+                opacity: opacity,
+                coolTint: RailDragDropletEmitter.unit(starSeed, salt: 5) > 0.68
+            )
+        }
+    }
+}
+
+private struct SpaceSurfaceDetail: View {
+    let scale: Double
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                RadialGradient(
+                    colors: [
+                        Color(red: 0.35, green: 0.23, blue: 0.68).opacity(0.13),
+                        Color(red: 0.12, green: 0.18, blue: 0.44).opacity(0.055),
+                        Color.clear
+                    ],
+                    center: UnitPoint(x: 0.28, y: 0.62),
+                    startRadius: 0,
+                    endRadius: max(proxy.size.width, proxy.size.height) * 0.72
+                )
+                .blur(radius: 10 * scale)
+
+                RadialGradient(
+                    colors: [
+                        Color(red: 0.34, green: 0.57, blue: 0.92).opacity(0.075),
+                        Color.clear
+                    ],
+                    center: UnitPoint(x: 0.76, y: 0.31),
+                    startRadius: 0,
+                    endRadius: max(proxy.size.width, proxy.size.height) * 0.48
+                )
+                .blur(radius: 7 * scale)
+
+                Canvas { context, size in
+                    for star in SpaceSurfaceGeometry.stars(in: size) {
+                        let diameter = max(star.radius * 2 * CGFloat(scale), 0.55)
+                        let rect = CGRect(
+                            x: star.center.x - diameter * 0.5,
+                            y: star.center.y - diameter * 0.5,
+                            width: diameter,
+                            height: diameter
+                        )
+                        let color = star.coolTint
+                            ? Color(red: 0.70, green: 0.78, blue: 1.0)
+                            : Color.white
+                        context.fill(Path(ellipseIn: rect), with: .color(color.opacity(star.opacity)))
+                    }
+                }
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+struct RailHorizontalLayout {
+    let screenInset: CGFloat
+    let windowInset: CGFloat
+    let contentScaleX: CGFloat
+}
+
 enum RailMetrics {
-    static func width(
-        scale: Double,
+    static func contentWidth(
         showRing: Bool,
         showMultiplier: Bool,
-        iconEdgeInset: Double = 0,
         iconSize: Double = 24,
         titleWidth: Double = 66,
         timeWidth: Double = 72
     ) -> CGFloat {
         let iconBlock = max(showRing ? 70 : 48, iconSize + (showRing ? 34 : 20))
         let textBlock = max(showMultiplier ? 64 : 54, titleWidth + 16, timeWidth + 16)
-        let base = max(iconBlock, textBlock)
-        let safeInset = effectiveIconEdgeInset(
-            requested: iconEdgeInset,
-            showRing: showRing,
-            iconSize: iconSize
-        )
-        return max((CGFloat(base) + safeInset) * CGFloat(scale), 24)
+        return CGFloat(max(iconBlock, textBlock))
     }
 
-    static func minimumSafeIconEdgeInset(showRing: Bool, iconSize: Double) -> CGFloat {
-        // Keep only the gutter needed to avoid hard clipping. F17.16 deliberately lets
-        // the icon/ring cluster sit much closer to the screen edge while still keeping
-        // a tiny optical safety margin for large icons.
+    static func minimumSafeHorizontalInset(showRing: Bool, iconSize: Double) -> CGFloat {
         let base: CGFloat = showRing ? 2 : 1
         let largeIconBonus = max(CGFloat(iconSize - 24) * 0.035, 0)
         return min(base + largeIconBonus, 4)
     }
 
-    static func effectiveIconEdgeInset(
-        requested: Double,
+    static func width(
+        scale: Double,
         showRing: Bool,
-        iconSize: Double
+        showMultiplier: Bool,
+        screenInnerPadding: Double = 0,
+        windowInnerPadding: Double = 0,
+        iconSize: Double = 24,
+        titleWidth: Double = 66,
+        timeWidth: Double = 72
     ) -> CGFloat {
-        max(CGFloat(requested), minimumSafeIconEdgeInset(showRing: showRing, iconSize: iconSize))
+        let safe = minimumSafeHorizontalInset(showRing: showRing, iconSize: iconSize)
+        let screen = max(CGFloat(screenInnerPadding), safe)
+        let window = max(CGFloat(windowInnerPadding), safe)
+        let base = contentWidth(
+            showRing: showRing,
+            showMultiplier: showMultiplier,
+            iconSize: iconSize,
+            titleWidth: titleWidth,
+            timeWidth: timeWidth
+        )
+        return max((base + screen + window) * CGFloat(scale), 24)
+    }
+
+    static func clampedHorizontalLayout(
+        availableWidth: CGFloat,
+        scale: Double,
+        showRing: Bool,
+        showMultiplier: Bool,
+        iconSize: Double,
+        titleWidth: Double,
+        timeWidth: Double,
+        desiredScreenInset: Double,
+        desiredWindowInset: Double,
+        screenEdgeAmount: Double,
+        stretch: CGFloat,
+        neck: CGFloat,
+        detach: CGFloat
+    ) -> RailHorizontalLayout {
+        let scale = CGFloat(scale)
+        let baseSafe = minimumSafeHorizontalInset(showRing: showRing, iconSize: iconSize) * scale
+        let deformation = min(max(stretch, 0), 1.4)
+        let neck = min(max(neck, 0), 1)
+        let detach = min(max(detach, 0), 1)
+        let edge = min(max(abs(CGFloat(screenEdgeAmount)), 0), 1)
+        let screenSafety = baseSafe + (1.25 + 1.6 * edge + 4.6 * neck + 1.8 * deformation) * scale
+        let windowSafety = baseSafe + (1.4 + 2.8 * neck + 3.2 * deformation + 1.2 * detach) * scale
+        let requestedScreen = max(CGFloat(desiredScreenInset) * scale, screenSafety)
+        let requestedWindow = max(CGFloat(desiredWindowInset) * scale, windowSafety)
+        let contentWidth = contentWidth(
+            showRing: showRing,
+            showMultiplier: showMultiplier,
+            iconSize: iconSize,
+            titleWidth: titleWidth,
+            timeWidth: timeWidth
+        ) * scale
+        let requestedTotal = requestedScreen + requestedWindow
+        let contentScaleX = min(max((availableWidth - requestedTotal) / max(contentWidth, 1), 0.50), 1)
+        let renderedContentWidth = contentWidth * contentScaleX
+        let freeSpace = max(availableWidth - renderedContentWidth, 0)
+
+        guard freeSpace > 0 else {
+            return RailHorizontalLayout(screenInset: 0, windowInset: 0, contentScaleX: contentScaleX)
+        }
+        guard requestedTotal <= freeSpace else {
+            let ratio = requestedScreen / max(requestedTotal, 1)
+            return RailHorizontalLayout(
+                screenInset: freeSpace * ratio,
+                windowInset: freeSpace * (1 - ratio),
+                contentScaleX: contentScaleX
+            )
+        }
+
+        let extra = freeSpace - requestedTotal
+        let screenShare = min(max(0.46 - 0.18 * deformation - 0.08 * detach, 0.20), 0.50)
+        return RailHorizontalLayout(
+            screenInset: requestedScreen + extra * screenShare,
+            windowInset: requestedWindow + extra * (1 - screenShare),
+            contentScaleX: contentScaleX
+        )
+    }
+
+    static func compensatedDragContentOffset(
+        semanticOffset: CGFloat,
+        dragDirection: CGFloat,
+        contentTravel: CGFloat,
+        canvasExtraWidth: CGFloat,
+        railWidth: CGFloat,
+        renderedContentWidth: CGFloat,
+        borderPadding: CGFloat
+    ) -> CGFloat {
+        // The overlay keeps the screen-side edge fixed by moving the expanded panel center by
+        // canvasExtraWidth/2. Subtract that built-in motion before applying contentTravel;
+        // otherwise the content effectively moves twice and gets clipped by the canonical mask.
+        let compensatedTravel = max(contentTravel - canvasExtraWidth * 0.5, 0)
+        let desired = semanticOffset + dragDirection * compensatedTravel
+        let safety = max(borderPadding + 1, 1)
+        let maxOffset = max(railWidth * 0.5 - renderedContentWidth * 0.5 - safety, 0)
+        return min(max(desired, -maxOffset), maxOffset)
     }
 
     static func rowHeight(
@@ -58,8 +223,32 @@ enum RailMetrics {
         return max(base * CGFloat(scale), showRing ? 36 : 22)
     }
 
-    static func verticalPadding(scale: Double, showRing: Bool) -> CGFloat {
-        (showRing ? 10 : 6) * CGFloat(scale)
+    static func edgePadding(scale: Double, amount: Double) -> CGFloat {
+        CGFloat(amount) * CGFloat(scale)
+    }
+
+    static func borderRenderPadding(
+        scale: Double,
+        edgeStyle: RailEdgeStyle,
+        edgeWidth: Double,
+        glowRadius: Double = 0
+    ) -> CGFloat {
+        guard edgeStyle != .off else { return 0 }
+        let scaledWidth = CGFloat(edgeWidth * scale)
+        let scaledGlow = CGFloat(max(glowRadius, 0) * scale)
+        let glowAllowance: CGFloat
+        switch edgeStyle {
+        case .off, .simple:
+            glowAllowance = 0
+        case .soft:
+            glowAllowance = scaledGlow * 0.46
+        case .neon:
+            glowAllowance = scaledGlow * 0.82
+        case .glass:
+            glowAllowance = scaledGlow * 0.52
+        }
+        let styleAllowance: CGFloat = edgeStyle == .glass ? 1.6 : 1.0
+        return min(max(scaledWidth * 1.25 + glowAllowance + styleAllowance, 2.5), 16)
     }
 
     static func screenEdgeVisualOutset(
@@ -74,6 +263,14 @@ enum RailMetrics {
         return fullSpread * spread
     }
 
+    static func renderedHeight(
+        baseHeight: CGFloat,
+        visualOutset: CGFloat,
+        borderPadding: CGFloat
+    ) -> CGFloat {
+        baseHeight + max(visualOutset, 0) * 2 + max(borderPadding, 0) * 2
+    }
+
     static func spacing(scale: Double, itemSpacing: Double) -> CGFloat {
         CGFloat(itemSpacing) * CGFloat(scale)
     }
@@ -82,6 +279,7 @@ enum RailMetrics {
         entryCount: Int,
         scale: Double,
         itemSpacing: Double,
+        innerPaddingY: Double = 10,
         showRing: Bool,
         showPercent: Bool,
         showRemainingTime: Bool = false,
@@ -104,19 +302,23 @@ enum RailMetrics {
             titleFontSize: titleFontSize
         )
         let gaps = CGFloat(max(count - 1, 0)) * spacing(scale: scale, itemSpacing: itemSpacing)
-        return rows + gaps + verticalPadding(scale: scale, showRing: showRing) * 2
+        return rows
+            + gaps
+            + edgePadding(scale: scale, amount: innerPaddingY) * 2
     }
 
     static func windowSize(
         entryCount: Int,
         scale: Double,
         itemSpacing: Double,
+        innerPaddingY: Double = 10,
         showRing: Bool,
         showPercent: Bool,
         showMultiplier: Bool,
         showRemainingTime: Bool = false,
         remainingTimeFontSize: Double = 8.5,
-        iconEdgeInset: Double = 0,
+        screenInnerPadding: Double = 0,
+        windowInnerPadding: Double = 0,
         iconSize: Double = 24,
         percentFontSize: Double = 12,
         showTitle: Bool = true,
@@ -129,7 +331,8 @@ enum RailMetrics {
                 scale: scale,
                 showRing: showRing,
                 showMultiplier: showMultiplier,
-                iconEdgeInset: iconEdgeInset,
+                screenInnerPadding: screenInnerPadding,
+                windowInnerPadding: windowInnerPadding,
                 iconSize: iconSize,
                 titleWidth: titleWidth,
                 timeWidth: timeWidth
@@ -138,6 +341,7 @@ enum RailMetrics {
                 entryCount: entryCount,
                 scale: scale,
                 itemSpacing: itemSpacing,
+                innerPaddingY: innerPaddingY,
                 showRing: showRing,
                 showPercent: showPercent,
                 showRemainingTime: showRemainingTime,
@@ -164,10 +368,27 @@ struct RailDragVisualSnapshot: Equatable {
     let sideProgress: CGFloat
     let contentTravel: CGFloat
     let kinetic: CGFloat
+    let shapeStretch: CGFloat
+    let neck: CGFloat
+    let breakPulse: CGFloat
     let floatingCenterX: CGFloat
     let floatingCenterY: CGFloat
     let residue: CGFloat
     let wetting: CGFloat
+    let dragStartedAt: TimeInterval
+    let particleSeed: UInt64
+    let grabX: CGFloat
+    let grabY: CGFloat
+    let dragVelocityX: CGFloat
+    let dragVelocityY: CGFloat
+    let dragVelocitySampledAt: TimeInterval
+    let emitsDroplets: Bool
+    let breakStartedAt: TimeInterval
+    let breakVelocityX: CGFloat
+    let breakVelocityY: CGFloat
+    let breakOriginX: CGFloat
+    let breakOriginY: CGFloat
+    let emitsBreakSplash: Bool
 }
 
 struct RailView: View {
@@ -195,35 +416,47 @@ struct RailView: View {
     @State private var settleTask: Task<Void, Never>?
     @State private var breakPulseTask: Task<Void, Never>?
     @State private var mouseReleaseWatchTask: Task<Void, Never>?
+    @State private var dragVisualStartedAt: TimeInterval = 0
+    @State private var dragParticleSeed: UInt64 = 0
+    @State private var lastGrabPoint: CGPoint = .zero
+    @State private var dragVelocityTracker = RailDragVelocityTracker()
+    @State private var breakVisualStartedAt: TimeInterval = 0
+    @State private var breakVelocity: CGVector = .zero
+    @State private var breakOrigin: CGPoint = .zero
 
     private var targets: [RailDisplayTarget] { usageStore.railTargets() }
     private var scale: CGFloat { CGFloat(usageStore.railScale) }
     private var effectiveEdge: DockEdge { overlaySnapshot?.edge ?? placement.edge }
     private var effectiveCanvasExtraWidth: CGFloat { overlaySnapshot?.canvasExtraWidth ?? 0 }
     private var dragDirection: CGFloat { effectiveEdge == .left ? 1 : -1 }
+    private var contentBaseWidth: CGFloat {
+        RailMetrics.contentWidth(
+            showRing: usageStore.railShowRing,
+            showMultiplier: usageStore.railShowMultiplier,
+            iconSize: usageStore.railIconSize,
+            titleWidth: usageStore.railTitleWidth,
+            timeWidth: usageStore.railTimeWidth
+        ) * scale
+    }
     private var baseRailWidth: CGFloat {
         RailMetrics.width(
             scale: usageStore.railScale,
             showRing: usageStore.railShowRing,
             showMultiplier: usageStore.railShowMultiplier,
-            iconEdgeInset: usageStore.railIconEdgeInset,
+            screenInnerPadding: usageStore.railScreenInnerPadding,
+            windowInnerPadding: usageStore.railWindowInnerPadding,
             iconSize: usageStore.railIconSize,
             titleWidth: usageStore.railTitleWidth,
             timeWidth: usageStore.railTimeWidth
         )
     }
-    private var effectiveIconEdgeInset: CGFloat {
-        RailMetrics.effectiveIconEdgeInset(
-            requested: usageStore.railIconEdgeInset,
-            showRing: usageStore.railShowRing,
-            iconSize: usageStore.railIconSize
-        )
-    }
+    private var currentRailWidth: CGFloat { baseRailWidth + effectiveCanvasExtraWidth }
     private var baseRailHeight: CGFloat {
         RailMetrics.contentHeight(
             entryCount: targets.count,
             scale: usageStore.railScale,
             itemSpacing: usageStore.railItemSpacing,
+            innerPaddingY: usageStore.railInnerPaddingY,
             showRing: usageStore.railShowRing,
             showPercent: usageStore.railShowPercent,
             showRemainingTime: usageStore.railShowRemainingTime,
@@ -239,6 +472,17 @@ struct RailView: View {
             screenEdgeShape: usageStore.railScreenEdgeShape,
             scallopDepth: usageStore.railScallopDepth,
             scale: usageStore.railScale
+        )
+    }
+    private var effectiveEdgeStyle: RailEdgeStyle {
+        usageStore.railMaterialMode == .bar3D ? .off : usageStore.railEdgeStyle
+    }
+    private var borderRenderPadding: CGFloat {
+        RailMetrics.borderRenderPadding(
+            scale: usageStore.railScale,
+            edgeStyle: effectiveEdgeStyle,
+            edgeWidth: usageStore.railEdgeWidth,
+            glowRadius: usageStore.railGlowRadius
         )
     }
     private var effectiveVisualOutset: CGFloat {
@@ -264,6 +508,7 @@ struct RailView: View {
                 sideProgress: 0,
                 contentTravel: 0,
                 kinetic: 0,
+                breakPulse: 0,
                 wetting: 0
             )
         }
@@ -277,10 +522,101 @@ struct RailView: View {
             sideProgress: overlaySnapshot.sideProgress,
             contentTravel: overlaySnapshot.contentTravel,
             kinetic: overlaySnapshot.kinetic,
+            breakPulse: overlaySnapshot.breakPulse,
             wetting: overlaySnapshot.wetting
         )
     }
 
+    private var horizontalLayout: RailHorizontalLayout {
+        RailMetrics.clampedHorizontalLayout(
+            availableWidth: currentRailWidth,
+            scale: usageStore.railScale,
+            showRing: usageStore.railShowRing,
+            showMultiplier: usageStore.railShowMultiplier,
+            iconSize: usageStore.railIconSize,
+            titleWidth: usageStore.railTitleWidth,
+            timeWidth: usageStore.railTimeWidth,
+            desiredScreenInset: usageStore.railScreenInnerPadding,
+            desiredWindowInset: usageStore.railWindowInnerPadding,
+            screenEdgeAmount: usageStore.railScreenEdgeShape,
+            stretch: dragPresentation.shapeStretch,
+            neck: dragPresentation.neck,
+            detach: dragPresentation.detach
+        )
+    }
+    private var contentDeformation: RailContentDeformation {
+        RailContentDeformationField.resolve(
+            stretch: dragPresentation.stretch,
+            neck: dragPresentation.neck,
+            kinetic: dragPresentation.kinetic,
+            detach: dragPresentation.detach,
+            scale: scale,
+            attached: dragPresentation.phase == .attached
+        )
+    }
+    private var contentAttachedAnchor: UnitPoint {
+        effectiveEdge == .left ? .leading : .trailing
+    }
+    private var semanticContentOffset: CGFloat {
+        let baseOffset = dragDirection * (horizontalLayout.screenInset - horizontalLayout.windowInset) * 0.5
+        switch dragPresentation.phase {
+        case .attached:
+            return baseOffset + dragDirection * contentDeformation.freeSideTranslation
+        case .wetting:
+            return baseOffset * dragPresentation.wettingSpread
+        case .floating, .returning, .docking:
+            return 0
+        }
+    }
+    private var attachedNeckGeometry: RailNeckMinimumGeometry? {
+        guard dragPresentation.phase == .attached else { return nil }
+        return RailNeckGeometryResolver.resolve(
+            in: CGRect(
+                x: 0,
+                y: 0,
+                width: currentRailWidth,
+                height: baseRailHeight + screenEdgeVisualOutset * 2 + borderRenderPadding * 2
+            ),
+            edge: effectiveEdge,
+            screenEdgeAmount: usageStore.railScreenEdgeShape,
+            screenEdgeCurvature: usageStore.railScreenEdgeCurvature,
+            innerEdgeAmount: usageStore.railInnerShape,
+            cornerRadius: usageStore.railCornerRadius * usageStore.railScale,
+            scallopDepth: usageStore.railScallopDepth * usageStore.railScale,
+            smoothing: usageStore.railScallopSmoothing,
+            stretchAmount: Double(dragPresentation.shapeStretch),
+            neckAmount: Double(dragPresentation.neck),
+            kineticAmount: Double(dragPresentation.kinetic),
+            screenEdgeOutset: screenEdgeVisualOutset,
+            renderInset: borderRenderPadding
+        )
+    }
+    private var contentOffsetX: CGFloat {
+        guard dragPresentation.phase == .attached else { return semanticContentOffset }
+        let renderedWidth = contentBaseWidth
+            * horizontalLayout.contentScaleX
+            * contentDeformation.groupScaleX
+        let compensated = RailMetrics.compensatedDragContentOffset(
+            semanticOffset: semanticContentOffset,
+            dragDirection: dragDirection,
+            contentTravel: dragPresentation.contentTravel,
+            canvasExtraWidth: effectiveCanvasExtraWidth,
+            railWidth: currentRailWidth,
+            renderedContentWidth: renderedWidth,
+            borderPadding: borderRenderPadding
+        )
+        guard let neck = attachedNeckGeometry else { return compensated }
+        let bodyTarget = RailContentBodyPlacement.targetOffset(
+            railWidth: currentRailWidth,
+            renderedContentWidth: renderedWidth,
+            neckDistanceFromScreen: neck.distanceFromScreen,
+            edge: effectiveEdge,
+            freeSideWeight: contentDeformation.bodyPlacementWeight,
+            borderPadding: borderRenderPadding
+        )
+        let weight = contentDeformation.bodyPlacementWeight
+        return compensated + (bodyTarget - compensated) * weight
+    }
     private var shouldShowRailVisual: Bool {
         overlaySnapshot != nil || !inputVisualSuppressed
     }
@@ -291,7 +627,10 @@ struct RailView: View {
                 .contentShape(Rectangle())
                 .gesture(backgroundDragGesture)
 
-            VStack(spacing: RailMetrics.spacing(scale: usageStore.railScale, itemSpacing: usageStore.railItemSpacing)) {
+            VStack(
+                spacing: RailMetrics.spacing(scale: usageStore.railScale, itemSpacing: usageStore.railItemSpacing)
+                    * contentDeformation.spacingScale
+            ) {
                 ForEach(targets) { target in
                     let summary = usageStore.summary(for: target)
                     let accentHex = usageStore.accentHex(for: target)
@@ -334,17 +673,7 @@ struct RailView: View {
                         showTitle: usageStore.railShowTitle,
                         titleWidth: CGFloat(usageStore.railTitleWidth),
                         timeWidth: CGFloat(usageStore.railTimeWidth),
-                        scale: scale,
-                        mochiHorizontalStretch: dragPresentation.iconLocalHorizontalStretch,
-                        mochiVerticalScale: dragPresentation.iconLocalVerticalScale,
-                        mochiTextTracking: dragPresentation.textTracking
-                    )
-                    .offset(
-                        x: dragPresentation.phase == .attached
-                            ? (effectiveEdge == .right ? -1 : 1) * effectiveIconEdgeInset * scale
-                            : dragPresentation.phase == .wetting
-                                ? (effectiveEdge == .right ? -1 : 1) * effectiveIconEdgeInset * scale * dragPresentation.wettingSpread
-                                : 0
+                        scale: scale
                     )
                     .frame(height: RailMetrics.rowHeight(
                         scale: usageStore.railScale,
@@ -376,36 +705,37 @@ struct RailView: View {
                     .help(usageStore.webURL(for: target).map { "Open \($0.absoluteString)" } ?? "No web URL configured")
                 }
             }
-            .padding(.vertical, RailMetrics.verticalPadding(scale: usageStore.railScale, showRing: usageStore.railShowRing))
-            .frame(width: baseRailWidth)
+            .padding(.vertical, RailMetrics.edgePadding(scale: usageStore.railScale, amount: usageStore.railInnerPaddingY))
+            .frame(width: contentBaseWidth)
             .scaleEffect(
-                x: dragPresentation.wettingContentScaleX * dragPresentation.contentGroupScaleX,
-                y: dragPresentation.wettingContentScaleY * dragPresentation.contentGroupScaleY,
-                anchor: .center
+                x: horizontalLayout.contentScaleX * dragPresentation.wettingContentScaleX * contentDeformation.groupScaleX,
+                y: dragPresentation.wettingContentScaleY * contentDeformation.groupScaleY,
+                anchor: dragPresentation.phase == .attached ? contentAttachedAnchor : .center
             )
             .rotation3DEffect(
-                .degrees((effectiveEdge == .right ? 1.0 : -1.0) * dragPresentation.contentPerspectiveDegrees),
+                .degrees((effectiveEdge == .right ? 1.0 : -1.0) * contentDeformation.perspectiveDegrees),
                 axis: (x: 0, y: 1, z: 0),
-                anchor: .center,
-                perspective: 0.50
+                anchor: dragPresentation.phase == .attached ? contentAttachedAnchor : .center,
+                perspective: 0.42
             )
-            .frame(
-                maxWidth: .infinity,
-                alignment: dragPresentation.phase == .attached
-                    ? (effectiveEdge == .left ? .leading : .trailing)
-                    : .center
-            )
-            .offset(
-                x: dragPresentation.phase == .attached
-                    ? dragDirection * dragPresentation.contentTravel
-                    : 0
-            )
+            .frame(maxWidth: .infinity, alignment: .center)
+            .offset(x: contentOffsetX)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .mask { railContentMask }
         }
+        .scaleEffect(
+            x: dragPresentation.ruptureScaleX,
+            y: dragPresentation.ruptureScaleY,
+            anchor: .center
+        )
+        .offset(y: dragPresentation.ruptureYOffset)
         .frame(
-            width: baseRailWidth + effectiveCanvasExtraWidth,
-            height: baseRailHeight + effectiveVisualOutset * 2
+            width: currentRailWidth,
+            height: RailMetrics.renderedHeight(
+                baseHeight: baseRailHeight,
+                visualOutset: effectiveVisualOutset,
+                borderPadding: borderRenderPadding
+            )
         )
         .opacity(shouldShowRailVisual ? 1 : 0)
         .allowsHitTesting(
@@ -418,6 +748,10 @@ struct RailView: View {
                 onOpenSettings()
             } label: {
                 Label("Settings…", systemImage: "slider.horizontal.3")
+            }
+
+            Menu("Display Account") {
+                displayAccountMenu()
             }
 
             Menu("Accounts") {
@@ -451,102 +785,63 @@ struct RailView: View {
         .environment(\.locale, usageStore.appLanguage.locale)
     }
 
+    private func canonicalRailShape(
+        stretch: Double,
+        neck: Double,
+        kinetic: Double = 0
+    ) -> EdgeRailShape {
+        EdgeRailShape(
+            edge: effectiveEdge,
+            screenEdgeAmount: usageStore.railScreenEdgeShape,
+            screenEdgeCurvature: usageStore.railScreenEdgeCurvature,
+            innerEdgeAmount: usageStore.railInnerShape,
+            cornerRadius: usageStore.railCornerRadius * usageStore.railScale,
+            scallopDepth: usageStore.railScallopDepth * usageStore.railScale,
+            scallopRadius: usageStore.railScallopRadius * usageStore.railScale,
+            smoothing: usageStore.railScallopSmoothing,
+            stretchAmount: stretch,
+            neckAmount: neck,
+            kineticAmount: kinetic,
+            screenEdgeOutset: screenEdgeVisualOutset,
+            renderInset: borderRenderPadding
+        )
+    }
+
     @ViewBuilder
     private var railContentMask: some View {
-        if dragPresentation.phase == .attached {
-            EdgeRailShape(
-                edge: effectiveEdge,
-                screenEdgeAmount: usageStore.railScreenEdgeShape,
-                innerEdgeAmount: usageStore.railInnerShape,
-                cornerRadius: usageStore.railCornerRadius * usageStore.railScale,
-                scallopDepth: usageStore.railScallopDepth * usageStore.railScale,
-                scallopRadius: usageStore.railScallopRadius * usageStore.railScale,
-                smoothing: usageStore.railScallopSmoothing,
-                stretchAmount: Double(dragPresentation.shapeStretch),
-                neckAmount: Double(dragPresentation.neck),
-                kineticAmount: Double(dragPresentation.kinetic),
-                screenEdgeOutset: screenEdgeVisualOutset
+        switch dragPresentation.phase {
+        case .attached:
+            canonicalRailShape(
+                stretch: Double(dragPresentation.shapeStretch),
+                neck: Double(dragPresentation.neck),
+                kinetic: Double(dragPresentation.kinetic)
             )
             .fill(Color.white)
-        } else {
-            Rectangle().fill(Color.white)
+        case .wetting:
+            canonicalRailShape(stretch: 0, neck: 0)
+                .fill(Color.white)
+        case .floating, .returning, .docking:
+            FloatingRailShape(
+                impact: Double(dragPresentation.settle),
+                kinetic: Double(dragPresentation.kinetic)
+            )
+            .fill(Color.white)
         }
     }
 
     @ViewBuilder
     private var railBackground: some View {
         if dragPresentation.phase == .attached {
-            let shape = EdgeRailShape(
-                edge: effectiveEdge,
-                screenEdgeAmount: usageStore.railScreenEdgeShape,
-                innerEdgeAmount: usageStore.railInnerShape,
-                cornerRadius: usageStore.railCornerRadius * usageStore.railScale,
-                scallopDepth: usageStore.railScallopDepth * usageStore.railScale,
-                scallopRadius: usageStore.railScallopRadius * usageStore.railScale,
-                smoothing: usageStore.railScallopSmoothing,
-                stretchAmount: Double(dragPresentation.shapeStretch),
-                neckAmount: Double(dragPresentation.neck),
-                kineticAmount: Double(dragPresentation.kinetic),
-                screenEdgeOutset: screenEdgeVisualOutset
+            let shape = canonicalRailShape(
+                stretch: Double(dragPresentation.shapeStretch),
+                neck: Double(dragPresentation.neck),
+                kinetic: Double(dragPresentation.kinetic)
             )
-            let freeBorder = EdgeRailFreeBorderShape(
-                edge: effectiveEdge,
-                screenEdgeAmount: usageStore.railScreenEdgeShape,
-                innerEdgeAmount: usageStore.railInnerShape,
-                cornerRadius: usageStore.railCornerRadius * usageStore.railScale,
-                scallopDepth: usageStore.railScallopDepth * usageStore.railScale,
-                scallopRadius: usageStore.railScallopRadius * usageStore.railScale,
-                smoothing: usageStore.railScallopSmoothing,
-                stretchAmount: Double(dragPresentation.shapeStretch),
-                neckAmount: Double(dragPresentation.neck),
-                kineticAmount: Double(dragPresentation.kinetic),
-                screenEdgeOutset: screenEdgeVisualOutset
-            )
-
-            shape
-                .fill(ProviderBrand.railFill(theme: usageStore.theme, opacity: usageStore.railBackgroundOpacity))
-                .overlay {
-                    if usageStore.theme != .transparentFloating && usageStore.railBackgroundOpacity > 0.02 {
-                        shape
-                            .fill(
-                                LinearGradient(
-                                    colors: usageStore.theme == .light
-                                        ? [Color.white.opacity(0.36), Color.clear, Color.black.opacity(0.04)]
-                                        : [Color.white.opacity(0.055), Color.clear, Color.black.opacity(0.20)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                    }
-                }
-                .overlay { edgeDecoration(freeBorder) }
+            railSurface(shape)
         } else if dragPresentation.phase == .wetting {
             let spread = dragPresentation.wettingSpread
             let contact = dragPresentation.wettingContact
-            let finalShape = EdgeRailShape(
-                edge: effectiveEdge,
-                screenEdgeAmount: usageStore.railScreenEdgeShape,
-                innerEdgeAmount: usageStore.railInnerShape,
-                cornerRadius: usageStore.railCornerRadius * usageStore.railScale,
-                scallopDepth: usageStore.railScallopDepth * usageStore.railScale,
-                scallopRadius: usageStore.railScallopRadius * usageStore.railScale,
-                smoothing: usageStore.railScallopSmoothing,
-                stretchAmount: 0,
-                neckAmount: 0,
-                screenEdgeOutset: screenEdgeVisualOutset
-            )
-            let finalBorder = EdgeRailFreeBorderShape(
-                edge: effectiveEdge,
-                screenEdgeAmount: usageStore.railScreenEdgeShape,
-                innerEdgeAmount: usageStore.railInnerShape,
-                cornerRadius: usageStore.railCornerRadius * usageStore.railScale,
-                scallopDepth: usageStore.railScallopDepth * usageStore.railScale,
-                scallopRadius: usageStore.railScallopRadius * usageStore.railScale,
-                smoothing: usageStore.railScallopSmoothing,
-                stretchAmount: 0,
-                neckAmount: 0,
-                screenEdgeOutset: screenEdgeVisualOutset
-            )
+            let finalShape = canonicalRailShape(stretch: 0, neck: 0)
             let contactDrop = FloatingRailShape(
                 impact: Double(dragPresentation.settle),
                 kinetic: Double(dragPresentation.kinetic)
@@ -554,9 +849,7 @@ struct RailView: View {
             let contactAnchor: UnitPoint = effectiveEdge == .left ? .leading : .trailing
 
             ZStack {
-                contactDrop
-                    .fill(ProviderBrand.railFill(theme: usageStore.theme, opacity: usageStore.railBackgroundOpacity))
-                    .overlay { edgeDecoration(contactDrop) }
+                railSurface(contactDrop)
                     .scaleEffect(
                         x: 1 - 0.44 * contact,
                         y: 1 - 0.20 * contact,
@@ -564,22 +857,7 @@ struct RailView: View {
                     )
                     .opacity(Double(1 - spread))
 
-                finalShape
-                    .fill(ProviderBrand.railFill(theme: usageStore.theme, opacity: usageStore.railBackgroundOpacity))
-                    .overlay {
-                        if usageStore.theme != .transparentFloating && usageStore.railBackgroundOpacity > 0.02 {
-                            finalShape.fill(
-                                LinearGradient(
-                                    colors: usageStore.theme == .light
-                                        ? [Color.white.opacity(0.36), Color.clear, Color.black.opacity(0.04)]
-                                        : [Color.white.opacity(0.065), Color.clear, Color.black.opacity(0.21)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                        }
-                    }
-                    .overlay { edgeDecoration(finalBorder) }
+                railSurface(finalShape)
                     .scaleEffect(
                         x: 0.24 + 0.76 * spread,
                         y: 0.54 + 0.46 * spread,
@@ -593,32 +871,114 @@ struct RailView: View {
                 impact: Double(dragPresentation.settle),
                 kinetic: Double(dragPresentation.kinetic)
             )
-            floatingShape
-                .fill(ProviderBrand.railFill(theme: usageStore.theme, opacity: usageStore.railBackgroundOpacity))
-                .overlay {
-                    floatingShape.fill(
-                        LinearGradient(
-                            colors: usageStore.theme == .light
-                                ? [Color.white.opacity(0.42), Color.clear, Color.black.opacity(0.04)]
-                                : [Color.white.opacity(0.085), Color.clear, Color.black.opacity(0.24)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                }
-                .overlay { edgeDecoration(floatingShape) }
+            railSurface(floatingShape)
                 .scaleEffect(
-                    x: 1 + dragPresentation.settle * 0.055,
-                    y: 1 - dragPresentation.settle * 0.030,
+                    x: FloatingRailGeometry.bodyScaleX(impact: Double(dragPresentation.settle)),
+                    y: FloatingRailGeometry.bodyScaleY(impact: Double(dragPresentation.settle)),
                     anchor: .center
                 )
         }
     }
 
     @ViewBuilder
+    private func railSurface(_ shape: EdgeRailShape) -> some View {
+        shape
+            .fill(ProviderBrand.railFill(theme: usageStore.theme, opacity: usageStore.railBackgroundOpacity))
+            .overlay { materialDepth(shape) }
+            .overlay { attachedEdgeDecoration(shape) }
+    }
+
+    @ViewBuilder
+    private func railSurface<S: Shape>(_ shape: S) -> some View {
+        shape
+            .fill(ProviderBrand.railFill(theme: usageStore.theme, opacity: usageStore.railBackgroundOpacity))
+            .overlay { materialDepth(shape) }
+            .overlay { edgeDecoration(shape) }
+    }
+
+    @ViewBuilder
+    private func materialDepth<S: Shape>(_ shape: S) -> some View {
+        let s = usageStore.railScale
+        switch usageStore.railMaterialMode {
+        case .standard:
+            shape.fill(
+                LinearGradient(
+                    colors: usageStore.theme == .light
+                        ? [Color.white.opacity(0.48), Color.white.opacity(0.10), Color.black.opacity(0.10)]
+                        : [Color.white.opacity(0.13), Color.clear, Color.black.opacity(0.34)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            EmptyView()
+        case .waterdrop:
+            shape.fill(
+                LinearGradient(
+                    colors: [Color.white.opacity(0.34), Color.white.opacity(0.06), Color.black.opacity(0.28)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            shape.fill(
+                RadialGradient(
+                    colors: [Color.white.opacity(0.34), Color.white.opacity(0.06), Color.clear],
+                    center: .topLeading,
+                    startRadius: 0,
+                    endRadius: 150 * s
+                )
+            )
+            EmptyView()
+        case .space:
+            shape.fill(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.035, green: 0.045, blue: 0.13).opacity(0.97),
+                        Color(red: 0.13, green: 0.065, blue: 0.24).opacity(0.84),
+                        Color(red: 0.015, green: 0.022, blue: 0.075).opacity(0.88)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            shape.fill(
+                RadialGradient(
+                    colors: [Color(red: 0.48, green: 0.58, blue: 1.0).opacity(0.17), Color.clear],
+                    center: .topTrailing,
+                    startRadius: 0,
+                    endRadius: 140 * s
+                )
+            )
+            SpaceSurfaceDetail(scale: s)
+                .mask(shape.fill(Color.white))
+        case .bar3D:
+            shape.fill(
+                LinearGradient(
+                    colors: [
+                        Color.white.opacity(0.34),
+                        Color.white.opacity(0.08),
+                        Color.black.opacity(0.12),
+                        Color.black.opacity(0.42)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+            shape.fill(
+                LinearGradient(
+                    colors: [Color.white.opacity(0.18), Color.clear, Color.black.opacity(0.24)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+            .offset(y: 0.55 * s)
+            .mask(shape.fill(Color.white))
+        }
+    }
+
+    @ViewBuilder
     private func edgeDecoration<S: Shape>(_ path: S) -> some View {
         let color = railEdgeColor
-        switch usageStore.railEdgeStyle {
+        switch effectiveEdgeStyle {
         case .off:
             EmptyView()
         case .simple:
@@ -640,26 +1000,60 @@ struct RailView: View {
             .shadow(color: color.opacity(min(0.9, usageStore.railGlowOpacity + 0.18)), radius: max(3, usageStore.railGlowRadius * usageStore.railScale))
         case .glass:
             path.stroke(
-                glassEdgeColor.opacity(max(usageStore.railGlowOpacity * 0.34, 0.10)),
-                style: StrokeStyle(
-                    lineWidth: max(usageStore.railEdgeWidth * usageStore.railScale * 2.15, 1.15),
-                    lineCap: .round,
-                    lineJoin: .round
-                )
-            )
-            .blur(radius: max(usageStore.railGlowRadius * usageStore.railScale * 0.16, 0.45))
-
-            path.stroke(
                 glassEdgeColor.opacity(max(usageStore.railEdgeOpacity, 0.46)),
                 style: StrokeStyle(
-                    lineWidth: max(usageStore.railEdgeWidth * usageStore.railScale, 0.58),
+                    lineWidth: max(usageStore.railEdgeWidth * usageStore.railScale * 1.10, 0.66),
                     lineCap: .round,
                     lineJoin: .round
                 )
             )
             .shadow(
-                color: glassEdgeColor.opacity(usageStore.railGlowOpacity * 0.62),
-                radius: usageStore.railGlowRadius * 0.58 * usageStore.railScale
+                color: glassEdgeColor.opacity(max(usageStore.railGlowOpacity * 0.62, 0.10)),
+                radius: max(usageStore.railGlowRadius * 0.58 * usageStore.railScale, 0.55)
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func attachedEdgeDecoration(_ path: EdgeRailShape) -> some View {
+        let color = railEdgeColor
+        let scale = usageStore.railScale
+        let desiredWidth = max(usageStore.railEdgeWidth * scale, 0.35)
+        let insideWidth = desiredWidth * 2
+        let visibleBorder = EdgeRailVisibleBorderShape(base: path)
+
+        switch effectiveEdgeStyle {
+        case .off:
+            EmptyView()
+        case .simple:
+            visibleBorder.stroke(
+                color.opacity(usageStore.railEdgeOpacity),
+                style: StrokeStyle(lineWidth: insideWidth, lineCap: .round, lineJoin: .round)
+            )
+            .mask { path.fill(Color.white) }
+        case .soft:
+            visibleBorder.stroke(
+                color.opacity(usageStore.railEdgeOpacity),
+                style: StrokeStyle(lineWidth: max(insideWidth, 0.8), lineCap: .round, lineJoin: .round)
+            )
+            .mask { path.fill(Color.white) }
+            .shadow(color: color.opacity(usageStore.railGlowOpacity), radius: usageStore.railGlowRadius * scale)
+        case .neon:
+            visibleBorder.stroke(
+                color.opacity(min(1, usageStore.railEdgeOpacity + 0.14)),
+                style: StrokeStyle(lineWidth: max(insideWidth, 1.1), lineCap: .round, lineJoin: .round)
+            )
+            .mask { path.fill(Color.white) }
+            .shadow(color: color.opacity(min(0.9, usageStore.railGlowOpacity + 0.18)), radius: max(3, usageStore.railGlowRadius * scale))
+        case .glass:
+            visibleBorder.stroke(
+                glassEdgeColor.opacity(max(usageStore.railEdgeOpacity, 0.46)),
+                style: StrokeStyle(lineWidth: max(insideWidth * 1.10, 1.16), lineCap: .round, lineJoin: .round)
+            )
+            .mask { path.fill(Color.white) }
+            .shadow(
+                color: glassEdgeColor.opacity(max(usageStore.railGlowOpacity * 0.62, 0.10)),
+                radius: max(usageStore.railGlowRadius * 0.58 * scale, 0.55)
             )
         }
     }
@@ -711,6 +1105,13 @@ struct RailView: View {
                     dragOriginEdge = placement.edge
                     breakAnchorVerticalPosition = usageStore.railVerticalPosition
                     dragPhase = .attached
+                    dragVisualStartedAt = Date.timeIntervalSinceReferenceDate
+                    dragParticleSeed = UInt64.random(in: UInt64.min...UInt64.max)
+                    lastGrabPoint = overlayLocalMousePoint(screen: screen)
+                    dragVelocityTracker.begin(translation: value.translation, timestamp: now)
+                    breakVisualStartedAt = 0
+                    breakVelocity = .zero
+                    breakOrigin = .zero
                     inputVisualSuppressed = true
                     let originCenter = overlayCenter(
                         edge: placement.edge,
@@ -725,6 +1126,8 @@ struct RailView: View {
                 }
 
                 let visibleFrame = screen.visibleFrame
+                lastGrabPoint = overlayLocalMousePoint(screen: screen)
+                _ = dragVelocityTracker.update(translation: value.translation, timestamp: now)
                 let verticalTravel = max(visibleFrame.height - baseRailHeight - 16, 1)
                 let verticalDelta = Double(value.translation.height / verticalTravel)
                 let verticalTarget = min(
@@ -770,6 +1173,9 @@ struct RailView: View {
                     if screenProgress >= RailMotionRuntime.surfaceBreakThreshold {
                         dragPhase = .floating
                         breakAnchorVerticalPosition = verticalTarget
+                        breakVisualStartedAt = Date.timeIntervalSinceReferenceDate
+                        breakVelocity = dragVelocityTracker.velocity
+                        breakOrigin = floatingTarget
                         let breakFrame = motionRuntime.breakSurface(
                             floatingCenter: floatingTarget,
                             verticalPosition: verticalTarget,
@@ -932,6 +1338,21 @@ struct RailView: View {
         frame: RailMotionFrame,
         sideProgress: CGFloat
     ) {
+        let presentation = RailDragPresentation(
+            phase: phase,
+            rawProgress: frame.rawProgress,
+            canvasExtraWidth: frame.canvasExtraWidth,
+            stretch: frame.stretch,
+            detach: frame.detach,
+            settle: frame.impact,
+            sideProgress: sideProgress,
+            contentTravel: frame.contentTravel,
+            kinetic: frame.kinetic,
+            breakPulse: frame.breakPulse,
+            wetting: frame.wetting
+        )
+        let velocitySampledAt = ProcessInfo.processInfo.systemUptime
+        let liveVelocity = dragVelocityTracker.decayedVelocity(at: velocitySampledAt)
         onDragVisualStateChange(
             RailDragVisualSnapshot(
                 phase: phase,
@@ -946,10 +1367,34 @@ struct RailView: View {
                 sideProgress: sideProgress,
                 contentTravel: frame.contentTravel,
                 kinetic: frame.kinetic,
+                shapeStretch: presentation.shapeStretch,
+                neck: presentation.neck,
+                breakPulse: frame.breakPulse,
                 floatingCenterX: frame.floatingCenterX,
                 floatingCenterY: frame.floatingCenterY,
                 residue: frame.residue,
-                wetting: frame.wetting
+                wetting: frame.wetting,
+                dragStartedAt: dragVisualStartedAt,
+                particleSeed: dragParticleSeed,
+                grabX: lastGrabPoint.x,
+                grabY: lastGrabPoint.y,
+                dragVelocityX: liveVelocity.dx,
+                dragVelocityY: liveVelocity.dy,
+                dragVelocitySampledAt: velocitySampledAt,
+                emitsDroplets: usageStore.railDropletsEnabled
+                    && (phase == .attached || phase == .floating)
+                    && dragStartVerticalPosition != nil
+                    && !suppressUntilGestureEnds,
+                breakStartedAt: breakVisualStartedAt,
+                breakVelocityX: breakVelocity.dx,
+                breakVelocityY: breakVelocity.dy,
+                breakOriginX: breakOrigin.x,
+                breakOriginY: breakOrigin.y,
+                emitsBreakSplash: usageStore.railDropletsEnabled
+                    && breakVisualStartedAt > 0
+                    && Date.timeIntervalSinceReferenceDate - breakVisualStartedAt <= RailBreakDropletEmitter.maxLifetime
+                    && phase != .attached
+                    && phase != .wetting
             )
         )
     }
@@ -959,12 +1404,22 @@ struct RailView: View {
         let sequence = settleSequence
         breakPulseTask = Task { @MainActor in
             var frameCount = 0
-            while !Task.isCancelled, settleSequence == sequence, dragPhase == .floating, frameCount < 54 {
+            while !Task.isCancelled, settleSequence == sequence, dragPhase == .floating, frameCount < 84 {
                 let frame = motionRuntime.tickFloating(timestamp: ProcessInfo.processInfo.systemUptime)
                 publishDragVisual(phase: .floating, edge: edge, frame: frame, sideProgress: 0)
                 frameCount += 1
-                if frameCount > 18, abs(frame.residue) < 0.025, frame.impact < 0.025 { break }
-                try? await Task.sleep(nanoseconds: 8_333_333)
+                let particlesFinished = breakVisualStartedAt <= 0
+                    || Date.timeIntervalSinceReferenceDate - breakVisualStartedAt > RailBreakDropletEmitter.maxLifetime
+                if frameCount > 20,
+                   particlesFinished,
+                   abs(frame.residue) < 0.025,
+                   frame.impact < 0.025,
+                   abs(frame.breakPulse) < 0.025 {
+                    break
+                }
+                // F17.20 keeps the short post-break particle lifetime alive at display-rate,
+                // then fully stops. No TimelineView remains once the overlay is dismissed.
+                try? await Task.sleep(nanoseconds: 16_666_667)
             }
             if settleSequence == sequence { breakPulseTask = nil }
         }
@@ -1083,6 +1538,15 @@ struct RailView: View {
         return CGPoint(x: centerX, y: centerY)
     }
 
+    private func overlayLocalMousePoint(screen: NSScreen) -> CGPoint {
+        let mouse = NSEvent.mouseLocation
+        let frame = screen.frame
+        return CGPoint(
+            x: min(max(mouse.x - frame.minX, 0), frame.width),
+            y: min(max(frame.maxY - mouse.y, 0), frame.height)
+        )
+    }
+
     private func clampedFloatingCenter(
         originEdge: DockEdge,
         verticalPosition: Double,
@@ -1127,6 +1591,43 @@ struct RailView: View {
         crossedScreenCenter = false
         if !keepSuppression {
             suppressUntilGestureEnds = false
+        }
+    }
+
+    @ViewBuilder
+    private func displayAccountMenu() -> some View {
+        let candidates = usageStore.displayAccountCandidates()
+        if candidates.isEmpty {
+            Label("Choose up to 3 accounts in Settings", systemImage: "person.2")
+                .foregroundStyle(.secondary)
+        } else {
+            ForEach(candidates) { account in
+                let state = usageStore.displayAuthenticationState(for: account)
+                Button {
+                    usageStore.selectDisplayAccount(account.id)
+                } label: {
+                    Label(
+                        "\(account.provider.displayName) · \(account.name)",
+                        systemImage: usageStore.isActiveDisplayAccount(account.id) ? "checkmark.circle.fill" : "circle"
+                    )
+                }
+                .disabled(state != .valid)
+
+                if state == .required {
+                    Label("Authentication required", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.secondary)
+                } else if state == .checking {
+                    Label("Waiting for live authentication", systemImage: "clock")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+
+        Divider()
+        Button {
+            onOpenSettings()
+        } label: {
+            Label("Manage Display Accounts…", systemImage: "person.crop.circle.badge.checkmark")
         }
     }
 
@@ -1212,6 +1713,273 @@ struct RailView: View {
     }
 }
 
+struct RailContentDeformation: Equatable {
+    let neckZone: CGFloat
+    let midZone: CGFloat
+    let freeSideZone: CGFloat
+    let groupScaleX: CGFloat
+    let groupScaleY: CGFloat
+    let spacingScale: CGFloat
+    let freeSideTranslation: CGFloat
+    let bodyPlacementWeight: CGFloat
+    let perspectiveDegrees: Double
+}
+
+enum RailContentDeformationField {
+    static func resolve(
+        stretch: CGFloat,
+        neck: CGFloat,
+        kinetic: CGFloat,
+        detach: CGFloat,
+        scale: CGFloat,
+        attached: Bool
+    ) -> RailContentDeformation {
+        guard attached else {
+            return RailContentDeformation(
+                neckZone: 0,
+                midZone: 0,
+                freeSideZone: 0,
+                groupScaleX: 1,
+                groupScaleY: 1,
+                spacingScale: 1,
+                freeSideTranslation: 0,
+                bodyPlacementWeight: 0,
+                perspectiveDegrees: 0
+            )
+        }
+
+        let s = min(max(stretch, 0), 1.34)
+        let n = min(max(neck, 0), 1)
+        let k = min(max(kinetic, 0), 1)
+        let d = min(max(detach, 0), 1)
+        let raw = min(max(s * 0.62 + n * 0.42 + k * 0.12 - d * 0.035, 0), 1)
+        let tension = smoothStep(raw)
+
+        // Three-zone field: the throat deliberately receives very little deformation,
+        // the middle eases into motion, and the free/inward side carries most of the
+        // stretch. This keeps icons out of the hourglass waist while the visual body can
+        // still pinch aggressively there.
+        let neckZone = tension * 0.18
+        let midZone = smoothStep(min(max((tension - 0.04) / 0.96, 0), 1)) * 0.58
+        let freeSideZone = smoothStep(min(max((tension - 0.01) / 0.99, 0), 1))
+        // F17.21: deform the content cluster as one body. Individual provider icons/tiles
+        // stay internally rigid; the outer cluster carries the mochi stretch and translation.
+        let groupScaleX = 1 + 0.014 * neckZone + 0.090 * midZone + 0.225 * freeSideZone
+        let groupScaleY = 1 - 0.010 * neckZone - 0.030 * midZone - 0.060 * freeSideZone
+        let spacingScale = 1 + 0.055 * midZone + 0.060 * freeSideZone
+        let freeSideTranslation = scale * (0.8 * neckZone + 3.4 * midZone + 8.5 * freeSideZone)
+        let bodyPlacementWeight = min(max(0.12 * midZone + 0.88 * freeSideZone, 0), 1)
+        let perspective = Double(2.0 * midZone + 3.4 * freeSideZone)
+
+        return RailContentDeformation(
+            neckZone: neckZone,
+            midZone: midZone,
+            freeSideZone: freeSideZone,
+            groupScaleX: groupScaleX,
+            groupScaleY: groupScaleY,
+            spacingScale: spacingScale,
+            freeSideTranslation: freeSideTranslation,
+            bodyPlacementWeight: bodyPlacementWeight,
+            perspectiveDegrees: perspective
+        )
+    }
+
+    private static func smoothStep(_ value: CGFloat) -> CGFloat {
+        let t = min(max(value, 0), 1)
+        return t * t * (3 - 2 * t)
+    }
+}
+
+struct RailNeckMinimumGeometry: Equatable {
+    let distanceFromScreen: CGFloat
+    let upperSurfaceY: CGFloat
+    let lowerSurfaceY: CGFloat
+    let centerY: CGFloat
+    let thickness: CGFloat
+}
+
+struct EdgeRailSemanticProfile: Equatable {
+    let valley: CGFloat
+    let outwardSpread: CGFloat
+    let inwardBubble: CGFloat
+
+    static func resolve(screenEdgeAmount: Double, screenEdgeCurvature: Double) -> EdgeRailSemanticProfile {
+        let shape = min(max(CGFloat(screenEdgeAmount), -1), 1)
+        let valleyOnlyCurvature = min(max(CGFloat(screenEdgeCurvature), -1), 0)
+        return EdgeRailSemanticProfile(
+            valley: -valleyOnlyCurvature,
+            outwardSpread: max(shape, 0),
+            inwardBubble: max(-shape, 0)
+        )
+    }
+}
+
+enum RailNeckGeometryResolver {
+    static func resolve(
+        in rect: CGRect,
+        edge: DockEdge,
+        screenEdgeAmount: Double,
+        screenEdgeCurvature: Double,
+        innerEdgeAmount: Double,
+        cornerRadius: Double,
+        scallopDepth: Double,
+        smoothing: Double,
+        stretchAmount: Double,
+        neckAmount: Double,
+        kineticAmount: Double,
+        screenEdgeOutset: CGFloat,
+        renderInset: CGFloat
+    ) -> RailNeckMinimumGeometry {
+        let stretch = min(max(CGFloat(stretchAmount), 0), 1.2)
+        let neck = min(max(CGFloat(neckAmount), 0), 1)
+        let kinetic = min(max(CGFloat(kineticAmount), 0), 1)
+        let semantic = EdgeRailSemanticProfile.resolve(
+            screenEdgeAmount: screenEdgeAmount,
+            screenEdgeCurvature: screenEdgeCurvature
+        )
+        let valley = semantic.valley
+        let outwardSpread = semantic.outwardSpread
+        let inwardBubble = semantic.inwardBubble
+        let visualOutset = max(screenEdgeOutset, 0)
+        let safeRenderInset = max(renderInset, 0)
+        let nominalMinY = rect.minY + visualOutset + safeRenderInset
+        let nominalMaxY = rect.maxY - visualOutset - safeRenderInset
+        let nominalHeight = max(nominalMaxY - nominalMinY, 1)
+        let centerY = (nominalMinY + nominalMaxY) * 0.5
+        let baseRadius = min(CGFloat(cornerRadius), rect.width * 0.42, nominalHeight * 0.18)
+        let radius = max(2, baseRadius * (1 - 0.28 * neck))
+        let baseDepth = min(CGFloat(scallopDepth), nominalHeight * 0.30)
+        let depth = min(baseDepth * (1 + 0.20 * stretch + 0.26 * neck), nominalHeight * 0.36)
+        let screenRaw = shapeInset(screenEdgeAmount, depth: depth)
+        let innerRaw = shapeInset(innerEdgeAmount, depth: depth)
+        let baseline = min(screenRaw, innerRaw)
+        let screenInset = screenRaw - baseline
+        let freeEndCompression = min(
+            nominalHeight * (0.014 * stretch + 0.018 * neck + 0.008 * kinetic),
+            nominalHeight * 0.055
+        )
+        let innerInset = min(innerRaw - baseline + freeEndCompression, nominalHeight * 0.16)
+        let pinchCurve = CGFloat(pow(Double(neck), 1.18))
+        let screenLobePinch = min(
+            nominalHeight * (0.018 * stretch + 0.070 * pinchCurve + 0.080 * inwardBubble),
+            nominalHeight * 0.160
+        )
+        let screenTopY = min(nominalMinY - visualOutset + screenInset + screenLobePinch, centerY - 2)
+        let screenBottomY = max(nominalMaxY + visualOutset - screenInset - screenLobePinch, centerY + 2)
+        let innerTopY = nominalMinY + innerInset
+        let innerBottomY = nominalMaxY - innerInset
+        let span = max(rect.width - radius, 1)
+        let concavity = min(
+            max(
+                0.54 + 0.16 * outwardSpread + 0.34 * inwardBubble + 0.14 * neck + 0.05 * stretch
+                    + 0.34 * valley,
+                0.18
+            ),
+            0.98
+        )
+        let stretchNormalized = min(max(stretch / 1.05, 0), 1)
+        let stretchRoundness = stretchNormalized * stretchNormalized * (3 - 2 * stretchNormalized)
+        let neckRun = min(
+            max(
+                span * (
+                    0.18 +
+                    0.065 * outwardSpread -
+                    0.045 * inwardBubble +
+                    0.160 * neck +
+                    0.120 * stretchRoundness +
+                    0.035 * kinetic +
+                    0.075 * valley
+                ),
+                radius * (1.10 - 0.35 * inwardBubble)
+            ),
+            span * 0.56
+        )
+        let throatProgress = min(
+            max(0.72 + 0.18 * concavity + 0.14 * valley + 0.05 * inwardBubble, 0.46),
+            0.96
+        )
+        let tensionRaw = min(max(neck * 0.68 + stretchRoundness * 0.54 + kinetic * 0.10, 0), 1)
+        let surfaceTension = tensionRaw * tensionRaw * (3 - 2 * tensionRaw)
+        let throatPinch = min(
+            nominalHeight * (
+                0.030 * stretch +
+                0.365 * pinchCurve +
+                0.045 * surfaceTension +
+                0.014 * kinetic
+            ),
+            nominalHeight * 0.405
+        )
+        let minimumHalfGap = max(0.90, 1.70 - 0.80 * surfaceTension)
+        let upperY = min(
+            screenTopY + (innerTopY - screenTopY) * throatProgress + throatPinch,
+            centerY - minimumHalfGap
+        )
+        let lowerY = max(
+            screenBottomY + (innerBottomY - screenBottomY) * throatProgress - throatPinch,
+            centerY + minimumHalfGap
+        )
+        return RailNeckMinimumGeometry(
+            distanceFromScreen: neckRun,
+            upperSurfaceY: upperY,
+            lowerSurfaceY: lowerY,
+            centerY: (upperY + lowerY) * 0.5,
+            thickness: max(lowerY - upperY, 0)
+        )
+    }
+
+    private static func shapeInset(_ amount: Double, depth: CGFloat) -> CGFloat {
+        let normalized = min(max(CGFloat(amount), -1), 1)
+        return depth * (0.5 - normalized * 0.5)
+    }
+}
+
+enum RailContentBodyPlacement {
+    static func targetOffset(
+        railWidth: CGFloat,
+        renderedContentWidth: CGFloat,
+        neckDistanceFromScreen: CGFloat,
+        edge: DockEdge,
+        freeSideWeight: CGFloat,
+        borderPadding: CGFloat
+    ) -> CGFloat {
+        let width = max(railWidth, 1)
+        let direction: CGFloat = edge == .left ? 1 : -1
+        let screenX: CGFloat = edge == .left ? 0 : width
+        let freeTipX: CGFloat = edge == .left ? width : 0
+        let neckX = screenX + direction * min(max(neckDistanceFromScreen, 0), width)
+        let bodyProgress = min(max(0.56 + 0.12 * freeSideWeight, 0.56), 0.70)
+        let rawCenter = neckX + (freeTipX - neckX) * bodyProgress
+        let safety = max(borderPadding + 1, 1)
+        let half = min(max(renderedContentWidth * 0.5, 0), width * 0.5)
+        let minCenter = min(half + safety, width * 0.5)
+        let maxCenter = max(width - half - safety, width * 0.5)
+        let clampedCenter = min(max(rawCenter, minCenter), maxCenter)
+        return clampedCenter - width * 0.5
+    }
+}
+
+enum RailBreakVisualTransform {
+    static func scaleX(for pulse: CGFloat) -> CGFloat {
+        let (splash, rebound) = components(for: pulse)
+        return 1 + 0.16 * splash - 0.070 * rebound
+    }
+
+    static func scaleY(for pulse: CGFloat) -> CGFloat {
+        let (splash, rebound) = components(for: pulse)
+        return 1 - 0.105 * splash + 0.075 * rebound
+    }
+
+    static func yOffset(for pulse: CGFloat) -> CGFloat {
+        let (splash, rebound) = components(for: pulse)
+        return 5.5 * splash - 2.0 * rebound
+    }
+
+    private static func components(for pulse: CGFloat) -> (splash: CGFloat, rebound: CGFloat) {
+        let clamped = min(max(pulse, -1), 1)
+        return (max(clamped, 0), max(-clamped, 0))
+    }
+}
+
 private struct RailDragPresentation {
     let phase: RailDragPhase
     let rawProgress: CGFloat
@@ -1222,12 +1990,17 @@ private struct RailDragPresentation {
     let sideProgress: CGFloat
     let contentTravel: CGFloat
     let kinetic: CGFloat
+    let breakPulse: CGFloat
     let wetting: CGFloat
 
     private var clampedStretch: CGFloat { min(max(stretch, 0), 1.34) }
     private var clampedDetach: CGFloat { min(max(detach, 0), 1) }
     private var clampedKinetic: CGFloat { min(max(kinetic, 0), 1) }
     private var clampedSettle: CGFloat { min(max(settle, 0), 1) }
+    private var signedBreakPulse: CGFloat {
+        guard phase == .floating else { return 0 }
+        return min(max(breakPulse, -1), 1)
+    }
 
     static func smoothStep01(_ value: CGFloat) -> CGFloat {
         let t = min(max(value, 0), 1)
@@ -1253,6 +2026,12 @@ private struct RailDragPresentation {
         guard phase == .wetting else { return 1 }
         return 1 - 0.07 * wettingContact + 0.07 * wettingSpread
     }
+
+    var ruptureScaleX: CGFloat { RailBreakVisualTransform.scaleX(for: signedBreakPulse) }
+
+    var ruptureScaleY: CGFloat { RailBreakVisualTransform.scaleY(for: signedBreakPulse) }
+
+    var ruptureYOffset: CGFloat { RailBreakVisualTransform.yOffset(for: signedBreakPulse) }
 
     var neck: CGFloat {
         let t = min(max((clampedStretch - 0.14) / 0.86, 0), 1)
@@ -1328,6 +2107,138 @@ private struct RailDragPresentation {
     }
 }
 
+enum FloatingRailGeometry {
+    static func bodyRect(in rect: CGRect) -> CGRect {
+        let inset = max(1.2, min(rect.width, rect.height) * 0.018)
+        return rect.insetBy(dx: inset, dy: inset)
+    }
+
+    static func cornerRadius(in rect: CGRect, impact: Double, kinetic: Double) -> CGFloat {
+        let body = bodyRect(in: rect)
+        let impactAmount = min(max(CGFloat(impact), 0), 1)
+        let kineticAmount = min(max(CGFloat(kinetic), 0), 1)
+        return max(
+            min(
+                body.width * (0.31 + 0.035 * kineticAmount),
+                body.height * (0.16 + 0.015 * impactAmount)
+            ),
+            7
+        )
+    }
+
+    static func undersideY(in rect: CGRect, x: CGFloat, impact: Double, kinetic: Double) -> CGFloat {
+        let body = bodyRect(in: rect)
+        let radius = min(cornerRadius(in: rect, impact: impact, kinetic: kinetic), body.width * 0.5, body.height * 0.5)
+        let clampedX = min(max(x, body.minX), body.maxX)
+        if clampedX >= body.minX + radius, clampedX <= body.maxX - radius {
+            return body.maxY
+        }
+        let centerX = clampedX < body.midX ? body.minX + radius : body.maxX - radius
+        let dx = clampedX - centerX
+        let arcY = sqrt(max(radius * radius - dx * dx, 0))
+        return body.maxY - radius + arcY
+    }
+
+    static func undersideOffsetFromCenter(
+        in rect: CGRect,
+        xOffset: CGFloat,
+        impact: Double,
+        kinetic: Double
+    ) -> CGFloat {
+        undersideY(
+            in: rect,
+            x: rect.midX + xOffset,
+            impact: impact,
+            kinetic: kinetic
+        ) - rect.midY
+    }
+
+    static func bodyScaleX(impact: Double) -> CGFloat {
+        1 + min(max(CGFloat(impact), 0), 1) * 0.055
+    }
+
+    static func bodyScaleY(impact: Double) -> CGFloat {
+        1 - min(max(CGFloat(impact), 0), 1) * 0.030
+    }
+
+    static func visualUndersideOffsetFromCenter(
+        in rect: CGRect,
+        xOffset: CGFloat,
+        impact: Double,
+        kinetic: Double,
+        breakPulse: CGFloat
+    ) -> CGFloat {
+        let innerScaleX = bodyScaleX(impact: impact)
+        let innerScaleY = bodyScaleY(impact: impact)
+        let ruptureScaleX = RailBreakVisualTransform.scaleX(for: breakPulse)
+        let ruptureScaleY = RailBreakVisualTransform.scaleY(for: breakPulse)
+        let visualScaleX = max(innerScaleX * ruptureScaleX, 0.01)
+        let localXOffset = xOffset / visualScaleX
+        let localSurface = undersideOffsetFromCenter(
+            in: rect,
+            xOffset: localXOffset,
+            impact: impact,
+            kinetic: kinetic
+        )
+        return localSurface * innerScaleY * ruptureScaleY
+            + RailBreakVisualTransform.yOffset(for: breakPulse)
+    }
+}
+
+enum FloatingSurfaceTensionGeometry {
+    static let bodyOverlap: CGFloat = 1.8
+
+    static func intensity(stretch: CGFloat, kinetic: CGFloat, breakPulse: CGFloat) -> CGFloat {
+        let stretchAmount = min(max(stretch, 0), 1)
+        let kineticAmount = min(max(kinetic, 0), 1)
+        let pulseAmount = max(min(max(breakPulse, -1), 1), 0)
+        return min(max(0.44 + 0.22 * stretchAmount + 0.24 * kineticAmount + 0.16 * pulseAmount, 0.42), 1)
+    }
+
+    static func sagOffset(
+        xOffset: CGFloat,
+        halfWidth: CGFloat,
+        intensity: CGFloat,
+        seed: UInt64
+    ) -> CGFloat {
+        let safeHalfWidth = max(halfWidth, 1)
+        let normalizedX = xOffset / safeHalfWidth
+        guard abs(normalizedX) <= 1 else { return 0 }
+
+        let amount = min(max(intensity, 0), 1)
+        let edgeEnvelope = CGFloat(pow(Double(max(1 - abs(normalizedX), 0)), 0.64))
+        let film = (0.72 + 0.88 * amount) * edgeEnvelope
+        let jitter = CGFloat(RailDragDropletEmitter.unit(seed, salt: 41) - 0.5) * 0.12
+        let centers: [CGFloat] = [-0.61 + jitter * 0.50, -0.19 - jitter * 0.35, 0.17 + jitter, 0.58 - jitter * 0.42]
+        let widths: [CGFloat] = [0.19, 0.23, 0.30, 0.21]
+        let baseAmplitudes: [CGFloat] = [3.8, 5.1, 8.4, 4.6]
+        let amplitudeScale = 0.60 + 0.40 * amount
+        var lobeSag: CGFloat = 0
+
+        for index in centers.indices {
+            let width = max(widths[index], 0.05)
+            let distance = abs((normalizedX - centers[index]) / width)
+            guard distance < 1 else { continue }
+            let t = 1 - distance * distance
+            let seedScale = 0.88 + 0.22 * CGFloat(RailDragDropletEmitter.unit(seed, salt: UInt64(50 + index)))
+            lobeSag = max(lobeSag, baseAmplitudes[index] * amplitudeScale * seedScale * t * t)
+        }
+        return film + lobeSag
+    }
+
+    static func maxSag(halfWidth: CGFloat, intensity: CGFloat, seed: UInt64) -> CGFloat {
+        let safeHalfWidth = max(halfWidth, 1)
+        return (0...48).reduce(CGFloat.zero) { current, index in
+            let progress = CGFloat(index) / 48
+            let xOffset = -safeHalfWidth + safeHalfWidth * 2 * progress
+            return max(
+                current,
+                sagOffset(xOffset: xOffset, halfWidth: safeHalfWidth, intensity: intensity, seed: seed)
+            )
+        }
+    }
+}
+
 private struct FloatingRailShape: Shape {
     var impact: Double
     var kinetic: Double
@@ -1341,21 +2252,16 @@ private struct FloatingRailShape: Shape {
     }
 
     func path(in rect: CGRect) -> Path {
-        let impactAmount = min(max(CGFloat(impact), 0), 1)
-        let kineticAmount = min(max(CGFloat(kinetic), 0), 1)
-        let inset = max(1.2, min(rect.width, rect.height) * 0.018)
-        let body = rect.insetBy(dx: inset, dy: inset)
-        let radius = min(
-            body.width * (0.31 + 0.035 * kineticAmount),
-            body.height * (0.16 + 0.015 * impactAmount)
-        )
-        return RoundedRectangle(cornerRadius: max(radius, 7), style: .continuous).path(in: body)
+        let body = FloatingRailGeometry.bodyRect(in: rect)
+        let radius = FloatingRailGeometry.cornerRadius(in: rect, impact: impact, kinetic: kinetic)
+        return RoundedRectangle(cornerRadius: radius, style: .continuous).path(in: body)
     }
 }
 
-private struct EdgeRailShape: Shape {
+struct EdgeRailShape: Shape {
     let edge: DockEdge
     let screenEdgeAmount: Double
+    let screenEdgeCurvature: Double
     let innerEdgeAmount: Double
     let cornerRadius: Double
     let scallopDepth: Double
@@ -1365,6 +2271,7 @@ private struct EdgeRailShape: Shape {
     var neckAmount: Double
     var kineticAmount: Double = 0
     let screenEdgeOutset: CGFloat
+    let renderInset: CGFloat
 
     var animatableData: AnimatablePair<Double, Double> {
         get { AnimatablePair(stretchAmount, neckAmount) }
@@ -1379,6 +2286,7 @@ private struct EdgeRailShape: Shape {
             in: rect,
             edge: edge,
             screenEdgeAmount: screenEdgeAmount,
+            screenEdgeCurvature: screenEdgeCurvature,
             innerEdgeAmount: innerEdgeAmount,
             cornerRadius: cornerRadius,
             scallopDepth: scallopDepth,
@@ -1388,37 +2296,16 @@ private struct EdgeRailShape: Shape {
             neckAmount: neckAmount,
             kineticAmount: kineticAmount,
             screenEdgeOutset: screenEdgeOutset,
-            closesScreenEdge: true
+            renderInset: renderInset
         )
     }
-}
 
-private struct EdgeRailFreeBorderShape: Shape {
-    let edge: DockEdge
-    let screenEdgeAmount: Double
-    let innerEdgeAmount: Double
-    let cornerRadius: Double
-    let scallopDepth: Double
-    let scallopRadius: Double
-    let smoothing: Double
-    var stretchAmount: Double
-    var neckAmount: Double
-    var kineticAmount: Double = 0
-    let screenEdgeOutset: CGFloat
-
-    var animatableData: AnimatablePair<Double, Double> {
-        get { AnimatablePair(stretchAmount, neckAmount) }
-        set {
-            stretchAmount = newValue.first
-            neckAmount = newValue.second
-        }
-    }
-
-    func path(in rect: CGRect) -> Path {
+    func visibleBorderPath(in rect: CGRect) -> Path {
         EdgeRailGeometry.path(
             in: rect,
             edge: edge,
             screenEdgeAmount: screenEdgeAmount,
+            screenEdgeCurvature: screenEdgeCurvature,
             innerEdgeAmount: innerEdgeAmount,
             cornerRadius: cornerRadius,
             scallopDepth: scallopDepth,
@@ -1428,8 +2315,22 @@ private struct EdgeRailFreeBorderShape: Shape {
             neckAmount: neckAmount,
             kineticAmount: kineticAmount,
             screenEdgeOutset: screenEdgeOutset,
-            closesScreenEdge: false
+            renderInset: renderInset,
+            omitAttachedDisplayEdgeBorder: true
         )
+    }
+}
+
+struct EdgeRailVisibleBorderShape: Shape {
+    var base: EdgeRailShape
+
+    var animatableData: AnimatablePair<Double, Double> {
+        get { base.animatableData }
+        set { base.animatableData = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        base.visibleBorderPath(in: rect)
     }
 }
 
@@ -1438,6 +2339,7 @@ private enum EdgeRailGeometry {
         in rect: CGRect,
         edge: DockEdge,
         screenEdgeAmount: Double,
+        screenEdgeCurvature: Double,
         innerEdgeAmount: Double,
         cornerRadius: Double,
         scallopDepth: Double,
@@ -1447,22 +2349,34 @@ private enum EdgeRailGeometry {
         neckAmount: Double,
         kineticAmount: Double,
         screenEdgeOutset: CGFloat,
-        closesScreenEdge: Bool
+        renderInset: CGFloat,
+        omitAttachedDisplayEdgeBorder: Bool = false
     ) -> Path {
         let stretch = min(max(CGFloat(stretchAmount), 0), 1.2)
         let neck = min(max(CGFloat(neckAmount), 0), 1)
         let kinetic = min(max(CGFloat(kineticAmount), 0), 1)
+        let semantic = EdgeRailSemanticProfile.resolve(
+            screenEdgeAmount: screenEdgeAmount,
+            screenEdgeCurvature: screenEdgeCurvature
+        )
+        let valley = semantic.valley
+        let outwardSpread = semantic.outwardSpread
+        let inwardBubble = semantic.inwardBubble
         let visualOutset = max(screenEdgeOutset, 0)
-        let nominalMinY = rect.minY + visualOutset
-        let nominalMaxY = rect.maxY - visualOutset
+        let safeRenderInset = max(renderInset, 0)
+        let nominalMinY = rect.minY + visualOutset + safeRenderInset
+        let nominalMaxY = rect.maxY - visualOutset - safeRenderInset
         let nominalHeight = max(nominalMaxY - nominalMinY, 1)
         let centerY = (nominalMinY + nominalMaxY) * 0.5
         let baseRadius = min(CGFloat(cornerRadius), rect.width * 0.42, nominalHeight * 0.18)
         let radius = max(2, baseRadius * (1 - 0.28 * neck))
         let baseDepth = min(CGFloat(scallopDepth), nominalHeight * 0.30)
         let depth = min(baseDepth * (1 + 0.20 * stretch + 0.26 * neck), nominalHeight * 0.36)
-        let baseBlend = min(max(CGFloat(smoothing), 0), 1)
-        let blend = min(baseBlend + 0.20 * stretch + 0.14 * neck, 1)
+        // F17.26: the old Smoothness control barely moved one throat handle and the
+        // legacy Curve radius never participated in canonical geometry at all. Keep the
+        // persisted fields for compatibility, but make the live contour deterministic.
+        let canonicalBlend: CGFloat = 0.72
+        let blend = min(canonicalBlend + 0.20 * stretch + 0.14 * neck, 1)
         let screenRaw = shapeInset(screenEdgeAmount, depth: depth)
         let innerRaw = shapeInset(innerEdgeAmount, depth: depth)
         let baseline = min(screenRaw, innerRaw)
@@ -1478,23 +2392,25 @@ private enum EdgeRailGeometry {
         // Keep a visible liquid lobe attached to the Mac edge. The strong pinch belongs in
         // the throat between the edge and the body, not at the screen endpoint itself.
         let screenLobePinch = min(
-            nominalHeight * (0.018 * stretch + 0.070 * pinchCurve),
-            nominalHeight * 0.090
+            nominalHeight * (0.018 * stretch + 0.070 * pinchCurve + 0.080 * inwardBubble),
+            nominalHeight * 0.160
         )
         let screenTopY = min(nominalMinY - visualOutset + screenInset + screenLobePinch, centerY - 2)
         let screenBottomY = max(nominalMaxY + visualOutset - screenInset - screenLobePinch, centerY + 2)
         let innerTopY = nominalMinY + innerInset
         let innerBottomY = nominalMaxY - innerInset
         let span = max(rect.width - radius, 1)
-        let edgeShapeStrength = min(max(abs(CGFloat(screenEdgeAmount)), 0), 1)
 
-        // The reference silhouette is not a hill attached to the screen. The material first
-        // scoops inward beside the screen (a concave throat), then opens into a broad rounded
-        // body. Two cubics share one tangent at the throat, so the transition stays smooth
-        // without the polygonal joint that appeared in the older shoulder implementation.
+        // The attached display edge is valley-only. Positive legacy curvature is neutralized,
+        // while negative screen-edge shape becomes a short speech-bubble-like attachment.
+        // Corner radius remains an interior-facing body control rather than rounding the Mac edge.
         let concavity = min(
-            0.54 + 0.22 * edgeShapeStrength + 0.14 * neck + 0.05 * stretch,
-            0.92
+            max(
+                0.54 + 0.16 * outwardSpread + 0.34 * inwardBubble + 0.14 * neck + 0.05 * stretch
+                    + 0.34 * valley,
+                0.18
+            ),
+            0.98
         )
         let stretchNormalized = min(max(stretch / 1.05, 0), 1)
         let stretchRoundness = stretchNormalized * stretchNormalized * (3 - 2 * stretchNormalized)
@@ -1505,12 +2421,14 @@ private enum EdgeRailGeometry {
             max(
                 span * (
                     0.18 +
-                    0.055 * edgeShapeStrength +
+                    0.065 * outwardSpread -
+                    0.045 * inwardBubble +
                     0.160 * neck +
                     0.120 * stretchRoundness +
-                    0.035 * kinetic
+                    0.035 * kinetic +
+                    0.075 * valley
                 ),
-                radius * 1.10
+                radius * (1.10 - 0.35 * inwardBubble)
             ),
             span * 0.56
         )
@@ -1518,12 +2436,19 @@ private enum EdgeRailGeometry {
         // Shift apparent mass toward the free head as tension rises. The leading end
         // becomes a bulb while the bridge narrows, which reads much more like a droplet.
         let bodyBellyProgress = 0.58 + 0.13 * surfaceTension
-        let bodyBellyVerticalFactor = max(0.045, 0.20 - 0.135 * surfaceTension - 0.025 * kinetic)
+        // Carry the valley intent into the body without introducing an attached-edge mountain.
+        let bodyBellyVerticalFactor = max(
+            0.040,
+            0.20 - 0.135 * surfaceTension - 0.025 * kinetic + 0.025 * valley
+        )
         let bodyBellyTangentX = min(
             bodyArcSpan * (0.15 + 0.14 * surfaceTension),
             bodyArcSpan * 0.31
         )
-        let throatProgress = min(0.72 + 0.18 * concavity, 0.90)
+        let throatProgress = min(
+            max(0.72 + 0.18 * concavity + 0.14 * valley + 0.05 * inwardBubble, 0.46),
+            0.96
+        )
         // As the bridge stretches, the waist tangent becomes increasingly horizontal.
         // This makes the two halves read as rounded droplets joined by a thin liquid neck
         // instead of two long diagonal lines meeting at a pinch point.
@@ -1537,32 +2462,35 @@ private enum EdgeRailGeometry {
                 bodyArcSpan * 0.48
             )
         )
-        let throatTangentYBase = max(nominalHeight * (0.010 + 0.012 * blend), 1.25)
-        let throatTangentY = throatTangentYBase * (1 - 0.975 * surfaceTension)
+        // Keep the joined cubics on the same horizontal tangent at the throat.
+        // This removes the tiny visible shoulder/kink that showed up in the outlined rail.
+        let throatTangentY: CGFloat = 0
         // Keep the droplet head rounded even as the bridge gets thinner. The cap tangent
         // stays bounded by its local radius, while the long body arc gets its own belly point.
         let bodyCornerTangent = min(
-            max(radius * (0.62 + 0.20 * surfaceTension), 2),
+            max(radius * (0.62 + 0.20 * surfaceTension + 0.06 * valley), 2),
             radius * 0.94
         )
         let freeCapControlY = min(
             max(
-                (innerBottomY - innerTopY) * (0.29 + 0.11 * surfaceTension + 0.035 * kinetic),
+                (innerBottomY - innerTopY) * (
+                    0.29 + 0.11 * surfaceTension + 0.035 * kinetic + 0.025 * valley
+                ),
                 radius * 1.25
             ),
             nominalHeight * 0.38
         )
         let topScreenHandleY = min(
             max(
-                abs(innerTopY - screenTopY) * (0.42 + 0.16 * liquidRoundness),
-                nominalHeight * (0.025 + 0.020 * concavity + 0.045 * liquidRoundness)
+                abs(innerTopY - screenTopY) * (0.42 + 0.16 * liquidRoundness + 0.18 * valley),
+                nominalHeight * (0.025 + 0.020 * concavity + 0.045 * liquidRoundness + 0.025 * valley)
             ),
             nominalHeight * (0.13 + 0.055 * liquidRoundness)
         )
         let bottomScreenHandleY = min(
             max(
-                abs(screenBottomY - innerBottomY) * (0.42 + 0.16 * liquidRoundness),
-                nominalHeight * (0.025 + 0.020 * concavity + 0.045 * liquidRoundness)
+                abs(screenBottomY - innerBottomY) * (0.42 + 0.16 * liquidRoundness + 0.18 * valley),
+                nominalHeight * (0.025 + 0.020 * concavity + 0.045 * liquidRoundness + 0.025 * valley)
             ),
             nominalHeight * (0.13 + 0.055 * liquidRoundness)
         )
@@ -1579,20 +2507,21 @@ private enum EdgeRailGeometry {
 
             let throatPinch = min(
                 nominalHeight * (
-                    0.028 * stretch +
-                    0.305 * pinchCurve +
-                    0.028 * surfaceTension +
-                    0.012 * kinetic
+                    0.030 * stretch +
+                    0.365 * pinchCurve +
+                    0.045 * surfaceTension +
+                    0.014 * kinetic
                 ),
-                nominalHeight * 0.36
+                nominalHeight * 0.405
             )
+            let minimumHalfGap = max(0.90, 1.70 - 0.80 * surfaceTension)
             let topThroat = CGPoint(
                 x: screenX - neckRun,
-                y: min(topScreen.y + (topInner.y - topScreen.y) * throatProgress + throatPinch, centerY - 2)
+                y: min(topScreen.y + (topInner.y - topScreen.y) * throatProgress + throatPinch, centerY - minimumHalfGap)
             )
             let bottomThroat = CGPoint(
                 x: screenX - neckRun,
-                y: max(bottomScreen.y + (bottomInner.y - bottomScreen.y) * throatProgress - throatPinch, centerY + 2)
+                y: max(bottomScreen.y + (bottomInner.y - bottomScreen.y) * throatProgress - throatPinch, centerY + minimumHalfGap)
             )
 
             path.move(to: topScreen)
@@ -1645,7 +2574,9 @@ private enum EdgeRailGeometry {
                 control1: CGPoint(x: bottomThroat.x + throatTangentX, y: bottomThroat.y + throatTangentY),
                 control2: CGPoint(x: screenX, y: bottomScreen.y - bottomScreenHandleY)
             )
-            if closesScreenEdge { path.addLine(to: topScreen) }
+            if !omitAttachedDisplayEdgeBorder {
+                path.addLine(to: topScreen)
+            }
 
         case .left:
             let screenX = rect.minX
@@ -1657,20 +2588,21 @@ private enum EdgeRailGeometry {
 
             let throatPinch = min(
                 nominalHeight * (
-                    0.028 * stretch +
-                    0.305 * pinchCurve +
-                    0.028 * surfaceTension +
-                    0.012 * kinetic
+                    0.030 * stretch +
+                    0.365 * pinchCurve +
+                    0.045 * surfaceTension +
+                    0.014 * kinetic
                 ),
-                nominalHeight * 0.36
+                nominalHeight * 0.405
             )
+            let minimumHalfGap = max(0.90, 1.70 - 0.80 * surfaceTension)
             let topThroat = CGPoint(
                 x: screenX + neckRun,
-                y: min(topScreen.y + (topInner.y - topScreen.y) * throatProgress + throatPinch, centerY - 2)
+                y: min(topScreen.y + (topInner.y - topScreen.y) * throatProgress + throatPinch, centerY - minimumHalfGap)
             )
             let bottomThroat = CGPoint(
                 x: screenX + neckRun,
-                y: max(bottomScreen.y + (bottomInner.y - bottomScreen.y) * throatProgress - throatPinch, centerY + 2)
+                y: max(bottomScreen.y + (bottomInner.y - bottomScreen.y) * throatProgress - throatPinch, centerY + minimumHalfGap)
             )
 
             path.move(to: topScreen)
@@ -1723,10 +2655,14 @@ private enum EdgeRailGeometry {
                 control1: CGPoint(x: bottomThroat.x - throatTangentX, y: bottomThroat.y + throatTangentY),
                 control2: CGPoint(x: screenX, y: bottomScreen.y - bottomScreenHandleY)
             )
-            if closesScreenEdge { path.addLine(to: topScreen) }
+            if !omitAttachedDisplayEdgeBorder {
+                path.addLine(to: topScreen)
+            }
         }
 
-        if closesScreenEdge { path.closeSubpath() }
+        if !omitAttachedDisplayEdgeBorder {
+            path.closeSubpath()
+        }
         return path
     }
 
@@ -1772,9 +2708,6 @@ private struct ProviderUsageTile: View {
     let titleWidth: CGFloat
     let timeWidth: CGFloat
     let scale: CGFloat
-    let mochiHorizontalStretch: CGFloat
-    let mochiVerticalScale: CGFloat
-    let mochiTextTracking: CGFloat
 
     private var outerProgress: Double { min(max(outerRingPercent ?? 0, 0), 1) }
     private var innerProgress: Double { min(max(innerRingPercent ?? 0, 0), 1) }
@@ -1782,8 +2715,6 @@ private struct ProviderUsageTile: View {
     private var isAccount: Bool { if case .account = target { return true }; return false }
     private var effectiveRing: Bool { showRing && (showOuterRing || showInnerRing) }
     private var iconFrameSize: CGFloat { max(showRing ? 50 : 34, iconSize + (showRing ? 20 : 10)) * scale }
-    private var iconFrameWidth: CGFloat { iconFrameSize * max(mochiHorizontalStretch, 1) }
-    private var iconFrameHeight: CGFloat { iconFrameSize * min(max(mochiVerticalScale, 0.76), 1.04) }
 
     var body: some View {
         VStack(spacing: 3 * scale) {
@@ -1791,7 +2722,7 @@ private struct ProviderUsageTile: View {
                 if isHovered {
                     Ellipse()
                         .fill(ProviderBrand.glow(for: summary.provider, customHex: accentHex, theme: theme).opacity(0.16))
-                        .frame(width: iconFrameWidth + 8 * scale, height: iconFrameHeight + 8 * scale)
+                        .frame(width: iconFrameSize + 8 * scale, height: iconFrameSize + 8 * scale)
                         .blur(radius: 5 * scale)
                 }
 
@@ -1837,8 +2768,8 @@ private struct ProviderUsageTile: View {
                 )
                 .scaleEffect(isHovered ? 1.06 : 1)
             }
-            // Ring, progress arcs, surface and provider mark deform as one cluster.
-            // Keeping one affine transform prevents the concentric pieces from stretching apart.
+            // Keep each tile internally rigid. F17.21 applies all liquid deformation to
+            // the outer provider cluster so icons do not independently distort in the neck.
             .frame(width: iconFrameSize, height: iconFrameSize)
             .overlay(alignment: .bottomTrailing) {
                 if showMultiplier, let multiplier {
@@ -1853,17 +2784,11 @@ private struct ProviderUsageTile: View {
                         .offset(x: 4 * scale, y: 3 * scale)
                 }
             }
-            .scaleEffect(
-                x: max(mochiHorizontalStretch, 1),
-                y: min(max(mochiVerticalScale, 0.76), 1.04),
-                anchor: .center
-            )
-            .frame(width: iconFrameWidth, height: iconFrameHeight)
+            .frame(width: iconFrameSize, height: iconFrameSize)
 
             if showPercent {
                 Text(percentText)
                     .font(.system(size: percentFontSize * scale, weight: .semibold, design: .rounded))
-                    .tracking(mochiTextTracking * scale)
                     .monospacedDigit()
                     .foregroundStyle(displayPercent == nil ? ProviderBrand.tertiaryText(theme: theme) : ProviderBrand.primaryText(theme: theme))
                     .shadow(color: ProviderBrand.contrastShadow(theme: theme, enabled: autoContrast), radius: autoContrast ? 1.3 : 0)
@@ -1873,7 +2798,6 @@ private struct ProviderUsageTile: View {
                 TimelineView(.periodic(from: .now, by: 30)) { context in
                     Text(remainingTimeText(now: context.date) ?? "--")
                         .font(.system(size: remainingTimeFontSize * scale, weight: .medium, design: .rounded))
-                        .tracking(mochiTextTracking * 0.72 * scale)
                         .monospacedDigit()
                         .foregroundStyle(remainingResetDate == nil ? ProviderBrand.tertiaryText(theme: theme) : ProviderBrand.secondaryText(theme: theme))
                         .lineLimit(1)
@@ -1885,7 +2809,6 @@ private struct ProviderUsageTile: View {
             if isAccount && showTitle {
                 Text(displayName)
                     .font(.system(size: accountLabelFontSize * scale, weight: .medium, design: .rounded))
-                    .tracking(mochiTextTracking * 0.62 * scale)
                     .foregroundStyle(ProviderBrand.secondaryText(theme: theme))
                     .lineLimit(1)
                     .truncationMode(.tail)

@@ -128,9 +128,9 @@ struct ProviderDetailView: View {
 
     private var emptyState: some View {
         HStack(spacing: 9) {
-            Image(systemName: account?.source == .synthetic ? "sparkles" : "clock.arrow.circlepath")
+            Image(systemName: "clock.arrow.circlepath")
                 .foregroundStyle(ProviderBrand.secondaryText(theme: theme))
-            Text(account?.source == .synthetic ? "Synthetic account has no quota rows" : "No live quota data yet")
+            Text("No live quota data yet")
                 .font(.system(size: 11.5, weight: .medium, design: .rounded))
                 .foregroundStyle(ProviderBrand.secondaryText(theme: theme))
         }
@@ -225,7 +225,7 @@ struct ProviderDetailView: View {
         case .currentSession: return "Local Login"
         case .credentialFile: return "Credential"
         case .profile: return "UsageDock Profile"
-        case .synthetic: return "Synthetic"
+        case .synthetic: return "Account"
         case .manual: return "Account Slot"
         case .mock: return "Mock"
         case nil: return "Account"

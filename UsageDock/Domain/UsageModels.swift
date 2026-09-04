@@ -255,6 +255,24 @@ enum RailDigitWidth: Int, Codable, CaseIterable, Identifiable {
     var label: String { rawValue == 1 ? "0" : "00" }
 }
 
+enum RailMaterialMode: String, Codable, CaseIterable, Identifiable {
+    case standard
+    case waterdrop
+    case space
+    case bar3D
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .standard: "Standard"
+        case .waterdrop: "Waterdrop"
+        case .space: "Space"
+        case .bar3D: "3D Bar"
+        }
+    }
+}
+
 enum RailEdgeStyle: String, Codable, CaseIterable, Identifiable {
     case off
     case simple

@@ -17,21 +17,72 @@ private enum TimerFieldMode: String, CaseIterable, Identifiable {
     }
 }
 
+enum SettingsCategory: String, CaseIterable, Identifiable {
+    case accounts
+    case menuBar
+    case layout
+    case shape
+    case appearance
+    case border
+    case data
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .accounts: "Accounts"
+        case .menuBar: "Menu Bar"
+        case .layout: "Layout"
+        case .shape: "Shape"
+        case .appearance: "Appearance"
+        case .border: "Border"
+        case .data: "Data"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .accounts: "person.2"
+        case .menuBar: "menubar.rectangle"
+        case .layout: "rectangle.3.group"
+        case .shape: "capsule.portrait"
+        case .appearance: "paintbrush"
+        case .border: "square.dashed"
+        case .data: "chart.bar"
+        }
+    }
+}
+
+enum SettingsHoverPreviewPolicy {
+    static func shouldShow(category: SettingsCategory, bubbleExpanded: Bool) -> Bool {
+        category == .shape && bubbleExpanded
+    }
+}
+
 private struct FullRowDisclosure<Content: View>: View {
     let title: LocalizedStringKey
     @Binding var isExpanded: Bool
+    let onExpansionChanged: (Bool) -> Void
     let content: Content
 
-    init(title: LocalizedStringKey, isExpanded: Binding<Bool>, @ViewBuilder content: () -> Content) {
+    init(
+        title: LocalizedStringKey,
+        isExpanded: Binding<Bool>,
+        onExpansionChanged: @escaping (Bool) -> Void = { _ in },
+        @ViewBuilder content: () -> Content
+    ) {
         self.title = title
         _isExpanded = isExpanded
+        self.onExpansionChanged = onExpansionChanged
         self.content = content()
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Button {
-                withAnimation(.easeInOut(duration: 0.16)) { isExpanded.toggle() }
+                let next = !isExpanded
+                withAnimation(.easeInOut(duration: 0.16)) { isExpanded = next }
+                onExpansionChanged(next)
             } label: {
                 HStack {
                     Text(title)
@@ -58,6 +109,7 @@ private struct FullRowDisclosure<Content: View>: View {
 struct SettingsView: View {
     @ObservedObject var usageStore: UsageStore
     @ObservedObject var placement: PlacementStore
+    @State private var selectedCategory: SettingsCategory = .accounts
     @State private var appearanceExpanded = true
     @State private var dataExpanded = true
     @State private var advancedShapeExpanded = false
@@ -68,32 +120,71 @@ struct SettingsView: View {
     private let dataCaptionWidth: CGFloat = 58
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 28) {
-                header
-                displaySection
-                providerOrderSection
-
-                ForEach(usageStore.providerOrder) { provider in
-                    ProviderSettingsSection(
-                        provider: provider,
-                        usageStore: usageStore
-                    )
-                }
-
-                Text(
-                    UsageDockDistributionPolicy.isPublicRelease
-                        ? "Public builds register accounts only through authenticated provider logins. Cursor and Grok stay unavailable until a verified login and live-usage path exists."
-                        : "Claude, Codex, Antigravity, and Kimi support live login/usage paths. Cursor and Grok remain manual/synthetic until a trustworthy live quota source is available."
-                )
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+        HStack(spacing: 0) {
+            List(SettingsCategory.allCases, selection: $selectedCategory) { category in
+                Label(category.label, systemImage: category.systemImage)
+                    .tag(category)
             }
-            .padding(.horizontal, 30)
-            .padding(.vertical, 28)
+            .listStyle(.sidebar)
+            .frame(minWidth: 176, idealWidth: 188, maxWidth: 205)
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    header
+                    categoryIntro
+                    selectedSettingsPage
+                }
+                .padding(.horizontal, 30)
+                .padding(.vertical, 26)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
-        .frame(minWidth: 840, minHeight: 740)
+        .frame(minWidth: 1000, minHeight: 740)
         .environment(\.locale, usageStore.appLanguage.locale)
+    }
+
+    private var categoryIntro: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(selectedCategory.label)
+                .font(.title3.weight(.semibold))
+            Text(categoryDescription)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var categoryDescription: String {
+        switch selectedCategory {
+        case .accounts: "Choose authenticated accounts and manage provider sign-in. Up to 3 accounts can be saved for instant Rail switching."
+        case .menuBar: "Choose which accounts appear in the macOS menu bar. This selection is independent from Rail display accounts."
+        case .layout: "Control Rail size, placement, spacing, labels, and visible elements."
+        case .shape: "Adjust the screen-edge profile, interior-facing corners, and continuous liquid silhouette."
+        case .appearance: "Choose theme, material, opacity, surface treatment, and particle droplets."
+        case .border: "Control the visible canonical border, glow, and edge color."
+        case .data: "Choose quota sources, timer formatting, provider order, colors, and links."
+        }
+    }
+
+    @ViewBuilder
+    private var selectedSettingsPage: some View {
+        switch selectedCategory {
+        case .accounts:
+            accountsSettingsPage
+        case .menuBar:
+            menuBarSettingsPage
+        case .layout:
+            layoutSettingsPage
+        case .shape:
+            shapeSettingsPage
+        case .appearance:
+            appearanceSettingsPage
+        case .border:
+            borderSettingsPage
+        case .data:
+            dataSettingsPage
+        }
     }
 
     private var header: some View {
@@ -163,6 +254,34 @@ struct SettingsView: View {
         }
     }
 
+    private func screenEdgeShapeRow(_ label: LocalizedStringKey, value: Binding<Double>) -> some View {
+        settingsRow(label, value: String(format: "%+.0f%%", value.wrappedValue * 100)) {
+            HStack(spacing: 9) {
+                Text("Bubble")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Slider(value: value, in: -1...1, step: 0.01)
+                Text("Spread")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func valleyDepthRow(_ label: LocalizedStringKey, value: Binding<Double>) -> some View {
+        settingsRow(label, value: "\(Int((-min(value.wrappedValue, 0) * 100).rounded()))%") {
+            HStack(spacing: 9) {
+                Text("Deep")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Slider(value: value, in: -1...0, step: 0.01)
+                Text("Shallow")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private func alignedDataControl<Control: View>(
         _ caption: LocalizedStringKey? = nil,
         @ViewBuilder control: () -> Control
@@ -184,17 +303,8 @@ struct SettingsView: View {
         }
     }
 
-    private var iconEdgeDistanceText: String {
-        let effective = RailMetrics.effectiveIconEdgeInset(
-            requested: usageStore.railIconEdgeInset,
-            showRing: usageStore.railShowRing,
-            iconSize: usageStore.railIconSize
-        )
-        let raw = CGFloat(usageStore.railIconEdgeInset)
-        if effective > raw + 0.01 {
-            return "\(Int(effective.rounded())) pt min"
-        }
-        return "\(Int(raw.rounded())) pt"
+    private func paddingText(_ value: Double) -> String {
+        "\(Int(value.rounded())) pt"
     }
 
     private var hourModeBinding: Binding<TimerFieldMode> {
@@ -234,6 +344,461 @@ struct SettingsView: View {
                 usageStore.railBorderColorMode = .custom
             }
         )
+    }
+
+    private var accountsSettingsPage: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            displayAccountSelectionSection
+
+            ForEach(usageStore.providerOrder) { provider in
+                ProviderSettingsSection(provider: provider, usageStore: usageStore)
+            }
+
+            Text(
+                UsageDockDistributionPolicy.isPublicRelease
+                    ? "Public builds register accounts only through authenticated provider logins. Cursor and Grok stay unavailable until a verified login and live-usage path exists."
+                    : "Development-only test accounts remain available for local previewing, but Display Account switching accepts authenticated account sources only."
+            )
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private var displayAccountSelectionSection: some View {
+        GroupBox("Display Accounts") {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Save up to 3 authenticated accounts for instant Rail switching.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(usageStore.displayAccountIDs.count)/3 saved")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                let selectable = usageStore.displaySelectableAccounts()
+                if selectable.isEmpty {
+                    Label("No authenticated account sources are registered yet.", systemImage: "person.crop.circle.badge.exclamationmark")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 8)
+                } else {
+                    ForEach(selectable) { account in
+                        let authState = usageStore.displayAuthenticationState(for: account)
+                        let saved = usageStore.isDisplayAccountCandidate(account.id)
+                        HStack(spacing: 10) {
+                            ProviderIcon(
+                                provider: account.provider,
+                                size: 18,
+                                accentHex: account.accentHex ?? usageStore.providerAccentHex[account.provider]
+                            )
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("\(account.provider.displayName) · \(account.name)")
+                                    .font(.callout.weight(.medium))
+                                Text(displayAuthText(authState))
+                                    .font(.caption)
+                                    .foregroundStyle(authState == .required ? .red : .secondary)
+                            }
+                            Spacer()
+
+                            if saved {
+                                Button {
+                                    usageStore.selectDisplayAccount(account.id)
+                                } label: {
+                                    Label(
+                                        usageStore.isActiveDisplayAccount(account.id) ? "Showing" : "Show Now",
+                                        systemImage: usageStore.isActiveDisplayAccount(account.id) ? "checkmark.circle.fill" : "play.circle"
+                                    )
+                                }
+                                .controlSize(.small)
+                                .disabled(authState != .valid)
+                            }
+
+                            Button {
+                                usageStore.setDisplayAccountCandidate(account.id, enabled: !saved)
+                            } label: {
+                                Label(saved ? "Remove" : "Save", systemImage: saved ? "minus.circle" : "plus.circle")
+                            }
+                            .controlSize(.small)
+                            .disabled(!saved && !usageStore.canAddDisplayAccount(account.id))
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(.secondary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+
+                Text("If authentication expires, the Rail stops showing that account instead of presenting stale usage. Re-authenticate in the provider section below.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 6)
+        }
+    }
+
+    private var menuBarSettingsPage: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            GroupBox("Menu Bar Display") {
+                VStack(spacing: 14) {
+                    settingsRow("Usage display") {
+                        Toggle("Show usage in menu bar", isOn: $usageStore.menuBarUsageEnabled)
+                            .toggleStyle(.switch)
+                    }
+                    settingsRow("Elements") {
+                        HStack(spacing: 18) {
+                            Toggle("Usage ring", isOn: $usageStore.menuBarShowRing)
+                            Toggle("Percentage", isOn: $usageStore.menuBarShowPercentage)
+                        }
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .disabled(!usageStore.menuBarUsageEnabled)
+                    }
+                }
+                .padding(.vertical, 8)
+            }
+
+            GroupBox("Accounts to Show") {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Independent from Rail Display Accounts.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(usageStore.menuBarAccountIDs.count) selected")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+
+                    let selectable = usageStore.menuBarSelectableAccounts()
+                    if selectable.isEmpty {
+                        Label("No authenticated account sources are registered yet.", systemImage: "menubar.rectangle")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 8)
+                    } else {
+                        ForEach(selectable) { account in
+                            let authState = usageStore.displayAuthenticationState(for: account)
+                            let selected = usageStore.isMenuBarAccountSelected(account.id)
+                            HStack(spacing: 10) {
+                                ProviderIcon(
+                                    provider: account.provider,
+                                    size: 18,
+                                    accentHex: account.accentHex ?? usageStore.providerAccentHex[account.provider]
+                                )
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(account.provider.displayName) · \(account.name)")
+                                        .font(.callout.weight(.medium))
+                                    Text(displayAuthText(authState))
+                                        .font(.caption)
+                                        .foregroundStyle(authState == .required ? .red : .secondary)
+                                }
+                                Spacer()
+                                Toggle(
+                                    "",
+                                    isOn: Binding(
+                                        get: { selected },
+                                        set: { usageStore.setMenuBarAccountSelected(account.id, enabled: $0) }
+                                    )
+                                )
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                                .controlSize(.small)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(.secondary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
+
+                    Text("If authentication expires, the account stays selected but its menu-bar value becomes -- until live usage is valid again.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 6)
+            }
+        }
+    }
+
+    private func displayAuthText(_ state: DisplayAccountAuthState) -> String {
+        switch state {
+        case .valid: "Authenticated · live usage available"
+        case .checking: "Authentication pending · refresh to verify"
+        case .required: "Authentication required"
+        }
+    }
+
+    private var layoutSettingsPage: some View {
+        GroupBox("Layout") {
+            VStack(spacing: 14) {
+                settingsRow("Language", value: usageStore.appLanguage.label) {
+                    Picker("Language", selection: $usageStore.appLanguage) {
+                        ForEach(UsageDockLanguage.allCases) { language in
+                            Text(language.label).tag(language)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 160)
+                }
+
+                settingsRow("Screen edge", value: placement.edge.label) {
+                    Picker("Screen edge", selection: $placement.edge) {
+                        ForEach(DockEdge.allCases) { edge in
+                            Text(LocalizedStringKey(edge.label)).tag(edge)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                }
+
+                settingsRow("Value", value: usageStore.presentationMode.label) {
+                    Picker("Value", selection: $usageStore.presentationMode) {
+                        ForEach(UsagePresentationMode.allCases) { mode in
+                            Text(LocalizedStringKey(mode.label)).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                }
+
+                Divider()
+                sliderRow("Scale", value: $usageStore.railScale, range: 0.45...1.45, step: 0.01, valueText: "\(Int((usageStore.railScale * 100).rounded()))%")
+                sliderRow("Position", value: $usageStore.railVerticalPosition, range: 0...1, step: 0.01, valueText: "\(Int((usageStore.railVerticalPosition * 100).rounded()))%")
+                sliderRow("Inner padding Y", value: $usageStore.railInnerPaddingY, range: 0...48, step: 1, valueText: paddingText(usageStore.railInnerPaddingY))
+                sliderRow("Screen-side padding", value: $usageStore.railScreenInnerPadding, range: 0...48, step: 1, valueText: paddingText(usageStore.railScreenInnerPadding))
+                sliderRow("Window-side padding", value: $usageStore.railWindowInnerPadding, range: 0...48, step: 1, valueText: paddingText(usageStore.railWindowInnerPadding))
+                sliderRow("Item spacing", value: $usageStore.railItemSpacing, range: 0...36, step: 1, valueText: "\(Int(usageStore.railItemSpacing.rounded())) pt")
+                sliderRow("Icon size", value: $usageStore.railIconSize, range: 14...44, step: 1, valueText: "\(Int(usageStore.railIconSize.rounded())) pt")
+
+                Divider()
+                sliderRow("Percentage font", value: $usageStore.railPercentFontSize, range: 7...22, step: 0.5, valueText: String(format: "%.1f pt", usageStore.railPercentFontSize))
+                sliderRow("Account / title font", value: $usageStore.railAccountLabelFontSize, range: 7...20, step: 0.5, valueText: String(format: "%.1f pt", usageStore.railAccountLabelFontSize))
+                sliderRow("Remaining time font", value: $usageStore.railRemainingTimeFontSize, range: 6...20, step: 0.5, valueText: String(format: "%.1f pt", usageStore.railRemainingTimeFontSize))
+                sliderRow("Title width", value: $usageStore.railTitleWidth, range: 36...160, step: 2, valueText: "\(Int(usageStore.railTitleWidth.rounded())) pt")
+                sliderRow("Time width", value: $usageStore.railTimeWidth, range: 36...160, step: 2, valueText: "\(Int(usageStore.railTimeWidth.rounded())) pt")
+
+                Divider()
+                settingsRow("Visible elements") {
+                    HStack(spacing: 18) {
+                        Toggle("Percentage", isOn: $usageStore.railShowPercent)
+                        Toggle("Usage ring", isOn: $usageStore.railShowRing)
+                        Toggle("Timer", isOn: $usageStore.railShowRemainingTime)
+                        Toggle("Title", isOn: $usageStore.railShowTitle)
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                }
+                settingsRow("Interaction") {
+                    HStack(spacing: 18) {
+                        Toggle("Multiplier ×N", isOn: $usageStore.railShowMultiplier)
+                        Toggle("Hover details", isOn: $usageStore.railHoverEnabled)
+                            .disabled(usageStore.railVisualOnlyMode)
+                        Toggle("Visual only", isOn: $usageStore.railVisualOnlyMode)
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                }
+            }
+            .padding(.vertical, 8)
+        }
+    }
+
+    private var shapeSettingsPage: some View {
+        GroupBox("Shape") {
+            VStack(spacing: 14) {
+                screenEdgeShapeRow("Screen-edge shape", value: $usageStore.railScreenEdgeShape)
+                valleyDepthRow("Attached-edge valley", value: $usageStore.railScreenEdgeCurvature)
+                shapeAmountRow("Free-side shape", value: $usageStore.railInnerShape)
+                Divider()
+                shapeSlider("Interior corner radius", value: $usageStore.railCornerRadius, range: 4...48, suffix: "pt")
+                shapeSlider("Curve depth", value: $usageStore.railScallopDepth, range: 0...42, suffix: "pt")
+                Divider()
+                FullRowDisclosure(
+                    title: "Bubble / Hover Shape",
+                    isExpanded: $advancedShapeExpanded,
+                    onExpansionChanged: { [usageStore] expanded in
+                        usageStore.settingsBubblePreviewRequested = SettingsHoverPreviewPolicy.shouldShow(
+                            category: .shape,
+                            bubbleExpanded: expanded
+                        )
+                    }
+                ) {
+                    VStack(spacing: 12) {
+                        shapeSlider("Bubble radius", value: $usageStore.bubbleCornerRadius, range: 8...40, suffix: "pt")
+                        shapeSlider("Bubble nub depth", value: $usageStore.bubblePointerDepth, range: 0...32, suffix: "pt")
+                        shapeSlider("Bubble nub width", value: $usageStore.bubblePointerWidth, range: 6...56, suffix: "pt")
+                    }
+                }
+            }
+            .padding(.vertical, 8)
+        }
+        .onDisappear { [usageStore] in
+            usageStore.settingsBubblePreviewRequested = false
+        }
+    }
+
+    private var appearanceSettingsPage: some View {
+        GroupBox("Appearance") {
+            VStack(spacing: 14) {
+                settingsRow("Theme", value: usageStore.theme.label) {
+                    Picker("Theme", selection: $usageStore.theme) {
+                        ForEach(UsageDockTheme.allCases) { theme in
+                            Text(LocalizedStringKey(theme.label)).tag(theme)
+                        }
+                    }
+                    .labelsHidden()
+                }
+                settingsRow("Material", value: usageStore.railMaterialMode.label) {
+                    Picker("Material", selection: $usageStore.railMaterialMode) {
+                        ForEach(RailMaterialMode.allCases) { mode in
+                            Text(LocalizedStringKey(mode.label)).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                }
+                sliderRow("Background opacity", value: $usageStore.railBackgroundOpacity, range: 0...1, step: 0.01, valueText: "\(Int((usageStore.railBackgroundOpacity * 100).rounded()))%")
+                settingsRow("Surface helpers") {
+                    HStack(spacing: 18) {
+                        Toggle("Backplate", isOn: $usageStore.railBackplateEnabled)
+                        Toggle("Auto contrast", isOn: $usageStore.railAutoContrast)
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                }
+                settingsRow("Reset time detail", value: usageStore.resetTimeDisplayMode.label) {
+                    Picker("Reset time", selection: $usageStore.resetTimeDisplayMode) {
+                        ForEach(ResetTimeDisplayMode.allCases) { mode in
+                            Text(LocalizedStringKey(mode.label)).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                }
+                if usageStore.railMaterialMode == .bar3D {
+                    Text("3D Bar uses material-native highlights and shadows; Border controls are intentionally disabled.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Divider()
+                settingsRow("Droplets", value: usageStore.railDropletsEnabled ? "On" : "Off") {
+                    Toggle("Droplets", isOn: $usageStore.railDropletsEnabled)
+                        .toggleStyle(.switch)
+                }
+                Text("Droplets controls attached drips, floating drips, and break particles. Stretch, neck pinch, break deformation, residue, snap-back, and wetting stay active.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 8)
+        }
+    }
+
+    private var borderSettingsPage: some View {
+        GroupBox("Border") {
+            VStack(spacing: 14) {
+                settingsRow("Edge style", value: usageStore.railEdgeStyle.label) {
+                    Picker("Edge style", selection: $usageStore.railEdgeStyle) {
+                        ForEach(RailEdgeStyle.allCases) { style in
+                            Text(LocalizedStringKey(style.label)).tag(style)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .disabled(usageStore.railMaterialMode == .bar3D)
+                }
+                settingsRow("Color", value: usageStore.railBorderColorMode.label) {
+                    HStack(spacing: 10) {
+                        Picker("Edge color", selection: $usageStore.railBorderColorMode) {
+                            ForEach(RailEdgeColorMode.allCases) { mode in
+                                Text(LocalizedStringKey(mode.label)).tag(mode)
+                            }
+                        }
+                        .labelsHidden()
+                        if usageStore.railBorderColorMode == .custom {
+                            ColorPicker("Custom", selection: borderCustomColorBinding, supportsOpacity: false)
+                                .labelsHidden()
+                        }
+                        Button("Reset") {
+                            usageStore.railBorderColorMode = .automatic
+                            usageStore.railBorderCustomHex = nil
+                        }
+                        .controlSize(.small)
+                    }
+                    .disabled(usageStore.railMaterialMode == .bar3D)
+                }
+                sliderRow("Width", value: $usageStore.railEdgeWidth, range: 0.25...4, step: 0.05, valueText: String(format: "%.2f pt", usageStore.railEdgeWidth))
+                    .disabled(usageStore.railMaterialMode == .bar3D || usageStore.railEdgeStyle == .off)
+                sliderRow("Opacity", value: $usageStore.railEdgeOpacity, range: 0...1, step: 0.01, valueText: "\(Int((usageStore.railEdgeOpacity * 100).rounded()))%")
+                    .disabled(usageStore.railMaterialMode == .bar3D || usageStore.railEdgeStyle == .off)
+                sliderRow("Glow", value: $usageStore.railGlowRadius, range: 0...32, step: 1, valueText: "\(Int(usageStore.railGlowRadius.rounded())) pt")
+                    .disabled(usageStore.railMaterialMode == .bar3D || !(usageStore.railEdgeStyle == .soft || usageStore.railEdgeStyle == .neon || usageStore.railEdgeStyle == .glass))
+                sliderRow("Glow intensity", value: $usageStore.railGlowOpacity, range: 0...1, step: 0.01, valueText: "\(Int((usageStore.railGlowOpacity * 100).rounded()))%")
+                    .disabled(usageStore.railMaterialMode == .bar3D || !(usageStore.railEdgeStyle == .soft || usageStore.railEdgeStyle == .neon || usageStore.railEdgeStyle == .glass))
+            }
+            .padding(.vertical, 8)
+        }
+    }
+
+    private var dataSettingsPage: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            GroupBox("Rail Data & Timer") {
+                VStack(spacing: 14) {
+                    settingsRow("Percent source", value: usageStore.railPercentSource.label) {
+                        quotaPicker("Percent", selection: $usageStore.railPercentSource, allowNone: false)
+                    }
+                    settingsRow("Outer ring source", value: usageStore.railOuterRingSource.label) {
+                        quotaPicker("Outer ring", selection: $usageStore.railOuterRingSource, allowNone: true)
+                    }
+                    settingsRow("Inner ring source", value: usageStore.railInnerRingSource.label) {
+                        quotaPicker("Inner ring", selection: $usageStore.railInnerRingSource, allowNone: true)
+                    }
+                    settingsRow("Timer source", value: usageStore.railTimeSource.label) {
+                        quotaPicker("Timer", selection: $usageStore.railTimeSource, allowNone: false)
+                    }
+                    settingsRow("Day digits", value: usageStore.railDayDigits.label) {
+                        alignedDataControl {
+                            Picker("Day digits", selection: $usageStore.railDayDigits) {
+                                ForEach(RailDigitWidth.allCases) { width in Text(width.label).tag(width) }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.segmented)
+                            .frame(width: 142)
+                        }
+                    }
+                    settingsRow("Hour", value: hourModeBinding.wrappedValue.label) {
+                        alignedDataControl {
+                            Picker("Hour", selection: hourModeBinding) {
+                                ForEach(TimerFieldMode.allCases) { mode in Text(LocalizedStringKey(mode.label)).tag(mode) }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.segmented)
+                            .frame(width: 192)
+                        }
+                    }
+                    settingsRow("Minute", value: minuteModeBinding.wrappedValue.label) {
+                        alignedDataControl {
+                            Picker("Minute", selection: minuteModeBinding) {
+                                ForEach(TimerFieldMode.allCases) { mode in Text(LocalizedStringKey(mode.label)).tag(mode) }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.segmented)
+                            .frame(width: 192)
+                        }
+                    }
+                    settingsRow("Zero auto-hide") {
+                        alignedDataControl {
+                            HStack(spacing: 18) {
+                                Toggle("Days", isOn: $usageStore.railAutoHideZeroDays)
+                                Toggle("Hours", isOn: $usageStore.railAutoHideZeroHours)
+                            }
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                        }
+                    }
+                }
+                .padding(.vertical, 8)
+            }
+            providerOrderSection
+        }
     }
 
     private var displaySection: some View {
@@ -308,11 +873,27 @@ struct SettingsView: View {
                 )
 
                 sliderRow(
-                    "Icon edge distance",
-                    value: $usageStore.railIconEdgeInset,
+                    "Vertical inner padding",
+                    value: $usageStore.railInnerPaddingY,
                     range: 0...48,
                     step: 1,
-                    valueText: iconEdgeDistanceText
+                    valueText: paddingText(usageStore.railInnerPaddingY)
+                )
+
+                sliderRow(
+                    "Screen-side inner padding",
+                    value: $usageStore.railScreenInnerPadding,
+                    range: 0...48,
+                    step: 1,
+                    valueText: paddingText(usageStore.railScreenInnerPadding)
+                )
+
+                sliderRow(
+                    "Window-side inner padding",
+                    value: $usageStore.railWindowInnerPadding,
+                    range: 0...48,
+                    step: 1,
+                    valueText: paddingText(usageStore.railWindowInnerPadding)
                 )
 
                 sliderRow(
@@ -398,6 +979,24 @@ struct SettingsView: View {
                             valueText: "\(Int((usageStore.railBackgroundOpacity * 100).rounded()))%"
                         )
 
+                        settingsRow("Material", value: usageStore.railMaterialMode.label) {
+                            Picker("Material", selection: $usageStore.railMaterialMode) {
+                                ForEach(RailMaterialMode.allCases) { mode in
+                                    Text(LocalizedStringKey(mode.label)).tag(mode)
+                                }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.segmented)
+                        }
+
+                        if usageStore.railMaterialMode == .bar3D {
+                            settingsRow("3D border") {
+                                Text("Internal highlight / shadow depth is used; border controls are ignored.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
                         settingsRow("Surface helpers") {
                             HStack(spacing: 18) {
                                 Toggle("Backplate", isOn: $usageStore.railBackplateEnabled)
@@ -407,7 +1006,8 @@ struct SettingsView: View {
                             .controlSize(.small)
                         }
 
-                        shapeAmountRow("Screen-edge side", value: $usageStore.railScreenEdgeShape)
+                        screenEdgeShapeRow("Screen-edge side", value: $usageStore.railScreenEdgeShape)
+                        valleyDepthRow("Attached-edge valley", value: $usageStore.railScreenEdgeCurvature)
                         shapeAmountRow("Inner / Free side", value: $usageStore.railInnerShape)
 
                         settingsRow("Edge style", value: usageStore.railEdgeStyle.label) {
@@ -418,6 +1018,7 @@ struct SettingsView: View {
                             }
                             .labelsHidden()
                             .pickerStyle(.segmented)
+                            .disabled(usageStore.railMaterialMode == .bar3D)
                         }
 
                         settingsRow("Edge color", value: usageStore.railBorderColorMode.label) {
@@ -440,9 +1041,10 @@ struct SettingsView: View {
                                 }
                                 .controlSize(.small)
                             }
+                            .disabled(usageStore.railMaterialMode == .bar3D)
                         }
 
-                        if usageStore.railEdgeStyle != .off {
+                        if usageStore.railMaterialMode != .bar3D && usageStore.railEdgeStyle != .off {
                             sliderRow(
                                 "Border width",
                                 value: $usageStore.railEdgeWidth,
@@ -459,7 +1061,7 @@ struct SettingsView: View {
                             )
                         }
 
-                        if usageStore.railEdgeStyle == .soft || usageStore.railEdgeStyle == .neon || usageStore.railEdgeStyle == .glass {
+                        if usageStore.railMaterialMode != .bar3D && (usageStore.railEdgeStyle == .soft || usageStore.railEdgeStyle == .neon || usageStore.railEdgeStyle == .glass) {
                             sliderRow(
                                 "Glow radius",
                                 value: $usageStore.railGlowRadius,
@@ -480,8 +1082,6 @@ struct SettingsView: View {
                             VStack(spacing: 12) {
                                 shapeSlider("Corner radius", value: $usageStore.railCornerRadius, range: 4...48, suffix: "pt")
                                 shapeSlider("Curve depth", value: $usageStore.railScallopDepth, range: 0...42, suffix: "pt")
-                                shapeSlider("Curve radius", value: $usageStore.railScallopRadius, range: 4...64, suffix: "pt")
-                                shapeSlider("Smoothness", value: $usageStore.railScallopSmoothing, range: 0...1, suffix: "%", multiplier: 100)
                                 shapeSlider("Bubble radius", value: $usageStore.bubbleCornerRadius, range: 8...40, suffix: "pt")
                                 shapeSlider("Bubble nub depth", value: $usageStore.bubblePointerDepth, range: 0...32, suffix: "pt")
                                 shapeSlider("Bubble nub width", value: $usageStore.bubblePointerWidth, range: 6...56, suffix: "pt")
@@ -1420,7 +2020,7 @@ private struct AccountEditor: View {
         case .credentialFile: return "Credential file"
         case .profile: return "UsageDock profile"
         case .manual: return "Account slot"
-        case .synthetic: return "Synthetic"
+        case .synthetic: return "Account"
         case .mock: return "Mock"
         case nil: return "Legacy"
         }

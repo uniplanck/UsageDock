@@ -4,7 +4,7 @@ import SwiftUI
 
 @MainActor
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
-    private let windowSize = NSSize(width: 900, height: 780)
+    private let windowSize = NSSize(width: 1040, height: 780)
     private let usageStore: UsageStore
     private var cancellables = Set<AnyCancellable>()
 
@@ -17,7 +17,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             defer: false
         )
         window.title = usageStore.appLanguage.settingsWindowTitle
-        window.minSize = NSSize(width: 840, height: 660)
+        window.minSize = NSSize(width: 1000, height: 660)
         window.isReleasedWhenClosed = false
         window.center()
         window.contentView = NSHostingView(
@@ -47,5 +47,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         showWindow(nil)
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        usageStore.settingsBubblePreviewRequested = false
     }
 }

@@ -18,6 +18,7 @@ struct RailMotionFrame: Equatable {
     let verticalPosition: Double
     let kinetic: CGFloat
     let impact: CGFloat
+    let breakPulse: CGFloat
     let floatingCenterX: CGFloat
     let floatingCenterY: CGFloat
     let residue: CGFloat
@@ -77,6 +78,7 @@ struct RailMotionRuntime {
     private var verticalSpring = SpringChannel()
     private var kineticSpring = SpringChannel()
     private var impactSpring = SpringChannel()
+    private var breakPulseSpring = SpringChannel()
     private var floatingXSpring = SpringChannel()
     private var floatingYSpring = SpringChannel()
     private var residueSpring = SpringChannel()
@@ -127,6 +129,7 @@ struct RailMotionRuntime {
         verticalSpring.reset(CGFloat(targetVerticalPosition))
         kineticSpring.reset(0)
         impactSpring.reset(0)
+        breakPulseSpring.reset(0)
         floatingXSpring.reset(originCenter.x)
         floatingYSpring.reset(originCenter.y)
         residueSpring.reset(0)
@@ -220,7 +223,7 @@ struct RailMotionRuntime {
         targetVerticalPosition = min(max(verticalPosition, 0), 1)
         rawProgress = 0
 
-        let breakEnergy = min(
+        let motionEnergy = min(
             abs(filteredPointerVelocity) / 2_400 + abs(filteredPointerAcceleration) / 42_000,
             1
         )
@@ -229,25 +232,29 @@ struct RailMotionRuntime {
         floatingTargetY = floatingCenter.y
         previousFloatingTargetX = floatingCenter.x
         previousFloatingTargetY = floatingCenter.y
-        filteredFloatingSpeed = abs(filteredPointerVelocity) * 0.38
+        filteredFloatingSpeed = abs(filteredPointerVelocity) * 0.28
         hasFloatingSample = true
 
-        // Surface tension collapses the stretched tether quickly into one independent drop.
-        widthSpring.reset(14 + 18 * breakEnergy, velocity: -(95 + 155 * breakEnergy))
-        stretchSpring.reset(0.19 + 0.11 * breakEnergy, velocity: -(0.55 + 0.65 * breakEnergy))
+        // Rupture is an event, not a distance effect. Every break gets the same strong
+        // surface-tension collapse/rebound; pointer energy only flavors the later free motion.
+        widthSpring.reset(26, velocity: -190)
+        stretchSpring.reset(0.28, velocity: -1.15)
         detachSpring.reset(0)
         contentSpring.reset(0)
         verticalSpring.reset(CGFloat(targetVerticalPosition))
-        kineticSpring.reset(max(0.24, breakEnergy))
+        kineticSpring.reset(max(0.20, motionEnergy * 0.42))
 
-        // Main drop and screen-side residue receive opposite-looking rebound energy.
-        impactSpring.reset(0.82 + 0.18 * breakEnergy, velocity: 1.55 + 1.20 * breakEnergy)
-        residueSpring.reset(1.0, velocity: 2.35 + 1.55 * breakEnergy)
+        impactSpring.reset(1.0, velocity: 2.8)
+        breakPulseSpring.reset(0, velocity: 9.6)
+        // F17.20: the anchor-side remnant gets an event-driven bulge with enough
+        // momentum to cross through zero once, producing a visible snap-back before
+        // the residue disappears. Distance never changes this initial impulse.
+        residueSpring.reset(1.25, velocity: 10.8)
         floatingXSpring.reset(floatingCenter.x)
         floatingYSpring.reset(floatingCenter.y)
         wettingSpring.reset(0)
 
-        stepFloating(mode: .free, dt: time.integration, kinetic: max(0.24, breakEnergy))
+        stepFloating(mode: .free, dt: time.integration, kinetic: max(0.20, motionEnergy * 0.42))
         return frame
     }
 
@@ -386,6 +393,7 @@ struct RailMotionRuntime {
         abs(detachSpring.position) < 0.004 && abs(detachSpring.velocity) < 0.05 &&
         abs(kineticSpring.position) < 0.006 && abs(kineticSpring.velocity) < 0.08 &&
         abs(impactSpring.position) < 0.006 && abs(impactSpring.velocity) < 0.08 &&
+        abs(breakPulseSpring.position) < 0.006 && abs(breakPulseSpring.velocity) < 0.08 &&
         abs(residueSpring.position) < 0.006 && abs(residueSpring.velocity) < 0.08 &&
         abs(verticalSpring.position - CGFloat(targetVerticalPosition)) < 0.0005 &&
         abs(verticalSpring.velocity) < 0.01
@@ -397,7 +405,8 @@ struct RailMotionRuntime {
         abs(widthSpring.position) < 0.75 && abs(widthSpring.velocity) < 14 &&
         abs(stretchSpring.position) < 0.012 && abs(stretchSpring.velocity) < 0.10 &&
         abs(kineticSpring.position) < 0.012 && abs(kineticSpring.velocity) < 0.12 &&
-        abs(impactSpring.position) < 0.012 && abs(impactSpring.velocity) < 0.12
+        abs(impactSpring.position) < 0.012 && abs(impactSpring.velocity) < 0.12 &&
+        abs(breakPulseSpring.position) < 0.012 && abs(breakPulseSpring.velocity) < 0.12
     }
 
     var isWettingSettled: Bool {
@@ -418,6 +427,7 @@ struct RailMotionRuntime {
             verticalPosition: Double(min(max(verticalSpring.position, 0), 1)),
             kinetic: min(max(kineticSpring.position, 0), 1),
             impact: min(abs(impactSpring.position), 1),
+            breakPulse: min(max(breakPulseSpring.position, -1), 1),
             floatingCenterX: floatingXSpring.position,
             floatingCenterY: floatingYSpring.position,
             residue: min(max(residueSpring.position, -0.65), 1.25),
@@ -532,13 +542,22 @@ struct RailMotionRuntime {
             kinetic: energy
         )
 
+        // A dedicated signed rupture spring keeps oscillating even if the pointer pauses
+        // at the threshold, so the "pochan" is driven by the break event, never distance.
+        breakPulseSpring.step(
+            toward: 0,
+            dt: dt,
+            response: 0.31,
+            dampingRatio: 0.38
+        )
+
         // The screen-side remnant behaves like the second droplet in a pinched liquid bridge:
         // it rebounds, overshoots slightly, and then disappears independently of the body.
         residueSpring.step(
             toward: 0,
             dt: dt,
-            response: mode == .free ? 0.265 : 0.20,
-            dampingRatio: mode == .free ? 0.46 : 0.64
+            response: mode == .free ? 0.245 : 0.20,
+            dampingRatio: mode == .free ? 0.27 : 0.64
         )
     }
 
@@ -654,5 +673,484 @@ struct RailMotionRuntime {
 
     private static func exponentialBlend(dt: CGFloat, response: CGFloat) -> CGFloat {
         1 - CGFloat(exp(-Double(dt / max(response, 0.001))))
+    }
+}
+
+struct RailDragVelocityTracker: Equatable {
+    private(set) var velocity: CGVector = .zero
+    private var previousTranslation: CGSize = .zero
+    private var previousTimestamp: TimeInterval = 0
+    private var hasSample = false
+
+    mutating func begin(translation: CGSize = .zero, timestamp: TimeInterval) {
+        velocity = .zero
+        previousTranslation = translation
+        previousTimestamp = timestamp
+        hasSample = true
+    }
+
+    @discardableResult
+    mutating func update(translation: CGSize, timestamp: TimeInterval) -> CGVector {
+        guard hasSample else {
+            begin(translation: translation, timestamp: timestamp)
+            return velocity
+        }
+
+        let rawDt = timestamp - previousTimestamp
+        let dt = CGFloat(min(max(rawDt, 1.0 / 240.0), 0.12))
+        let measuredX = min(max((translation.width - previousTranslation.width) / dt, -7_000), 7_000)
+        let measuredY = min(max((translation.height - previousTranslation.height) / dt, -7_000), 7_000)
+        let blend = 1 - CGFloat(exp(-Double(dt / 0.040)))
+        velocity.dx += (measuredX - velocity.dx) * blend
+        velocity.dy += (measuredY - velocity.dy) * blend
+        previousTranslation = translation
+        previousTimestamp = timestamp
+        return velocity
+    }
+
+    func decayedVelocity(at timestamp: TimeInterval) -> CGVector {
+        guard hasSample else { return .zero }
+        let idle = max(timestamp - previousTimestamp, 0)
+        let decay = CGFloat(exp(-idle / 0.105))
+        return CGVector(dx: velocity.dx * decay, dy: velocity.dy * decay)
+    }
+}
+
+enum RailDropletShape: UInt8, Equatable {
+    case round
+    case teardrop
+    case stretchedTeardrop
+    case hangingDrop
+}
+
+enum RailDropletSizeClass: UInt8, Equatable {
+    case small
+    case medium
+    case large
+}
+
+enum RailDropletMotionPhase: UInt8, Equatable {
+    case hanging
+    case falling
+}
+
+struct RailDragDropletSample: Equatable {
+    let xOffset: CGFloat
+    let yOffset: CGFloat
+    let width: CGFloat
+    let height: CGFloat
+    let opacity: CGFloat
+    let highlightOpacity: CGFloat
+    let rotation: CGFloat
+    let secondaryLobe: CGFloat
+    let shape: RailDropletShape
+    let sizeClass: RailDropletSizeClass
+    let phase: RailDropletMotionPhase
+}
+
+enum RailDragDropletEmitter {
+    static let slotDuration: TimeInterval = 0.240
+
+    static func samples(
+        seed: UInt64,
+        elapsed: TimeInterval,
+        intensity: CGFloat,
+        velocity: CGVector = .zero
+    ) -> [RailDragDropletSample] {
+        guard elapsed >= 0 else { return [] }
+        let clampedIntensity = min(max(intensity, 0), 1)
+        let speed = hypot(velocity.dx, velocity.dy)
+        let energy = min(speed / 1_900, 1)
+        let currentSlot = max(Int(floor(elapsed / slotDuration)), 0)
+        let firstSlot = max(currentSlot - 6, 0)
+        var result: [RailDragDropletSample] = []
+        result.reserveCapacity(7)
+
+        for slot in firstSlot...currentSlot {
+            let slotSeed = seed ^ (UInt64(slot) &* 0x9E37_79B9_7F4A_7C15)
+            let emissionChance = 0.48 + 0.24 * Double(clampedIntensity)
+            guard unit(slotSeed, salt: 1) < emissionChance else { continue }
+
+            let birth = Double(slot) * slotDuration + unit(slotSeed, salt: 2) * 0.055
+            let age = elapsed - birth
+            let hangingDuration = 0.23 + unit(slotSeed, salt: 3) * 0.17
+            let fallingLifetime = 0.66 + unit(slotSeed, salt: 4) * 0.34
+            let totalLifetime = hangingDuration + fallingLifetime
+            guard age >= 0, age <= totalLifetime else { continue }
+
+            let phase: RailDropletMotionPhase = age < hangingDuration ? .hanging : .falling
+            let hangingProgress = min(max(age / hangingDuration, 0), 1)
+            let hangingEase = hangingProgress * hangingProgress * (3 - 2 * hangingProgress)
+            let fallingAge = max(age - hangingDuration, 0)
+            let fallingProgress = min(max(fallingAge / fallingLifetime, 0), 1)
+
+            let sizeRoll = unit(slotSeed, salt: 5)
+            let sizeClass: RailDropletSizeClass
+            let baseSize: CGFloat
+            if sizeRoll < 0.10 {
+                sizeClass = .small
+                baseSize = 2.40 + CGFloat(unit(slotSeed, salt: 6)) * 1.10
+            } else if sizeRoll < 0.72 {
+                sizeClass = .medium
+                baseSize = 4.45 + CGFloat(unit(slotSeed, salt: 6)) * 2.05
+            } else {
+                sizeClass = .large
+                baseSize = 6.55 + CGFloat(unit(slotSeed, salt: 6)) * 2.85
+            }
+
+            let fallingShapeRoll = unit(slotSeed, salt: 7)
+            let fallingShape: RailDropletShape
+            if fallingShapeRoll < 0.42 {
+                fallingShape = .round
+            } else if fallingShapeRoll < 0.88 {
+                fallingShape = .teardrop
+            } else if fallingShapeRoll < 0.95 {
+                fallingShape = .stretchedTeardrop
+            } else {
+                fallingShape = .hangingDrop
+            }
+            let shape: RailDropletShape = phase == .hanging ? .hangingDrop : fallingShape
+
+            let xJitter = CGFloat(unit(slotSeed, salt: 8) - 0.5) * (phase == .hanging ? 1.6 : 3.2)
+            let backwardX: CGFloat
+            if speed < 220 {
+                backwardX = CGFloat(unit(slotSeed, salt: 9) - 0.5) * 2.4
+            } else {
+                let directional = -velocity.dx * (0.013 + 0.017 * energy)
+                backwardX = min(max(directional, -62), 62)
+                    + CGFloat(unit(slotSeed, salt: 9) - 0.5) * 3.4
+            }
+            let initialFall = 8 + CGFloat(unit(slotSeed, salt: 10)) * 7
+            let gravity = 410 + CGFloat(unit(slotSeed, salt: 11)) * 105
+
+            let width: CGFloat
+            let height: CGFloat
+            let xOffset: CGFloat
+            let yOffset: CGFloat
+            let opacity: CGFloat
+            let rotation: CGFloat
+            if phase == .hanging {
+                width = baseSize * CGFloat(0.62 + 0.38 * hangingEase)
+                height = width * CGFloat(1.20 + 0.52 * hangingEase)
+                xOffset = xJitter * CGFloat(0.4 + 0.6 * hangingEase)
+                yOffset = 0
+                opacity = CGFloat(0.52 + 0.22 * hangingEase) * (0.82 + 0.12 * clampedIntensity)
+                rotation = 0
+            } else {
+                let fadeOut = CGFloat(pow(max(1 - fallingProgress, 0), 0.72))
+                width = baseSize * (1 - 0.07 * CGFloat(fallingProgress))
+                let aspect: CGFloat
+                switch shape {
+                case .round: aspect = 1.04
+                case .teardrop: aspect = 1.24 + 0.08 * CGFloat(fallingProgress)
+                case .stretchedTeardrop: aspect = 1.38 + 0.08 * energy
+                case .hangingDrop: aspect = 1.34
+                }
+                height = width * aspect
+                xOffset = xJitter + backwardX * CGFloat(fallingAge)
+                yOffset = 1.2 + initialFall * CGFloat(fallingAge) + 0.5 * gravity * CGFloat(fallingAge * fallingAge)
+                opacity = fadeOut * (0.58 + 0.16 * clampedIntensity)
+                rotation = min(max(backwardX / 1_300, -0.045), 0.045)
+            }
+
+            result.append(
+                RailDragDropletSample(
+                    xOffset: xOffset,
+                    yOffset: yOffset,
+                    width: width,
+                    height: height,
+                    opacity: opacity,
+                    highlightOpacity: opacity * (0.30 + 0.12 * CGFloat(unit(slotSeed, salt: 12))),
+                    rotation: rotation,
+                    secondaryLobe: 0,
+                    shape: shape,
+                    sizeClass: sizeClass,
+                    phase: phase
+                )
+            )
+        }
+        return result
+    }
+
+    static func unit(_ seed: UInt64, salt: UInt64) -> Double {
+        var z = seed &+ salt &* 0xD1B5_4A32_D192_ED03 &+ 0x9E37_79B9_7F4A_7C15
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        z ^= z >> 31
+        return Double(z >> 11) / 9_007_199_254_740_992.0
+    }
+}
+
+enum RailFloatingDropletEmitter {
+    static let slotDuration: TimeInterval = 0.270
+
+    static func samples(
+        seed: UInt64,
+        elapsed: TimeInterval,
+        intensity: CGFloat,
+        velocity: CGVector,
+        emitterHalfWidth: CGFloat = 0,
+        surfaceYOffset: (CGFloat) -> CGFloat = { _ in 0 },
+        fallingSurfaceYOffset: ((CGFloat) -> CGFloat)? = nil
+    ) -> [RailDragDropletSample] {
+        guard elapsed >= 0 else { return [] }
+        let clampedIntensity = min(max(intensity, 0), 1)
+        let speed = hypot(velocity.dx, velocity.dy)
+        let energy = min(speed / 1_850, 1)
+        let currentSlot = max(Int(floor(elapsed / slotDuration)), 0)
+        let firstSlot = max(currentSlot - 6, 0)
+        var result: [RailDragDropletSample] = []
+        result.reserveCapacity(7)
+
+        for slot in firstSlot...currentSlot {
+            let slotSeed = seed ^ (UInt64(slot) &* 0xA24B_AED4_963E_E407)
+            let chance = 0.50 + 0.20 * Double(clampedIntensity) + 0.05 * Double(energy)
+            guard RailDragDropletEmitter.unit(slotSeed, salt: 1) < chance else { continue }
+
+            let birth = Double(slot) * slotDuration + RailDragDropletEmitter.unit(slotSeed, salt: 2) * 0.060
+            let ageDouble = elapsed - birth
+            let hangingDuration = 0.20 + RailDragDropletEmitter.unit(slotSeed, salt: 3) * 0.16
+            let fallingLifetime = 0.70 + RailDragDropletEmitter.unit(slotSeed, salt: 4) * 0.36
+            guard ageDouble >= 0, ageDouble <= hangingDuration + fallingLifetime else { continue }
+
+            let phase: RailDropletMotionPhase = ageDouble < hangingDuration ? .hanging : .falling
+            let hangingProgress = min(max(ageDouble / hangingDuration, 0), 1)
+            let hangingEase = hangingProgress * hangingProgress * (3 - 2 * hangingProgress)
+            let fallingAge = max(ageDouble - hangingDuration, 0)
+            let fallingProgress = min(max(CGFloat(fallingAge / fallingLifetime), 0), 1)
+
+            let sizeRoll = RailDragDropletEmitter.unit(slotSeed, salt: 5)
+            let sizeClass: RailDropletSizeClass
+            let baseSize: CGFloat
+            if sizeRoll < 0.09 {
+                sizeClass = .small
+                baseSize = 2.50 + CGFloat(RailDragDropletEmitter.unit(slotSeed, salt: 6)) * 1.10
+            } else if sizeRoll < 0.70 {
+                sizeClass = .medium
+                baseSize = 4.60 + CGFloat(RailDragDropletEmitter.unit(slotSeed, salt: 6)) * 2.10
+            } else {
+                sizeClass = .large
+                baseSize = 6.75 + CGFloat(RailDragDropletEmitter.unit(slotSeed, salt: 6)) * 2.80
+            }
+
+            let shapeRoll = RailDragDropletEmitter.unit(slotSeed, salt: 7)
+            let fallingShape: RailDropletShape = shapeRoll < 0.45
+                ? .round
+                : shapeRoll < 0.89 ? .teardrop : shapeRoll < 0.96 ? .stretchedTeardrop : .hangingDrop
+            let shape: RailDropletShape = phase == .hanging ? .hangingDrop : fallingShape
+
+            let bandHalfWidth = max(emitterHalfWidth, 0)
+            let bandRoll = CGFloat(RailDragDropletEmitter.unit(slotSeed, salt: 14) * 2 - 1)
+            let bandSpread = 0.52 + CGFloat(RailDragDropletEmitter.unit(slotSeed, salt: 15)) * 0.48
+            let bandOffset = bandRoll * bandHalfWidth * bandSpread
+            let hangingSurfaceYOffset = surfaceYOffset(bandOffset)
+            let detachmentSurfaceYOffset = fallingSurfaceYOffset?(bandOffset) ?? hangingSurfaceYOffset
+            let backwardMagnitude = min(
+                speed * (0.014 + 0.028 * energy)
+                    * (0.86 + CGFloat(RailDragDropletEmitter.unit(slotSeed, salt: 8)) * 0.28),
+                88
+            )
+            let backwardUnit: CGVector
+            if speed > 180 {
+                backwardUnit = CGVector(dx: -velocity.dx / speed, dy: -velocity.dy / speed)
+            } else {
+                backwardUnit = .zero
+            }
+            let vx = speed > 180
+                ? backwardUnit.dx * backwardMagnitude + CGFloat(RailDragDropletEmitter.unit(slotSeed, salt: 9) - 0.5) * 2.8
+                : CGFloat(RailDragDropletEmitter.unit(slotSeed, salt: 9) - 0.5) * 2.8
+            let inertialY = speed > 180 ? backwardUnit.dy * backwardMagnitude * 0.34 : 0
+            let initialFall = 8 + CGFloat(RailDragDropletEmitter.unit(slotSeed, salt: 10)) * 7
+            let vy = max(inertialY + initialFall, -24)
+            let mass = 1.00 + baseSize * 0.18 + CGFloat(RailDragDropletEmitter.unit(slotSeed, salt: 11)) * 0.18
+            let drag = 1.15 + CGFloat(RailDragDropletEmitter.unit(slotSeed, salt: 12)) * 0.80
+            let fallAge = CGFloat(fallingAge)
+            let k = drag / max(mass, 0.25)
+            let travelFactor = k > 0.001
+                ? CGFloat((1 - exp(-Double(k * fallAge))) / Double(k))
+                : fallAge
+            let gravity = 420 + 85 / max(mass, 0.7)
+
+            let width: CGFloat
+            let height: CGFloat
+            let xOffset: CGFloat
+            let yOffset: CGFloat
+            let opacity: CGFloat
+            let rotation: CGFloat
+            if phase == .hanging {
+                width = baseSize * CGFloat(0.60 + 0.40 * hangingEase)
+                height = width * CGFloat(1.22 + 0.50 * hangingEase)
+                xOffset = bandOffset + backwardUnit.dx * CGFloat(2.2 * hangingEase)
+                yOffset = hangingSurfaceYOffset
+                opacity = CGFloat(0.54 + 0.20 * hangingEase) * (0.84 + 0.10 * clampedIntensity)
+                rotation = 0
+            } else {
+                let fadeOut = pow(max(1 - fallingProgress, 0), 0.74)
+                width = baseSize * (1 - 0.065 * fallingProgress)
+                let aspect: CGFloat
+                switch shape {
+                case .round: aspect = 1.04
+                case .teardrop: aspect = 1.24
+                case .stretchedTeardrop: aspect = 1.36 + 0.06 * energy
+                case .hangingDrop: aspect = 1.34
+                }
+                height = width * aspect
+                xOffset = bandOffset + vx * travelFactor
+                yOffset = detachmentSurfaceYOffset + 1.1 + vy * travelFactor + 0.5 * gravity * fallAge * fallAge
+                opacity = fadeOut * (0.58 + 0.14 * clampedIntensity)
+                rotation = min(max(vx / 1_450, -0.040), 0.040)
+            }
+
+            result.append(
+                RailDragDropletSample(
+                    xOffset: xOffset,
+                    yOffset: yOffset,
+                    width: width,
+                    height: height,
+                    opacity: opacity,
+                    highlightOpacity: opacity * (0.28 + 0.12 * CGFloat(RailDragDropletEmitter.unit(slotSeed, salt: 13))),
+                    rotation: rotation,
+                    secondaryLobe: 0,
+                    shape: shape,
+                    sizeClass: sizeClass,
+                    phase: phase
+                )
+            )
+        }
+        return result
+    }
+}
+
+enum RailBreakDropletGroup: UInt8, Equatable {
+    case freeSideSpray
+    case anchorSideSplash
+}
+
+struct RailBreakDropletSample: Equatable {
+    let group: RailBreakDropletGroup
+    let xOffset: CGFloat
+    let yOffset: CGFloat
+    let width: CGFloat
+    let height: CGFloat
+    let opacity: CGFloat
+    let highlightOpacity: CGFloat
+    let rotation: CGFloat
+    let secondaryLobe: CGFloat
+    let shape: RailDropletShape
+    let mass: CGFloat
+    let drag: CGFloat
+    let lifespan: CGFloat
+}
+
+enum RailBreakDropletEmitter {
+    static let maxLifetime: TimeInterval = 1.05
+
+    static func samples(
+        seed: UInt64,
+        elapsed: TimeInterval,
+        velocity: CGVector,
+        freeDirection: CGFloat
+    ) -> [RailBreakDropletSample] {
+        guard elapsed >= 0, elapsed <= maxLifetime else { return [] }
+        let speed = hypot(velocity.dx, velocity.dy)
+        let energy = min(speed / 2_200, 1)
+        let direction = freeDirection >= 0 ? CGFloat(1) : CGFloat(-1)
+        var result: [RailBreakDropletSample] = []
+        result.reserveCapacity(9)
+
+        for index in 0..<9 {
+            let group: RailBreakDropletGroup = index < 6 ? .freeSideSpray : .anchorSideSplash
+            let particleSeed = seed
+                ^ (UInt64(index + 1) &* 0xA24B_AED4_963E_E407)
+                ^ (group == .freeSideSpray ? 0x9FB2_1C65_1E98_DF25 : 0xD6E8_FEB8_6659_FD93)
+            let birthWindow = group == .freeSideSpray ? 0.095 : 0.070
+            let birth = RailDragDropletEmitter.unit(particleSeed, salt: 1) * birthWindow
+            let ageDouble = elapsed - birth
+            guard ageDouble >= 0 else { continue }
+
+            let sizeRoll = RailDragDropletEmitter.unit(particleSeed, salt: 2)
+            let baseSize: CGFloat
+            if sizeRoll < 0.10 {
+                baseSize = 2.50 + CGFloat(RailDragDropletEmitter.unit(particleSeed, salt: 3)) * 1.10
+            } else if sizeRoll < 0.70 {
+                baseSize = 4.35 + CGFloat(RailDragDropletEmitter.unit(particleSeed, salt: 3)) * 2.00
+            } else {
+                baseSize = 6.45 + CGFloat(RailDragDropletEmitter.unit(particleSeed, salt: 3)) * 2.70
+            }
+            let mass = 0.98 + baseSize * 0.18 + CGFloat(RailDragDropletEmitter.unit(particleSeed, salt: 4)) * 0.22
+            let drag = 1.15 + CGFloat(RailDragDropletEmitter.unit(particleSeed, salt: 5)) * 0.95
+            let lifespan = CGFloat(0.62 + RailDragDropletEmitter.unit(particleSeed, salt: 6) * 0.30)
+            let age = CGFloat(ageDouble)
+            guard age <= lifespan else { continue }
+
+            let vx: CGFloat
+            let vy: CGFloat
+            if group == .freeSideSpray {
+                if energy < 0.12 {
+                    vx = direction * (3 + CGFloat(RailDragDropletEmitter.unit(particleSeed, salt: 7)) * 9)
+                    vy = 10 + CGFloat(RailDragDropletEmitter.unit(particleSeed, salt: 8)) * 13
+                } else {
+                    let baseAngle = atan2(velocity.dy, velocity.dx)
+                    let scatter = (CGFloat(RailDragDropletEmitter.unit(particleSeed, salt: 7)) - 0.5) * 0.18
+                    let angle = baseAngle + scatter
+                    let impulse = min(
+                        speed
+                            * (0.026 + 0.026 * energy)
+                            * (0.86 + CGFloat(RailDragDropletEmitter.unit(particleSeed, salt: 8)) * 0.28),
+                        104
+                    )
+                    vx = cos(angle) * impulse
+                    vy = sin(angle) * impulse * 0.52 + 8
+                }
+            } else {
+                vx = direction * (14 + 36 * energy)
+                    * (0.84 + CGFloat(RailDragDropletEmitter.unit(particleSeed, salt: 7)) * 0.28)
+                vy = (CGFloat(RailDragDropletEmitter.unit(particleSeed, salt: 8)) - 0.40) * (42 + 24 * energy) + 8
+            }
+
+            let k = drag / max(mass, 0.2)
+            let travelFactor = k > 0.001
+                ? CGFloat((1 - exp(-Double(k * age))) / Double(k))
+                : age
+            let gravity = 430 + 90 / max(mass, 0.7)
+            let x = vx * travelFactor
+            let y = vy * travelFactor + 0.5 * gravity * age * age
+            let progress = min(max(age / max(lifespan, 0.01), 0), 1)
+            let fadeIn = min(age / 0.055, 1)
+            let fadeOut = pow(max(1 - progress, 0), 0.70)
+            let opacity = fadeIn * fadeOut * (group == .freeSideSpray ? 0.64 : 0.54)
+            let shapeRoll = RailDragDropletEmitter.unit(particleSeed, salt: 9)
+            let shape: RailDropletShape = shapeRoll < 0.46
+                ? .round
+                : shapeRoll < 0.91 ? .teardrop : shapeRoll < 0.96 ? .stretchedTeardrop : .hangingDrop
+            let width = baseSize * (1 - 0.07 * progress)
+            let aspect: CGFloat
+            switch shape {
+            case .round: aspect = 1.04
+            case .teardrop: aspect = 1.22
+            case .stretchedTeardrop: aspect = 1.36
+            case .hangingDrop: aspect = 1.34
+            }
+            let height = width * aspect
+
+            result.append(
+                RailBreakDropletSample(
+                    group: group,
+                    xOffset: x,
+                    yOffset: y,
+                    width: width,
+                    height: height,
+                    opacity: opacity,
+                    highlightOpacity: opacity * (0.28 + 0.12 * CGFloat(RailDragDropletEmitter.unit(particleSeed, salt: 10))),
+                    rotation: CGFloat((RailDragDropletEmitter.unit(particleSeed, salt: 11) - 0.5) * 0.08),
+                    secondaryLobe: 0,
+                    shape: shape,
+                    mass: mass,
+                    drag: drag,
+                    lifespan: lifespan
+                )
+            )
+        }
+        return result
     }
 }

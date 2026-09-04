@@ -11,6 +11,13 @@ final class UsageStore: ObservableObject {
     private static let providerOrderKey = "UsageDock.providerOrder.v1"
     private static let providerAccentKey = "UsageDock.providerAccent.v1"
     private static let railSpacingKey = "UsageDock.railSpacing.v1"
+    private static let railInnerPaddingYKey = "UsageDock.railInnerPaddingY.v1"
+    private static let railScreenInnerPaddingKey = "UsageDock.railScreenInnerPadding.v1"
+    private static let railWindowInnerPaddingKey = "UsageDock.railWindowInnerPadding.v1"
+    // Migration-only legacy keys. Never delete or rewrite these during F17.18.
+    private static let legacyRailTopPaddingKey = "UsageDock.railTopPadding.v1"
+    private static let legacyRailBottomPaddingKey = "UsageDock.railBottomPadding.v1"
+    private static let legacyRailIconEdgeInsetKey = "UsageDock.railIconEdgeInset.v1"
     private static let railVerticalPositionKey = "UsageDock.railVerticalPosition.v1"
     private static let railShowPercentKey = "UsageDock.railShowPercent.v1"
     private static let railShowRingKey = "UsageDock.railShowRing.v1"
@@ -32,7 +39,6 @@ final class UsageStore: ObservableObject {
     private static let providerWebURLKey = "UsageDock.providerWebURLs.v1"
     private static let railEdgeProfileKey = "UsageDock.railEdgeProfile.v1"
     private static let railInnerEdgeProfileKey = "UsageDock.railInnerEdgeProfile.v1"
-    private static let railIconEdgeInsetKey = "UsageDock.railIconEdgeInset.v1"
     private static let railPercentSourceKey = "UsageDock.railPercentSource.v1"
     private static let railOuterRingSourceKey = "UsageDock.railOuterRingSource.v1"
     private static let railInnerRingSourceKey = "UsageDock.railInnerRingSource.v1"
@@ -49,7 +55,9 @@ final class UsageStore: ObservableObject {
     private static let railAccountLabelFontSizeKey = "UsageDock.railAccountLabelFontSize.v1"
     private static let railRemainingTimeFontSizeKey = "UsageDock.railRemainingTimeFontSize.v1"
     private static let railScreenEdgeShapeKey = "UsageDock.railScreenEdgeShape.v1"
+    private static let railScreenEdgeCurvatureKey = "UsageDock.railScreenEdgeCurvature.v1"
     private static let railInnerShapeKey = "UsageDock.railInnerShape.v1"
+    private static let railMaterialModeKey = "UsageDock.railMaterialMode.v1"
     private static let railEdgeStyleKey = "UsageDock.railEdgeStyle.v1"
     private static let railEdgeWidthKey = "UsageDock.railEdgeWidth.v1"
     private static let railEdgeOpacityKey = "UsageDock.railEdgeOpacity.v1"
@@ -62,6 +70,13 @@ final class UsageStore: ObservableObject {
     private static let railTitleWidthKey = "UsageDock.railTitleWidth.v1"
     private static let railTimeWidthKey = "UsageDock.railTimeWidth.v1"
     private static let railShowTitleKey = "UsageDock.railShowTitle.v1"
+    private static let railDropletsEnabledKey = "UsageDock.railDropletsEnabled.v1"
+    private static let displayAccountIDsKey = "UsageDock.displayAccountIDs.v1"
+    private static let activeDisplayAccountIDKey = "UsageDock.activeDisplayAccountID.v1"
+    private static let menuBarUsageEnabledKey = "UsageDock.menuBarUsageEnabled.v1"
+    private static let menuBarAccountIDsKey = "UsageDock.menuBarAccountIDs.v1"
+    private static let menuBarShowRingKey = "UsageDock.menuBarShowRing.v1"
+    private static let menuBarShowPercentageKey = "UsageDock.menuBarShowPercentage.v1"
 
     @Published var accounts: [UsageAccount] {
         didSet { persistAccounts() }
@@ -90,6 +105,27 @@ final class UsageStore: ObservableObject {
             let clamped = min(max(railItemSpacing, 0), 36)
             if clamped != railItemSpacing { railItemSpacing = clamped; return }
             defaults.set(clamped, forKey: Self.railSpacingKey)
+        }
+    }
+    @Published var railInnerPaddingY: Double {
+        didSet {
+            let clamped = min(max(railInnerPaddingY, 0), 48)
+            if clamped != railInnerPaddingY { railInnerPaddingY = clamped; return }
+            defaults.set(clamped, forKey: Self.railInnerPaddingYKey)
+        }
+    }
+    @Published var railScreenInnerPadding: Double {
+        didSet {
+            let clamped = min(max(railScreenInnerPadding, 0), 48)
+            if clamped != railScreenInnerPadding { railScreenInnerPadding = clamped; return }
+            defaults.set(clamped, forKey: Self.railScreenInnerPaddingKey)
+        }
+    }
+    @Published var railWindowInnerPadding: Double {
+        didSet {
+            let clamped = min(max(railWindowInnerPadding, 0), 48)
+            if clamped != railWindowInnerPadding { railWindowInnerPadding = clamped; return }
+            defaults.set(clamped, forKey: Self.railWindowInnerPaddingKey)
         }
     }
     @Published var railVerticalPosition: Double {
@@ -168,13 +204,6 @@ final class UsageStore: ObservableObject {
     // Keep railEdgeProfile as the screen-edge setting to preserve the existing preference key.
     @Published var railEdgeProfile: RailEdgeProfile { didSet { defaults.set(railEdgeProfile.rawValue, forKey: Self.railEdgeProfileKey) } }
     @Published var railInnerEdgeProfile: RailEdgeProfile { didSet { defaults.set(railInnerEdgeProfile.rawValue, forKey: Self.railInnerEdgeProfileKey) } }
-    @Published var railIconEdgeInset: Double {
-        didSet {
-            let clamped = min(max(railIconEdgeInset, 0), 48)
-            if clamped != railIconEdgeInset { railIconEdgeInset = clamped; return }
-            defaults.set(clamped, forKey: Self.railIconEdgeInsetKey)
-        }
-    }
     @Published var railPercentSource: RailQuotaSource { didSet { defaults.set(railPercentSource.rawValue, forKey: Self.railPercentSourceKey) } }
     @Published var railOuterRingSource: RailQuotaSource { didSet { defaults.set(railOuterRingSource.rawValue, forKey: Self.railOuterRingSourceKey) } }
     @Published var railInnerRingSource: RailQuotaSource { didSet { defaults.set(railInnerRingSource.rawValue, forKey: Self.railInnerRingSourceKey) } }
@@ -209,12 +238,22 @@ final class UsageStore: ObservableObject {
             defaults.set(clamped, forKey: Self.railScreenEdgeShapeKey)
         }
     }
+    @Published var railScreenEdgeCurvature: Double {
+        didSet {
+            let clamped = min(max(railScreenEdgeCurvature, -1), 1)
+            if clamped != railScreenEdgeCurvature { railScreenEdgeCurvature = clamped; return }
+            defaults.set(clamped, forKey: Self.railScreenEdgeCurvatureKey)
+        }
+    }
     @Published var railInnerShape: Double {
         didSet {
             let clamped = min(max(railInnerShape, -1), 1)
             if clamped != railInnerShape { railInnerShape = clamped; return }
             defaults.set(clamped, forKey: Self.railInnerShapeKey)
         }
+    }
+    @Published var railMaterialMode: RailMaterialMode {
+        didSet { defaults.set(railMaterialMode.rawValue, forKey: Self.railMaterialModeKey) }
     }
     @Published var railEdgeStyle: RailEdgeStyle {
         didSet { defaults.set(railEdgeStyle.rawValue, forKey: Self.railEdgeStyleKey) }
@@ -290,6 +329,27 @@ final class UsageStore: ObservableObject {
     @Published var railShowTitle: Bool {
         didSet { defaults.set(railShowTitle, forKey: Self.railShowTitleKey) }
     }
+    @Published var railDropletsEnabled: Bool {
+        didSet { defaults.set(railDropletsEnabled, forKey: Self.railDropletsEnabledKey) }
+    }
+    @Published private(set) var displayAccountIDs: [UUID] {
+        didSet { persistDisplayAccountSelection() }
+    }
+    @Published private(set) var activeDisplayAccountID: UUID? {
+        didSet { persistDisplayAccountSelection() }
+    }
+    @Published var menuBarUsageEnabled: Bool {
+        didSet { persistMenuBarPreferences() }
+    }
+    @Published private(set) var menuBarAccountIDs: [UUID] {
+        didSet { persistMenuBarPreferences() }
+    }
+    @Published var menuBarShowRing: Bool {
+        didSet { persistMenuBarPreferences() }
+    }
+    @Published var menuBarShowPercentage: Bool {
+        didSet { persistMenuBarPreferences() }
+    }
     @Published private(set) var providerWebURLs: [ProviderID: String] {
         didSet { persistProviderWebURLs() }
     }
@@ -297,6 +357,7 @@ final class UsageStore: ObservableObject {
     @Published private(set) var accountRefreshStates: [UUID: AccountRefreshState] = [:]
     @Published private(set) var multiplierDetectionStates: [UUID: MultiplierDetectionState] = [:]
     @Published private(set) var isRefreshing = false
+    @Published var settingsBubblePreviewRequested = false
 
     private let defaults: UserDefaults
     private let encoder = JSONEncoder()
@@ -316,6 +377,25 @@ final class UsageStore: ObservableObject {
             ? 1.0
             : min(max(defaults.double(forKey: Self.railScaleKey), 0.45), 1.45)
         railItemSpacing = defaults.object(forKey: Self.railSpacingKey) == nil ? 0 : min(max(defaults.double(forKey: Self.railSpacingKey), 0), 36)
+        let legacyVerticalPadding = (defaults.object(forKey: Self.railShowRingKey) == nil || defaults.bool(forKey: Self.railShowRingKey)) ? 10.0 : 6.0
+        let legacyTopPadding = defaults.object(forKey: Self.legacyRailTopPaddingKey) == nil
+            ? legacyVerticalPadding
+            : min(max(defaults.double(forKey: Self.legacyRailTopPaddingKey), 0), 48)
+        let legacyBottomPadding = defaults.object(forKey: Self.legacyRailBottomPaddingKey) == nil
+            ? legacyVerticalPadding
+            : min(max(defaults.double(forKey: Self.legacyRailBottomPaddingKey), 0), 48)
+        railInnerPaddingY = defaults.object(forKey: Self.railInnerPaddingYKey) == nil
+            ? (legacyTopPadding + legacyBottomPadding) * 0.5
+            : min(max(defaults.double(forKey: Self.railInnerPaddingYKey), 0), 48)
+        let legacyScreenPadding = defaults.object(forKey: Self.legacyRailIconEdgeInsetKey) == nil
+            ? 0
+            : min(max(defaults.double(forKey: Self.legacyRailIconEdgeInsetKey), 0), 48)
+        railScreenInnerPadding = defaults.object(forKey: Self.railScreenInnerPaddingKey) == nil
+            ? legacyScreenPadding
+            : min(max(defaults.double(forKey: Self.railScreenInnerPaddingKey), 0), 48)
+        railWindowInnerPadding = defaults.object(forKey: Self.railWindowInnerPaddingKey) == nil
+            ? 0
+            : min(max(defaults.double(forKey: Self.railWindowInnerPaddingKey), 0), 48)
         railVerticalPosition = defaults.object(forKey: Self.railVerticalPositionKey) == nil ? 0 : min(max(defaults.double(forKey: Self.railVerticalPositionKey), 0), 1)
         railShowPercent = defaults.object(forKey: Self.railShowPercentKey) == nil ? true : defaults.bool(forKey: Self.railShowPercentKey)
         railShowRing = defaults.object(forKey: Self.railShowRingKey) == nil ? true : defaults.bool(forKey: Self.railShowRingKey)
@@ -341,9 +421,13 @@ final class UsageStore: ObservableObject {
         railScreenEdgeShape = defaults.object(forKey: Self.railScreenEdgeShapeKey) == nil
             ? savedEdgeProfile.continuousValue
             : min(max(defaults.double(forKey: Self.railScreenEdgeShapeKey), -1), 1)
+        railScreenEdgeCurvature = defaults.object(forKey: Self.railScreenEdgeCurvatureKey) == nil
+            ? 0
+            : min(max(defaults.double(forKey: Self.railScreenEdgeCurvatureKey), -1), 1)
         railInnerShape = defaults.object(forKey: Self.railInnerShapeKey) == nil
             ? savedInnerEdgeProfile.continuousValue
             : min(max(defaults.double(forKey: Self.railInnerShapeKey), -1), 1)
+        railMaterialMode = RailMaterialMode(rawValue: defaults.string(forKey: Self.railMaterialModeKey) ?? "standard") ?? .standard
         railEdgeStyle = RailEdgeStyle(rawValue: defaults.string(forKey: Self.railEdgeStyleKey) ?? "simple") ?? .simple
         railEdgeWidth = defaults.object(forKey: Self.railEdgeWidthKey) == nil ? 0.8 : min(max(defaults.double(forKey: Self.railEdgeWidthKey), 0.25), 4)
         railEdgeOpacity = defaults.object(forKey: Self.railEdgeOpacityKey) == nil ? 0.62 : min(max(defaults.double(forKey: Self.railEdgeOpacityKey), 0), 1)
@@ -351,7 +435,6 @@ final class UsageStore: ObservableObject {
         railGlowOpacity = defaults.object(forKey: Self.railGlowOpacityKey) == nil ? 0.20 : min(max(defaults.double(forKey: Self.railGlowOpacityKey), 0), 1)
         railBorderColorMode = RailEdgeColorMode(rawValue: defaults.string(forKey: Self.railBorderColorModeKey) ?? "automatic") ?? .automatic
         railBorderCustomHex = defaults.string(forKey: Self.railBorderCustomHexKey)
-        railIconEdgeInset = defaults.object(forKey: Self.railIconEdgeInsetKey) == nil ? 0 : min(max(defaults.double(forKey: Self.railIconEdgeInsetKey), 0), 48)
         railPercentSource = RailQuotaSource(rawValue: defaults.string(forKey: Self.railPercentSourceKey) ?? "automatic") ?? .automatic
         railOuterRingSource = RailQuotaSource(rawValue: defaults.string(forKey: Self.railOuterRingSourceKey) ?? "automatic") ?? .automatic
         railInnerRingSource = RailQuotaSource(rawValue: defaults.string(forKey: Self.railInnerRingSourceKey) ?? "none") ?? .none
@@ -376,6 +459,30 @@ final class UsageStore: ObservableObject {
         railTitleWidth = defaults.object(forKey: Self.railTitleWidthKey) == nil ? 66 : min(max(defaults.double(forKey: Self.railTitleWidthKey), 36), 160)
         railTimeWidth = defaults.object(forKey: Self.railTimeWidthKey) == nil ? 72 : min(max(defaults.double(forKey: Self.railTimeWidthKey), 36), 160)
         railShowTitle = defaults.object(forKey: Self.railShowTitleKey) == nil ? true : defaults.bool(forKey: Self.railShowTitleKey)
+        railDropletsEnabled = defaults.object(forKey: Self.railDropletsEnabledKey) == nil
+            ? true
+            : defaults.bool(forKey: Self.railDropletsEnabledKey)
+        var seenDisplayIDs = Set<UUID>()
+        displayAccountIDs = (defaults.stringArray(forKey: Self.displayAccountIDsKey) ?? [])
+            .compactMap(UUID.init(uuidString:))
+            .filter { seenDisplayIDs.insert($0).inserted }
+            .prefix(3)
+            .map { $0 }
+        activeDisplayAccountID = defaults.string(forKey: Self.activeDisplayAccountIDKey)
+            .flatMap(UUID.init(uuidString:))
+        menuBarUsageEnabled = defaults.object(forKey: Self.menuBarUsageEnabledKey) == nil
+            ? true
+            : defaults.bool(forKey: Self.menuBarUsageEnabledKey)
+        var seenMenuBarIDs = Set<UUID>()
+        menuBarAccountIDs = (defaults.stringArray(forKey: Self.menuBarAccountIDsKey) ?? [])
+            .compactMap(UUID.init(uuidString:))
+            .filter { seenMenuBarIDs.insert($0).inserted }
+        menuBarShowRing = defaults.object(forKey: Self.menuBarShowRingKey) == nil
+            ? true
+            : defaults.bool(forKey: Self.menuBarShowRingKey)
+        menuBarShowPercentage = defaults.object(forKey: Self.menuBarShowPercentageKey) == nil
+            ? true
+            : defaults.bool(forKey: Self.menuBarShowPercentageKey)
 
         let savedOrder = (defaults.stringArray(forKey: Self.providerOrderKey) ?? [])
             .compactMap(ProviderID.init(rawValue:))
@@ -400,7 +507,11 @@ final class UsageStore: ObservableObject {
                 : []
         }
 
+        normalizeDisplayAccountSelection()
+        normalizeMenuBarAccountSelection()
         persistAccounts()
+        persistDisplayAccountSelection()
+        persistMenuBarPreferences()
     }
 
     deinit {
@@ -413,6 +524,116 @@ final class UsageStore: ObservableObject {
 
     func visibleAccounts(for provider: ProviderID) -> [UsageAccount] {
         runtimeAccounts.filter { $0.provider == provider }
+    }
+
+    func displaySelectableAccounts() -> [UsageAccount] {
+        runtimeAccounts.filter { account in
+            guard account.isEnabled else { return false }
+            switch account.source {
+            case .currentSession, .credentialFile, .profile:
+                return true
+            case .manual, .synthetic, .mock, nil:
+                return false
+            }
+        }
+    }
+
+    func displayAccountCandidates() -> [UsageAccount] {
+        displayAccountIDs.compactMap { id in
+            runtimeAccounts.first { $0.id == id }
+        }
+    }
+
+    func menuBarSelectableAccounts() -> [UsageAccount] {
+        displaySelectableAccounts()
+    }
+
+    func menuBarAccounts() -> [UsageAccount] {
+        menuBarAccountIDs.compactMap { id in
+            runtimeAccounts.first { $0.id == id && $0.isEnabled }
+        }
+    }
+
+    func isMenuBarAccountSelected(_ accountID: UUID) -> Bool {
+        menuBarAccountIDs.contains(accountID)
+    }
+
+    func setMenuBarAccountSelected(_ accountID: UUID, enabled: Bool) {
+        if enabled {
+            guard !menuBarAccountIDs.contains(accountID),
+                  menuBarSelectableAccounts().contains(where: { $0.id == accountID }) else { return }
+            menuBarAccountIDs.append(accountID)
+        } else {
+            menuBarAccountIDs.removeAll { $0 == accountID }
+        }
+        normalizeMenuBarAccountSelection()
+    }
+
+    func menuBarUsageItems() -> [MenuBarUsageItem] {
+        menuBarAccounts().map { account in
+            let authState = displayAuthenticationState(for: account)
+            let summary = UsageAggregator.summary(for: account.provider, accounts: [account])
+            let percent = authState == .valid ? displayPercent(summary.pressurePercent) : nil
+            return MenuBarUsageItem(
+                id: account.id,
+                provider: account.provider,
+                accountName: account.name,
+                percent: percent,
+                accentHex: account.accentHex ?? providerAccentHex[account.provider],
+                authenticationState: authState
+            )
+        }
+    }
+
+    func displayAuthenticationState(for account: UsageAccount) -> DisplayAccountAuthState {
+        guard UsageDockDistributionPolicy.isAccountVisible(account) else { return .required }
+        return DisplayAccountPolicy.authenticationState(
+            account: account,
+            refreshState: accountRefreshState(for: account.id)
+        )
+    }
+
+    func isDisplayAccountAuthenticated(_ account: UsageAccount) -> Bool {
+        displayAuthenticationState(for: account) == .valid
+    }
+
+    func isDisplayAccountCandidate(_ accountID: UUID) -> Bool {
+        displayAccountIDs.contains(accountID)
+    }
+
+    func canAddDisplayAccount(_ accountID: UUID) -> Bool {
+        guard !displayAccountIDs.contains(accountID), displayAccountIDs.count < 3,
+              let account = displaySelectableAccounts().first(where: { $0.id == accountID }) else { return false }
+        return isDisplayAccountAuthenticated(account)
+    }
+
+    func setDisplayAccountCandidate(_ accountID: UUID, enabled: Bool) {
+        if enabled {
+            guard !displayAccountIDs.contains(accountID), displayAccountIDs.count < 3,
+                  let account = displaySelectableAccounts().first(where: { $0.id == accountID }),
+                  isDisplayAccountAuthenticated(account) else { return }
+            displayAccountIDs.append(accountID)
+            if activeDisplayAccountID == nil {
+                activeDisplayAccountID = accountID
+            }
+        } else {
+            displayAccountIDs.removeAll { $0 == accountID }
+            if activeDisplayAccountID == accountID {
+                activeDisplayAccountID = displayAccountIDs.first
+            }
+        }
+        normalizeDisplayAccountSelection()
+    }
+
+    func selectDisplayAccount(_ accountID: UUID) {
+        guard displayAccountIDs.contains(accountID),
+              let account = runtimeAccounts.first(where: { $0.id == accountID && $0.isEnabled }),
+              isDisplayAccountAuthenticated(account) else { return }
+        activeDisplayAccountID = accountID
+    }
+
+    func isActiveDisplayAccount(_ accountID: UUID) -> Bool {
+        activeDisplayAccountID == accountID
     }
 
     func isAccountVisibleInCurrentBuild(_ account: UsageAccount) -> Bool {
@@ -438,7 +659,14 @@ final class UsageStore: ObservableObject {
     }
 
     func railTargets() -> [RailDisplayTarget] {
-        providerOrder.flatMap { provider -> [RailDisplayTarget] in
+        if let activeDisplayAccountID {
+            guard displayAccountIDs.contains(activeDisplayAccountID),
+                  let account = runtimeAccounts.first(where: { $0.id == activeDisplayAccountID && $0.isEnabled }),
+                  isDisplayAccountAuthenticated(account) else { return [] }
+            return [.account(id: account.id, provider: account.provider)]
+        }
+
+        return providerOrder.flatMap { provider -> [RailDisplayTarget] in
             let enabled = runtimeAccounts.filter { $0.provider == provider && $0.isEnabled }
             guard !enabled.isEmpty else { return [] }
             if fusionEnabled(for: provider) {
@@ -541,7 +769,12 @@ final class UsageStore: ObservableObject {
     }
 
     func displayName(for target: RailDisplayTarget) -> String {
-        account(for: target)?.name ?? target.provider.displayName
+        guard let account = account(for: target) else { return target.provider.displayName }
+        if account.source == .synthetic,
+           account.name.lowercased().hasPrefix("synthetic") {
+            return target.provider.displayName
+        }
+        return account.name
     }
 
     func accentHex(for target: RailDisplayTarget) -> String? {
@@ -711,6 +944,17 @@ final class UsageStore: ObservableObject {
         accounts.removeAll { $0.id == id }
         accountRefreshStates[id] = nil
         multiplierDetectionStates[id] = nil
+        if displayAccountIDs.contains(id) {
+            displayAccountIDs.removeAll { $0 == id }
+            if activeDisplayAccountID == id {
+                activeDisplayAccountID = displayAccountIDs.first
+            }
+            normalizeDisplayAccountSelection()
+        }
+        if menuBarAccountIDs.contains(id) {
+            menuBarAccountIDs.removeAll { $0 == id }
+            normalizeMenuBarAccountSelection()
+        }
     }
 
     @discardableResult
@@ -867,7 +1111,7 @@ final class UsageStore: ObservableObject {
             }
             if UsageDockDistributionPolicy.allowsDevelopmentAccounts,
                accounts.contains(where: { $0.provider == provider && $0.source == .synthetic }) {
-                return "Synthetic preview · register a local login for live usage"
+                return "Ready"
             }
             return "Waiting for a registered login"
         case .refreshing:
@@ -884,7 +1128,7 @@ final class UsageStore: ObservableObject {
 
     func accountStatusText(for account: UsageAccount) -> String {
         if account.source == .synthetic {
-            return "Synthetic preview · no provider authentication"
+            return "Ready"
         }
         if account.source == .manual || account.source == nil {
             return "Not connected"
@@ -1047,6 +1291,47 @@ final class UsageStore: ObservableObject {
         defaults.set(data, forKey: Self.accountsKey)
     }
 
+    private func normalizeDisplayAccountSelection() {
+        let allowedIDs = Set(displaySelectableAccounts().map(\.id))
+        var seen = Set<UUID>()
+        let normalized = displayAccountIDs
+            .filter { allowedIDs.contains($0) && seen.insert($0).inserted }
+            .prefix(3)
+            .map { $0 }
+        if normalized != displayAccountIDs {
+            displayAccountIDs = normalized
+        }
+        if let activeDisplayAccountID, !normalized.contains(activeDisplayAccountID) {
+            self.activeDisplayAccountID = normalized.first
+        }
+    }
+
+    private func persistDisplayAccountSelection() {
+        let normalizedIDs = Array(displayAccountIDs.prefix(3))
+        defaults.set(normalizedIDs.map(\.uuidString), forKey: Self.displayAccountIDsKey)
+        if let activeDisplayAccountID, normalizedIDs.contains(activeDisplayAccountID) {
+            defaults.set(activeDisplayAccountID.uuidString, forKey: Self.activeDisplayAccountIDKey)
+        } else {
+            defaults.removeObject(forKey: Self.activeDisplayAccountIDKey)
+        }
+    }
+
+    private func normalizeMenuBarAccountSelection() {
+        let allowedIDs = Set(menuBarSelectableAccounts().map(\.id))
+        var seen = Set<UUID>()
+        let normalized = menuBarAccountIDs.filter { allowedIDs.contains($0) && seen.insert($0).inserted }
+        if normalized != menuBarAccountIDs {
+            menuBarAccountIDs = normalized
+        }
+    }
+
+    private func persistMenuBarPreferences() {
+        defaults.set(menuBarUsageEnabled, forKey: Self.menuBarUsageEnabledKey)
+        defaults.set(menuBarAccountIDs.map(\.uuidString), forKey: Self.menuBarAccountIDsKey)
+        defaults.set(menuBarShowRing, forKey: Self.menuBarShowRingKey)
+        defaults.set(menuBarShowPercentage, forKey: Self.menuBarShowPercentageKey)
+    }
+
     private func persistFusionProviders() {
         defaults.set(fusionProviders.map(\.rawValue).sorted(), forKey: Self.fusionProvidersKey)
     }
@@ -1066,6 +1351,15 @@ final class UsageStore: ObservableObject {
     }()
 }
 
+struct MenuBarUsageItem: Identifiable, Equatable {
+    let id: UUID
+    let provider: ProviderID
+    let accountName: String
+    let percent: Double?
+    let accentHex: String?
+    let authenticationState: DisplayAccountAuthState
+}
+
 enum ProviderRefreshState: Equatable {
     case idle
     case refreshing
@@ -1079,6 +1373,38 @@ enum AccountRefreshState: Equatable {
     case refreshing
     case live(Date)
     case failed(String)
+}
+
+enum DisplayAccountAuthState: Equatable {
+    case valid
+    case checking
+    case required
+}
+
+enum DisplayAccountPolicy {
+    static func authenticationState(
+        account: UsageAccount,
+        refreshState: AccountRefreshState
+    ) -> DisplayAccountAuthState {
+        guard account.isEnabled else { return .required }
+        switch account.source {
+        case .currentSession, .credentialFile, .profile:
+            break
+        case .manual, .synthetic, .mock, nil:
+            return .required
+        }
+
+        switch refreshState {
+        case .live:
+            return .valid
+        case .refreshing:
+            return account.buckets.isEmpty ? .checking : .valid
+        case .idle:
+            return .checking
+        case .failed:
+            return .required
+        }
+    }
 }
 
 enum MultiplierDetectionState: Equatable {
