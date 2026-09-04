@@ -1,6 +1,23 @@
+<p align="center">
+  <a href="README.md"><strong>English</strong></a> ·
+  <a href="README.ja.md">日本語</a> ·
+  <a href="README.zh-CN.md">简体中文</a> ·
+  <a href="README.zh-TW.md">繁體中文</a> ·
+  <a href="README.ko.md">한국어</a> ·
+  <a href="README.es.md">Español</a>
+</p>
+
 # UsageDock
 
-UsageDock is a lightweight macOS edge rail for checking AI service usage and reset timing at a glance. It keeps quota state visible without requiring a full dashboard.
+UsageDock is a lightweight macOS edge rail for checking AI service usage and reset timing at a glance. It keeps quota state visible without forcing you into a full dashboard.
+
+## Motion demo
+
+<a href="https://drive.google.com/file/d/1hCO0oAMye-B4IhnjYHwatP7F_iUe9UIo/preview">
+  <img src="docs/images/usagedock-rail.png" alt="Watch the UsageDock liquid drag motion demo" width="763">
+</a>
+
+**▶ [Watch the UsageDock motion demo](https://drive.google.com/file/d/1hCO0oAMye-B4IhnjYHwatP7F_iUe9UIo/preview)**
 
 ## Preview
 
