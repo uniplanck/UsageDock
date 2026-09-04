@@ -77,15 +77,14 @@ The detail panel:
 
 Because detail rows are driven by `UsageAggregate`, Claude Fable and future provider/model windows appear without hard-coding them into the rail UI.
 
-## Context menu, Settings, and account CRUD
+## Context menu, Settings, and account management
 
 Right-clicking the rail exposes:
 
 - `Settings…`
 - `Accounts` submenu
-  - provider-specific `Add Account`
-  - explicit `Add Current Login` when a real local provider login is discoverable
-  - `Add Synthetic ×20` for Claude/Codex
+  - `Add Current Login` when a supported local provider login is discoverable
+  - provider profile login where supported
   - account `Edit…`
   - account `Delete`
 - inverse-only edge movement
@@ -93,7 +92,7 @@ Right-clicking the rail exposes:
 
 Settings is owned by a retained AppKit `SettingsWindowController`; the app no longer depends on a selector being routed into SwiftUI's implicit Settings scene. Both the rail context menu and menu-bar Settings action call the same controller, which activates the app and makes the concrete settings window visible/frontmost.
 
-`Edit…` opens that settings window, where account name, enabled state, credential-file binding, multiplier controls, disconnect, add, and delete remain available.
+`Edit…` opens that settings window, where account name, enabled state, multiplier controls, display overrides, ordering, and delete remain available.
 
 ## Brand asset boundary
 
@@ -114,28 +113,15 @@ Provider marks are bundled in `Assets.xcassets` as vector SVG image sets:
 
 - account UUID/provider/name
 - enabled state
-- account source (`currentSession`, `credentialFile`, `manual`, or `synthetic`)
-- credential JSON file path
+- authenticated account source (`currentSession` or `profile`)
+- profile metadata paths created by UsageDock's authenticated profile-login flow
 - per-account plan multiplier and manual/automatic mode
 - per-provider Fusion-mode preference
 - last cached non-secret quota buckets
 
 UsageDock does **not** copy provider access tokens or refresh tokens into its preferences and does not own refresh-token rotation.
 
-For additional profiles, an account can reference a provider-owned credential JSON file. Disconnecting the account removes the path from UsageDock metadata without modifying the provider credential file.
-
-A discovered local provider credential is **not** automatically registered as a UsageDock account. `Add Current Login` is an explicit user action. F12 migration removes the earlier implicit `Current Session` seed accounts while preserving user-created manual/credential accounts.
-
-## Synthetic accounts
-
-Synthetic accounts are explicit preview/demo entries and never authenticate against a provider.
-
-- a default Claude synthetic account is created at ×20 with coherent randomized 5h / 1w / Fable percentages and plausible reset times;
-- a default Codex synthetic account is created at ×20 with 5h and 1w usage at 100%;
-- additional synthetic ×20 Claude/Codex accounts can be added from the context menu or settings;
-- synthetic buckets are persisted as non-secret preview data and are excluded from live provider refresh.
-
-Synthetic status is labeled as synthetic so a demo account is not mistaken for a real authenticated account.
+A discovered local provider credential is **not** automatically registered as a UsageDock account. `Add Current Login` is an explicit user action. Additional profiles are created only through the supported provider login flow. Unsupported legacy account-source values are discarded during migration while valid login-backed records are preserved.
 
 ## Plan multiplier contract
 
@@ -188,7 +174,7 @@ Gemini is present in the domain and branded UI, but live quota acquisition remai
 
 ## Refresh and failure semantics
 
-`UsageStore` refreshes only explicitly registered Claude, Codex, and Kimi current-session / credential-file accounts. Synthetic/manual accounts never trigger provider authentication. Gemini remains idle.
+`UsageStore` refreshes only explicitly registered login-backed accounts (`currentSession` or `profile`) for providers with a live usage adapter. Unsupported providers remain idle.
 
 Provider state can be:
 
@@ -198,7 +184,7 @@ Provider state can be:
 - partial
 - failed
 
-Authentication/credential failures clear stale live buckets where appropriate. Transient HTTP or response failures do not silently replace usage with zero. Synthetic utilization is generated only by the explicit synthetic-account path and is never presented as provider-authenticated live data.
+Authentication/credential failures clear stale live buckets where appropriate. Transient HTTP or response failures do not silently replace usage with zero, and UsageDock never fabricates provider-authenticated utilization.
 
 ## Verification contract
 
@@ -208,7 +194,7 @@ F12 acceptance requires:
 - asset catalog compiles and links;
 - all app Swift sources compile for arm64 macOS;
 - app and XCTest bundle link;
-- unit tests pass for aggregation, placement persistence, account CRUD/credential-file persistence, synthetic defaults, implicit-current-session migration, multiplier normal/Fusion semantics, Claude parser, Codex dynamic windows, and Kimi weekly/5h/extra usage parsing;
+- unit tests pass for aggregation, placement persistence, login-backed account persistence/migration, multiplier normal/Fusion semantics, Claude parser, Codex dynamic windows, and Kimi weekly/5h/extra usage parsing;
 - a focused AppKit regression test proves `SettingsWindowController.show()` makes the concrete settings window visible;
 - source inspection confirms main and hover panels remain non-activating;
 - source inspection confirms context placement is inverse-only;

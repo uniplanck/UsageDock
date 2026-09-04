@@ -502,9 +502,7 @@ final class UsageStore: ObservableObject {
            let decoded = try? decoder.decode([UsageAccount].self, from: data) {
             accounts = Self.migratedAccounts(decoded)
         } else {
-            accounts = UsageDockDistributionPolicy.allowsDevelopmentAccounts
-                ? LiveUsageData.accounts()
-                : []
+            accounts = []
         }
 
         normalizeDisplayAccountSelection()
@@ -529,12 +527,7 @@ final class UsageStore: ObservableObject {
     func displaySelectableAccounts() -> [UsageAccount] {
         runtimeAccounts.filter { account in
             guard account.isEnabled else { return false }
-            switch account.source {
-            case .currentSession, .credentialFile, .profile:
-                return true
-            case .manual, .synthetic, .mock, nil:
-                return false
-            }
+            return UsageDockDistributionPolicy.isPublicLoginSource(account.source)
         }
     }
 
@@ -770,10 +763,6 @@ final class UsageStore: ObservableObject {
 
     func displayName(for target: RailDisplayTarget) -> String {
         guard let account = account(for: target) else { return target.provider.displayName }
-        if account.source == .synthetic,
-           account.name.lowercased().hasPrefix("synthetic") {
-            return target.provider.displayName
-        }
         return account.name
     }
 
@@ -843,60 +832,6 @@ final class UsageStore: ObservableObject {
         case .provider(let provider): return displayMultiplier(for: provider)
         case .account: return account(for: target)?.normalizedPlanMultiplier
         }
-    }
-
-    func addAccount(provider: ProviderID) {
-        guard UsageDockDistributionPolicy.allowsDevelopmentAccounts else {
-            refreshStates[provider] = .failed("Public builds accept account registration only through a verified provider login.")
-            return
-        }
-        let nextNumber = accounts.filter { $0.provider == provider }.count + 1
-        accounts.append(
-            UsageAccount(
-                provider: provider,
-                name: "Account \(nextNumber)",
-                source: .manual,
-                planMultiplier: provider == .claude || provider == .codex ? 1 : nil,
-                multiplierMode: provider == .claude || provider == .codex ? .manual : nil,
-                buckets: []
-            )
-        )
-    }
-
-    func addSyntheticAccount(provider: ProviderID, multiplier: Int = 20) {
-        guard UsageDockDistributionPolicy.allowsDevelopmentAccounts else {
-            refreshStates[provider] = .failed("Synthetic accounts are disabled in public builds.")
-            return
-        }
-        let existingCount = accounts.filter { $0.provider == provider && $0.source == .synthetic }.count
-        let suffix = existingCount == 0 ? "" : " \(existingCount + 1)"
-        let supportsMultiplier = provider == .claude || provider == .codex
-        accounts.append(
-            SyntheticUsageFactory.account(
-                provider: provider,
-                multiplier: multiplier,
-                name: supportsMultiplier
-                    ? "Synthetic\(suffix) ×\(min(max(multiplier, 1), 999))"
-                    : "Synthetic\(suffix)"
-            )
-        )
-    }
-
-    func regenerateSyntheticAccount(id: UUID) {
-        guard UsageDockDistributionPolicy.allowsDevelopmentAccounts else { return }
-        guard let index = accounts.firstIndex(where: { $0.id == id && $0.source == .synthetic }) else { return }
-        accounts[index].syntheticMode = .random
-        accounts[index].buckets = SyntheticUsageFactory.buckets(
-            for: accounts[index].provider,
-            multiplier: accounts[index].normalizedPlanMultiplier ?? 1
-        )
-    }
-
-    func setSyntheticRemainingFull(id: UUID) {
-        guard UsageDockDistributionPolicy.allowsDevelopmentAccounts else { return }
-        guard let index = accounts.firstIndex(where: { $0.id == id && $0.source == .synthetic }) else { return }
-        accounts[index].syntheticMode = .manual
-        accounts[index].buckets = SyntheticUsageFactory.setRemainingFull(accounts[index].buckets)
     }
 
     @discardableResult
@@ -989,24 +924,6 @@ final class UsageStore: ObservableObject {
             return AntigravityUsageAdapter.executableURL() != nil
         }
         return ProviderPlanMultiplierDetector.hasCurrentSession(for: provider)
-    }
-
-    func connectCredentialFile(accountID: UUID, path: String) {
-        guard UsageDockDistributionPolicy.allowsCredentialFileRegistration else { return }
-        guard let index = accounts.firstIndex(where: { $0.id == accountID }) else { return }
-        accounts[index].source = .credentialFile
-        accounts[index].credentialPath = path
-        accounts[index].buckets = []
-        accountRefreshStates[accountID] = .idle
-    }
-
-    func disconnectCredentialFile(accountID: UUID) {
-        guard UsageDockDistributionPolicy.allowsCredentialFileRegistration else { return }
-        guard let index = accounts.firstIndex(where: { $0.id == accountID }) else { return }
-        accounts[index].source = .manual
-        accounts[index].credentialPath = nil
-        accounts[index].buckets = []
-        accountRefreshStates[accountID] = .idle
     }
 
     func setPlanMultiplier(accountID: UUID, value: Int) {
@@ -1105,13 +1022,7 @@ final class UsageStore: ObservableObject {
         switch refreshState(for: provider) {
         case .idle:
             if !provider.supportsLiveUsage {
-                return UsageDockDistributionPolicy.isPublicRelease
-                    ? "Login integration is not available yet"
-                    : "Manual / synthetic tracker · direct provider login is not available yet"
-            }
-            if UsageDockDistributionPolicy.allowsDevelopmentAccounts,
-               accounts.contains(where: { $0.provider == provider && $0.source == .synthetic }) {
-                return "Ready"
+                return "Login integration is not available yet"
             }
             return "Waiting for a registered login"
         case .refreshing:
@@ -1127,22 +1038,16 @@ final class UsageStore: ObservableObject {
     }
 
     func accountStatusText(for account: UsageAccount) -> String {
-        if account.source == .synthetic {
-            return "Ready"
-        }
-        if account.source == .manual || account.source == nil {
+        if account.source == nil || account.source == .legacyUnsupported {
             return "Not connected"
         }
         if account.source == .profile, case .idle = accountRefreshState(for: account.id) {
             return "UsageDock profile · finish login in Terminal, then Refresh"
         }
-        if account.source == .mock {
-            return "Legacy mock account"
-        }
 
         switch accountRefreshState(for: account.id) {
         case .idle:
-            return account.source == .currentSession ? "Registered local provider login" : "Credential file connected"
+            return account.source == .currentSession ? "Registered local provider login" : "UsageDock profile registered"
         case .refreshing:
             return "Refreshing…"
         case .live(let date):
@@ -1157,8 +1062,7 @@ final class UsageStore: ObservableObject {
             .filter {
                 $0.provider == provider &&
                 $0.isEnabled &&
-                UsageDockDistributionPolicy.isAccountVisible($0) &&
-                ($0.source == .currentSession || $0.source == .credentialFile || $0.source == .profile)
+                UsageDockDistributionPolicy.isAccountVisible($0)
             }
             .map(\.id)
 
@@ -1217,7 +1121,7 @@ final class UsageStore: ObservableObject {
                     }
                     fetched = first
                 case .cursor, .grok:
-                    throw UsageAdapterError.credentialsUnavailable("\(provider.displayName) live quota adapter is not configured. Use a synthetic/manual account for now.")
+                    throw UsageAdapterError.credentialsUnavailable("\(provider.displayName) login and live quota integration is not available yet.")
                 }
 
                 guard let index = accounts.firstIndex(where: { $0.id == accountID }) else { continue }
@@ -1280,10 +1184,9 @@ final class UsageStore: ObservableObject {
     }
 
     private static func migratedAccounts(_ existing: [UsageAccount]) -> [UsageAccount] {
-        // F16 onward: persisted user state is authoritative. New builds must not silently
-        // delete accounts, re-add synthetic defaults, or rewrite source types during launch.
-        // Schema additions are optional/defaulted so old payloads remain decodable in place.
-        existing
+        // Persist only authenticated login-backed records. Older unsupported source values
+        // decode as legacyUnsupported and are discarded without affecting valid accounts.
+        existing.filter(UsageDockDistributionPolicy.isAccountVisible)
     }
 
     private func persistAccounts() {
@@ -1388,9 +1291,9 @@ enum DisplayAccountPolicy {
     ) -> DisplayAccountAuthState {
         guard account.isEnabled else { return .required }
         switch account.source {
-        case .currentSession, .credentialFile, .profile:
+        case .currentSession, .profile:
             break
-        case .manual, .synthetic, .mock, nil:
+        case .legacyUnsupported, nil:
             return .required
         }
 
@@ -1411,15 +1314,6 @@ enum MultiplierDetectionState: Equatable {
     case idle
     case detected(Int, String)
     case unavailable(String)
-}
-
-enum LiveUsageData {
-    static func accounts() -> [UsageAccount] {
-        [
-            SyntheticUsageFactory.account(provider: .claude, multiplier: 20),
-            SyntheticUsageFactory.account(provider: .codex, multiplier: 20)
-        ]
-    }
 }
 
 private enum UsageProfileLoginError: LocalizedError {

@@ -13,7 +13,6 @@
 		530BFF811DF96E67F9ACF21F /* RailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C7D4A83F9D54646B9A3FA3D /* RailView.swift */; };
 		5B11BB8B228CAC7EAB148F48 /* ProviderBrand.swift in Sources */ = {isa = PBXBuildFile; fileRef = F60CF64302A6A3185AAB80BD /* ProviderBrand.swift */; };
 		783F082854674C7BEF87792B /* UsageDockTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6B7F6D8CE9C258C20073993 /* UsageDockTests.swift */; };
-		841C4BB6FBE5C10DD7D75597 /* SyntheticUsageFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56C619909F982D41D628038A /* SyntheticUsageFactory.swift */; };
 		8710B05487526CF1FF028CEE /* PlanMultiplierDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D75809C9D8D13F1589E7116 /* PlanMultiplierDetector.swift */; };
 		8C61A350EE8FE16F992199B3 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C08309C2FCE0862704E88A88 /* SettingsView.swift */; };
 		8EBA367E5500B07B6DDA0C75 /* UsageAggregator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DC95DD2D94D1838392914C9 /* UsageAggregator.swift */; };
@@ -43,7 +42,6 @@
 		0C7D4A83F9D54646B9A3FA3D /* RailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RailView.swift; sourceTree = "<group>"; };
 		2BD4EC3A7A8A388C1C56CD25 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		4AC342FD7BBE92CE7A1B4611 /* UsageModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageModels.swift; sourceTree = "<group>"; };
-		56C619909F982D41D628038A /* SyntheticUsageFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyntheticUsageFactory.swift; sourceTree = "<group>"; };
 		5DC95DD2D94D1838392914C9 /* UsageAggregator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageAggregator.swift; sourceTree = "<group>"; };
 		6F4FD67040600DC464B52E99 /* UsageDockApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageDockApp.swift; sourceTree = "<group>"; };
 		737D9B80A9D2CAAA97D80E32 /* ProviderDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderDetailView.swift; sourceTree = "<group>"; };
@@ -79,7 +77,6 @@
 		1F7AE6CA04FCB03393604692 /* Domain */ = {
 			isa = PBXGroup;
 			children = (
-				56C619909F982D41D628038A /* SyntheticUsageFactory.swift */,
 				5DC95DD2D94D1838392914C9 /* UsageAggregator.swift */,
 				4AC342FD7BBE92CE7A1B4611 /* UsageModels.swift */,
 				F1790002AABBCCDDEEFF0022 /* RailMotionRuntime.swift */,
@@ -277,7 +274,6 @@
 				530BFF811DF96E67F9ACF21F /* RailView.swift in Sources */,
 				8C61A350EE8FE16F992199B3 /* SettingsView.swift in Sources */,
 				2946E77204F8EAFAD62A3AA4 /* SettingsWindowController.swift in Sources */,
-				841C4BB6FBE5C10DD7D75597 /* SyntheticUsageFactory.swift in Sources */,
 				8EBA367E5500B07B6DDA0C75 /* UsageAggregator.swift in Sources */,
 				E38D602F3A4237BC266D148E /* UsageDockApp.swift in Sources */,
 				F5BFCD40C14CAA5A9578423E /* UsageModels.swift in Sources */,

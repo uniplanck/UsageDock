@@ -77,7 +77,6 @@
 "Move to Left" = "左へ移動";
 "Move to Right" = "右へ移動";
 "Add Account" = "アカウント追加";
-"Add Synthetic" = "疑似アカウント追加";
 "Add Current Login" = "現在のログインを追加";
 "Open Web" = "Webを開く";
 "Edit…" = "編集…";
@@ -85,7 +84,6 @@
 "Quit UsageDock" = "UsageDockを終了";
 "Rail display override" = "Rail表示の個別設定";
 "Global" = "全体設定";
-"Synthetic usage" = "疑似使用量";
 "Regenerate" = "再生成";
 "Remaining 100%" = "残り100%";
 "Quota rows" = "利用枠行";

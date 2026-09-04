@@ -3,33 +3,20 @@ import XCTest
 @testable import UsageDock
 
 final class UsageDockDistributionPolicyTests: XCTestCase {
-    func testPublicLoginSourceAllowlistRejectsNonLoginSources() {
+    func testLoginSourceAllowlistAcceptsOnlyAuthenticatedSources() {
         XCTAssertTrue(UsageDockDistributionPolicy.isPublicLoginSource(.currentSession))
         XCTAssertTrue(UsageDockDistributionPolicy.isPublicLoginSource(.profile))
-        XCTAssertFalse(UsageDockDistributionPolicy.isPublicLoginSource(.credentialFile))
-        XCTAssertFalse(UsageDockDistributionPolicy.isPublicLoginSource(.manual))
-        XCTAssertFalse(UsageDockDistributionPolicy.isPublicLoginSource(.synthetic))
-        XCTAssertFalse(UsageDockDistributionPolicy.isPublicLoginSource(.mock))
+        XCTAssertFalse(UsageDockDistributionPolicy.isPublicLoginSource(.legacyUnsupported))
         XCTAssertFalse(UsageDockDistributionPolicy.isPublicLoginSource(nil))
     }
 
     @MainActor
-    func testReleaseBuildRejectsDevelopmentAccountRegistration() {
-        #if DEBUG
-        XCTAssertTrue(UsageDockDistributionPolicy.allowsDevelopmentAccounts)
-        #else
-        let suiteName = "UsageDockTests.PublicLoginOnly.\(UUID().uuidString)"
+    func testFreshStoreStartsWithoutAccounts() {
+        let suiteName = "UsageDockTests.LoginOnly.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        let store = UsageStore(defaults: defaults)
-        XCTAssertTrue(UsageDockDistributionPolicy.isPublicRelease)
-        XCTAssertTrue(store.accounts.isEmpty)
-
-        store.addSyntheticAccount(provider: .codex, multiplier: 20)
-        store.addAccount(provider: .claude)
-        XCTAssertTrue(store.accounts.isEmpty)
-        #endif
+        XCTAssertTrue(UsageStore(defaults: defaults).accounts.isEmpty)
     }
 }
 
@@ -86,6 +73,37 @@ final class UsageAggregatorTests: XCTestCase {
 
 @MainActor
 final class PersistenceTests: XCTestCase {
+    private func loginAccount(
+        provider: ProviderID,
+        name: String,
+        multiplier: Int? = nil,
+        percent: Double = 0.4
+    ) -> UsageAccount {
+        UsageAccount(
+            provider: provider,
+            name: name,
+            source: .profile,
+            planMultiplier: multiplier,
+            multiplierMode: multiplier == nil ? nil : .manual,
+            buckets: [
+                UsageBucket(
+                    quotaID: "weekly",
+                    label: "1w",
+                    kind: .weekly,
+                    percentUsed: percent,
+                    resetsAt: Date().addingTimeInterval(3 * 24 * 60 * 60)
+                )
+            ]
+        )
+    }
+
+    private func seedLoginAccounts(_ store: UsageStore) {
+        store.accounts = [
+            loginAccount(provider: .claude, name: "Claude Profile", multiplier: 20, percent: 0.42),
+            loginAccount(provider: .codex, name: "Codex Profile", multiplier: 20, percent: 0.35)
+        ]
+    }
+
     func testSettingsWindowControllerShowMakesWindowVisible() {
         let suiteName = "UsageDockTests.SettingsWindow.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -118,6 +136,7 @@ final class PersistenceTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let store = UsageStore(defaults: defaults)
+        seedLoginAccounts(store)
         let expected = try XCTUnwrap(store.railTargets().first)
 
         XCTAssertEqual(
@@ -140,20 +159,6 @@ final class PersistenceTests: XCTestCase {
         controller.windowWillClose(Notification(name: NSWindow.willCloseNotification))
         XCTAssertFalse(store.settingsBubblePreviewRequested)
         controller.close()
-    }
-
-    func testF1725SyntheticPreviewDoesNotExposeSyntheticIdentity() throws {
-        let suiteName = "UsageDockTests.SyntheticPresentation.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let store = UsageStore(defaults: defaults)
-        let account = try XCTUnwrap(store.accounts.first(where: { $0.source == .synthetic }))
-        let target = RailDisplayTarget.account(id: account.id, provider: account.provider)
-
-        XCTAssertFalse(store.statusText(for: account.provider).localizedCaseInsensitiveContains("synthetic"))
-        XCTAssertFalse(store.accountStatusText(for: account).localizedCaseInsensitiveContains("synthetic"))
-        XCTAssertFalse(store.accountStatusText(for: account).localizedCaseInsensitiveContains("authentication"))
-        XCTAssertEqual(store.displayName(for: target), account.provider.displayName)
     }
 
     func testPlacementPersistsLeftAndRight() {
@@ -218,36 +223,16 @@ final class PersistenceTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(narrow.windowInset, 2)
     }
 
-    func testSyntheticAccountsSupportAllProvidersAndRegeneration() {
-        let suiteName = "UsageDockTests.SyntheticF14.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-
-        let store = UsageStore(defaults: defaults)
-        store.addSyntheticAccount(provider: .antigravity)
-        store.addSyntheticAccount(provider: .kimi)
-
-        let gemini = try! XCTUnwrap(store.accounts.last(where: { $0.provider == .antigravity && $0.source == .synthetic }))
-        let kimi = try! XCTUnwrap(store.accounts.last(where: { $0.provider == .kimi && $0.source == .synthetic }))
-        XCTAssertEqual(gemini.syntheticMode, .random)
-        XCTAssertEqual(kimi.syntheticMode, .random)
-        XCTAssertFalse(gemini.buckets.isEmpty)
-        XCTAssertFalse(kimi.buckets.isEmpty)
-        XCTAssertTrue((gemini.buckets + kimi.buckets).allSatisfy { ($0.resolvedPercentUsed ?? -1) >= 0 && ($0.resolvedPercentUsed ?? 2) <= 1 })
-
-        store.regenerateSyntheticAccount(id: gemini.id)
-        let regenerated = try! XCTUnwrap(store.accounts.first(where: { $0.id == gemini.id }))
-        XCTAssertEqual(regenerated.syntheticMode, .random)
-        XCTAssertFalse(regenerated.buckets.isEmpty)
-    }
-
     func testAccountSpecificAccentPersistsForSameProvider() {
         let suiteName = "UsageDockTests.AccountAccent.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let store = UsageStore(defaults: defaults)
-        store.addSyntheticAccount(provider: .codex, multiplier: 20)
+        store.accounts = [
+            loginAccount(provider: .codex, name: "Codex A", multiplier: 20, percent: 0.3),
+            loginAccount(provider: .codex, name: "Codex B", multiplier: 20, percent: 0.6)
+        ]
         let ids = store.accounts.filter { $0.provider == .codex }.map(\.id)
         XCTAssertGreaterThanOrEqual(ids.count, 2)
         store.setAccountAccent("#FF0000", accountID: ids[0])
@@ -258,46 +243,17 @@ final class PersistenceTests: XCTestCase {
         XCTAssertEqual(restored.accounts.first(where: { $0.id == ids[1] })?.accentHex, "#00FF00")
     }
 
-    func testAccountAddRemovePersistsWithSyntheticDefaults() {
+    func testLoginAccountRemovePersists() {
         let suiteName = "UsageDockTests.Accounts.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let store = UsageStore(defaults: defaults)
-        XCTAssertEqual(store.accounts.count, 2)
-        XCTAssertEqual(Set(store.accounts.map(\.provider)), Set([.claude, .codex]))
-        XCTAssertTrue(store.accounts.allSatisfy { $0.source == .synthetic && $0.planMultiplier == 20 })
-        XCTAssertFalse(store.accounts.contains { $0.source == .currentSession })
+        XCTAssertTrue(store.accounts.isEmpty)
 
-        let claude = try! XCTUnwrap(store.accounts.first(where: { $0.provider == .claude }))
-        XCTAssertEqual(claude.buckets.count, 3)
-        XCTAssertTrue(claude.buckets.allSatisfy { ($0.resolvedPercentUsed ?? -1) >= 0 && ($0.resolvedPercentUsed ?? 2) <= 1 })
-
-        let codex = try! XCTUnwrap(store.accounts.first(where: { $0.provider == .codex }))
-        XCTAssertEqual(codex.buckets.count, 3)
-        XCTAssertFalse(codex.buckets.contains { $0.quotaID == "codex-general-18000" })
-        XCTAssertTrue(codex.buckets.contains { $0.quotaID == "codex-spark-18000" })
-        XCTAssertTrue(codex.buckets.allSatisfy { ($0.resolvedPercentUsed ?? -1) >= 0 && ($0.resolvedPercentUsed ?? 2) <= 1 })
-        XCTAssertTrue(codex.buckets.contains { ($0.resolvedPercentUsed ?? 1) < 1 })
-
-        store.addAccount(provider: .codex)
-        let added = store.accounts.last!
-        XCTAssertEqual(added.source, .manual)
-        XCTAssertEqual(added.planMultiplier, 1)
-        XCTAssertTrue(added.buckets.isEmpty)
+        let added = loginAccount(provider: .codex, name: "Codex Profile", multiplier: 20)
+        store.accounts.append(added)
         XCTAssertTrue(UsageStore(defaults: defaults).accounts.contains { $0.id == added.id })
-
-        let credentialPath = "/tmp/usagedock-profile/auth.json"
-        store.connectCredentialFile(accountID: added.id, path: credentialPath)
-        let connected = UsageStore(defaults: defaults).accounts.first { $0.id == added.id }
-        XCTAssertEqual(connected?.source, .credentialFile)
-        XCTAssertEqual(connected?.credentialPath, credentialPath)
-        XCTAssertTrue(connected?.buckets.isEmpty == true)
-
-        store.disconnectCredentialFile(accountID: added.id)
-        let disconnected = UsageStore(defaults: defaults).accounts.first { $0.id == added.id }
-        XCTAssertEqual(disconnected?.source, .manual)
-        XCTAssertNil(disconnected?.credentialPath)
 
         store.removeAccount(id: added.id)
         XCTAssertFalse(UsageStore(defaults: defaults).accounts.contains { $0.id == added.id })
@@ -309,9 +265,10 @@ final class PersistenceTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let store = UsageStore(defaults: defaults)
-        XCTAssertEqual(store.displayMultiplier(for: .codex), 20)
-
-        store.addSyntheticAccount(provider: .codex, multiplier: 20)
+        store.accounts = [
+            loginAccount(provider: .codex, name: "Codex A", multiplier: 20, percent: 0.3),
+            loginAccount(provider: .codex, name: "Codex B", multiplier: 20, percent: 0.5)
+        ]
         XCTAssertEqual(store.displayMultiplier(for: .codex), 20)
 
         store.setFusionEnabled(true, for: .codex)
@@ -324,16 +281,13 @@ final class PersistenceTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        let persisted = [
-            UsageAccount(provider: .codex, name: "Current Session", source: .currentSession, buckets: []),
-            UsageAccount(provider: .kimi, name: "My Kimi", source: .manual, buckets: [])
-        ]
-        defaults.set(try JSONEncoder().encode(persisted), forKey: "UsageDock.accounts.v3")
+        let current = UsageAccount(provider: .codex, name: "Current Session", source: .currentSession, buckets: [])
+        let unsupported = UsageAccount(provider: .kimi, name: "Old Record", source: .legacyUnsupported, buckets: [])
+        defaults.set(try JSONEncoder().encode([current, unsupported]), forKey: "UsageDock.accounts.v3")
 
         let store = UsageStore(defaults: defaults)
-        XCTAssertEqual(store.accounts, persisted)
-        XCTAssertEqual(store.accounts.count, 2)
-        XCTAssertFalse(store.accounts.contains { $0.source == .synthetic })
+        XCTAssertEqual(store.accounts, [current])
+        XCTAssertEqual(store.accounts.count, 1)
     }
 
     func testF17RefreshPreservesDisabledBucketByQuotaIDAndOrder() throws {
@@ -554,7 +508,7 @@ final class PersistenceTests: XCTestCase {
         XCTAssertEqual(DisplayAccountPolicy.authenticationState(account: account, refreshState: .failed("expired")), .required)
         XCTAssertEqual(
             DisplayAccountPolicy.authenticationState(
-                account: UsageAccount(provider: .codex, name: "Synthetic", source: .synthetic, buckets: account.buckets),
+                account: UsageAccount(provider: .codex, name: "Old Record", source: .legacyUnsupported, buckets: account.buckets),
                 refreshState: .live(Date())
             ),
             .required
@@ -659,7 +613,10 @@ final class PersistenceTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let store = UsageStore(defaults: defaults)
-        store.addSyntheticAccount(provider: .kimi)
+        store.accounts = [
+            loginAccount(provider: .codex, name: "Codex Profile", multiplier: 20, percent: 0.35),
+            loginAccount(provider: .kimi, name: "Kimi Profile", percent: 0.55)
+        ]
         let codexID = try XCTUnwrap(store.accounts.first(where: { $0.provider == .codex })?.id)
         let kimiID = try XCTUnwrap(store.accounts.first(where: { $0.provider == .kimi })?.id)
         let codexIndex = try XCTUnwrap(store.accounts.firstIndex(where: { $0.id == codexID }))
@@ -683,6 +640,7 @@ final class PersistenceTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let store = UsageStore(defaults: defaults)
+        seedLoginAccounts(store)
         let providers = Set(store.railTargets().map(\.provider))
         XCTAssertEqual(providers, Set([.claude, .codex]))
         XCTAssertFalse(providers.contains(.antigravity))
@@ -690,30 +648,12 @@ final class PersistenceTests: XCTestCase {
         XCTAssertFalse(providers.contains(.grok))
     }
 
-    func testF15CodexSyntheticPlansMatchWindowShapes() {
-        let x1 = SyntheticUsageFactory.account(provider: .codex, multiplier: 1)
-        let x5 = SyntheticUsageFactory.account(provider: .codex, multiplier: 5)
-        let x20 = SyntheticUsageFactory.account(provider: .codex, multiplier: 20)
-
-        XCTAssertTrue(x1.buckets.contains { $0.quotaID == "codex-general-18000" })
-        for account in [x5, x20] {
-            XCTAssertFalse(account.buckets.contains { $0.quotaID == "codex-general-18000" })
-            XCTAssertTrue(account.buckets.contains { $0.quotaID == "codex-general-604800" })
-            XCTAssertTrue(account.buckets.contains { $0.quotaID == "codex-spark-604800" })
-            XCTAssertTrue(account.buckets.contains { $0.quotaID == "codex-spark-18000" })
-        }
-    }
-
-    func testF15RemainingFullAndAppearancePersist() {
+    func testF15AppearancePersists() {
         let suiteName = "UsageDockTests.F15Appearance.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let store = UsageStore(defaults: defaults)
-        let codex = try! XCTUnwrap(store.accounts.first(where: { $0.provider == .codex }))
-        store.setSyntheticRemainingFull(id: codex.id)
-        XCTAssertTrue(store.accounts.first(where: { $0.id == codex.id })!.buckets.allSatisfy { $0.resolvedPercentUsed == 0 })
-
         store.theme = .transparentFloating
         store.resetTimeDisplayMode = .both
         store.railBackgroundOpacity = 0
@@ -733,6 +673,7 @@ final class PersistenceTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let store = UsageStore(defaults: defaults)
+        seedLoginAccounts(store)
         store.setProviderWebURL("https://chatgpt.com/", for: .codex)
         let codex = try! XCTUnwrap(store.accounts.first(where: { $0.provider == .codex }))
         XCTAssertEqual(store.webURL(for: .account(id: codex.id, provider: .codex))?.host, "chatgpt.com")

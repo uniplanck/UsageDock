@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import UniformTypeIdentifiers
 
 private enum TimerFieldMode: String, CaseIterable, Identifiable {
     case hidden
@@ -354,11 +353,7 @@ struct SettingsView: View {
                 ProviderSettingsSection(provider: provider, usageStore: usageStore)
             }
 
-            Text(
-                UsageDockDistributionPolicy.isPublicRelease
-                    ? "Public builds register accounts only through authenticated provider logins. Cursor and Grok stay unavailable until a verified login and live-usage path exists."
-                    : "Development-only test accounts remain available for local previewing, but Display Account switching accepts authenticated account sources only."
-            )
+            Text("UsageDock registers accounts only through authenticated provider logins. Cursor and Grok stay unavailable until a verified login and live-usage path exists.")
             .font(.footnote)
             .foregroundStyle(.secondary)
         }
@@ -1366,26 +1361,12 @@ private struct ProviderSettingsSection: View {
                             presentationMode: usageStore.presentationMode,
                             canMoveUp: canMove(account.id, direction: -1),
                             canMoveDown: canMove(account.id, direction: 1),
-                            canConnectCredentialFile: UsageDockDistributionPolicy.allowsCredentialFileRegistration && provider.supportsLiveUsage && provider != .antigravity && account.source != .synthetic,
                             supportsMultiplier: provider == .claude || provider == .codex,
                             multiplierDetectionText: usageStore.multiplierDetectionText(for: account.id),
                             onMoveUp: { usageStore.moveAccount(account.id, direction: -1) },
                             onMoveDown: { usageStore.moveAccount(account.id, direction: 1) },
                             onAutoDetectMultiplier: {
                                 usageStore.detectPlanMultiplier(accountID: account.id)
-                            },
-                            onRegenerateSynthetic: {
-                                usageStore.regenerateSyntheticAccount(id: account.id)
-                            },
-                            onSetSyntheticRemainingFull: {
-                                usageStore.setSyntheticRemainingFull(id: account.id)
-                            },
-                            onConnectCredentialFile: { path in
-                                usageStore.connectCredentialFile(accountID: account.id, path: path)
-                                Task { await usageStore.refreshLiveUsage() }
-                            },
-                            onDisconnectCredentialFile: {
-                                usageStore.disconnectCredentialFile(accountID: account.id)
                             },
                             onDelete: {
                                 usageStore.removeAccount(id: account.id)
@@ -1418,29 +1399,7 @@ private struct ProviderSettingsSection: View {
                         .help(loginHelp)
                     }
 
-                    if UsageDockDistributionPolicy.allowsDevelopmentAccounts {
-                        if provider == .codex {
-                            Menu {
-                                Button("Codex ×1") { usageStore.addSyntheticAccount(provider: .codex, multiplier: 1) }
-                                Button("Codex ×5") { usageStore.addSyntheticAccount(provider: .codex, multiplier: 5) }
-                                Button("Codex ×20") { usageStore.addSyntheticAccount(provider: .codex, multiplier: 20) }
-                            } label: {
-                                Label("Add Synthetic", systemImage: "sparkles")
-                            }
-                        } else {
-                            Button {
-                                usageStore.addSyntheticAccount(provider: provider, multiplier: provider == .claude ? 20 : 1)
-                            } label: {
-                                Label(provider == .claude ? "Add Synthetic ×20" : "Add Synthetic", systemImage: "sparkles")
-                            }
-                        }
-
-                        Button {
-                            usageStore.addAccount(provider: provider)
-                        } label: {
-                            Label("Add Account", systemImage: "plus")
-                        }
-                    } else if !provider.supportsProfileLogin && !provider.supportsLiveUsage {
+                    if !provider.supportsProfileLogin && !provider.supportsLiveUsage {
                         Label("Login unavailable", systemImage: "lock")
                             .font(.callout)
                             .foregroundStyle(.secondary)
@@ -1582,13 +1541,9 @@ private struct ProviderSettingsSection: View {
         case .antigravity: return "Uses the official Antigravity CLI (agy) and its native Google/Keychain authentication. Gemini CLI credentials are not used."
         case .kimi: return "Uses the existing Kimi Code OAuth login. Sign in with Kimi Code first."
         case .cursor:
-            return UsageDockDistributionPolicy.isPublicRelease
-                ? "Cursor account registration is unavailable until UsageDock has a verified login and live quota source."
-                : "Cursor is currently manual/synthetic in UsageDock; configure its web URL and quota rows without fabricating a live API."
+            return "Cursor account registration is unavailable until UsageDock has a verified login and live quota source."
         case .grok:
-            return UsageDockDistributionPolicy.isPublicRelease
-                ? "Grok account registration is unavailable until UsageDock has a verified login and live quota source."
-                : "Grok is currently manual/synthetic in UsageDock; configure its web URL and quota rows without fabricating a live API."
+            return "Grok account registration is unavailable until UsageDock has a verified login and live quota source."
         }
     }
 
@@ -1619,16 +1574,11 @@ private struct AccountEditor: View {
     let presentationMode: UsagePresentationMode
     let canMoveUp: Bool
     let canMoveDown: Bool
-    let canConnectCredentialFile: Bool
     let supportsMultiplier: Bool
     let multiplierDetectionText: String?
     let onMoveUp: () -> Void
     let onMoveDown: () -> Void
     let onAutoDetectMultiplier: () -> Void
-    let onRegenerateSynthetic: () -> Void
-    let onSetSyntheticRemainingFull: () -> Void
-    let onConnectCredentialFile: (String) -> Void
-    let onDisconnectCredentialFile: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
@@ -1676,20 +1626,6 @@ private struct AccountEditor: View {
 
                 Spacer()
 
-                if canConnectCredentialFile && account.source != .currentSession {
-                    Button {
-                        chooseCredentialFile()
-                    } label: {
-                        Label(account.source == .credentialFile ? "Change File" : "Connect File", systemImage: "doc.badge.gearshape")
-                    }
-                    .controlSize(.small)
-
-                    if account.source == .credentialFile {
-                        Button("Disconnect", action: onDisconnectCredentialFile)
-                            .controlSize(.small)
-                    }
-                }
-
                 Button(role: .destructive, action: onDelete) {
                     Image(systemName: "trash")
                 }
@@ -1705,8 +1641,8 @@ private struct AccountEditor: View {
                     .lineLimit(2)
                     .textSelection(.enabled)
 
-                if let credentialFileName {
-                    Text(credentialFileName)
+                if let profileCredentialName {
+                    Text(profileCredentialName)
                         .font(.caption2.monospaced())
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
@@ -1737,12 +1673,7 @@ private struct AccountEditor: View {
                     .padding(.leading, 30)
             }
 
-            if account.source == .synthetic {
-                syntheticControls
-                    .padding(.leading, 30)
-            }
-
-            if !account.buckets.isEmpty && account.source != .synthetic {
+            if !account.buckets.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Quota rows")
                         .font(.caption.weight(.semibold))
@@ -1833,79 +1764,6 @@ private struct AccountEditor: View {
         }
     }
 
-    private var syntheticControls: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                Text("Synthetic usage")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-
-                Picker("Synthetic usage", selection: syntheticModeBinding) {
-                    ForEach(SyntheticUsageMode.allCases) { mode in
-                        Text(LocalizedStringKey(mode.label)).tag(mode)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .frame(width: 220)
-
-                if account.syntheticMode != .manual {
-                    Button("Regenerate", action: onRegenerateSynthetic)
-                        .controlSize(.small)
-                }
-
-                Button("Remaining 100%", action: onSetSyntheticRemainingFull)
-                    .controlSize(.small)
-            }
-
-            if account.syntheticMode == .manual {
-                ForEach($account.buckets) { $bucket in
-                    HStack(spacing: 10) {
-                        Toggle("", isOn: $bucket.isEnabled)
-                            .labelsHidden()
-                            .controlSize(.mini)
-
-                        Text(bucket.label)
-                            .font(.caption)
-                            .frame(width: 70, alignment: .leading)
-                        Slider(value: syntheticPercentBinding($bucket), in: 0...100, step: 1)
-                            .frame(maxWidth: 260)
-                        TextField("%", value: syntheticPercentIntegerBinding($bucket), format: .number)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 58)
-                        Text("%")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-
-                        Button {
-                            moveBucket(bucket.id, direction: -1)
-                        } label: {
-                            Image(systemName: "chevron.up")
-                        }
-                        .buttonStyle(.borderless)
-                        .disabled(account.buckets.first?.id == bucket.id)
-
-                        Button {
-                            moveBucket(bucket.id, direction: 1)
-                        } label: {
-                            Image(systemName: "chevron.down")
-                        }
-                        .buttonStyle(.borderless)
-                        .disabled(account.buckets.last?.id == bucket.id)
-                    }
-                }
-            } else {
-                HStack(spacing: 8) {
-                    ForEach(account.buckets) { bucket in
-                        Text("\(bucket.label) \(percentText(displayPercent(bucket.resolvedPercentUsed)))")
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
-    }
-
     private var multiplierControls: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
@@ -1923,7 +1781,7 @@ private struct AccountEditor: View {
 
                 Button("Auto", action: onAutoDetectMultiplier)
                     .controlSize(.small)
-                    .disabled(account.source == .synthetic || account.source == .manual || account.source == nil)
+                    .disabled(account.source == nil || account.source == .legacyUnsupported)
 
                 Text(account.multiplierMode == .automatic ? "Auto" : "Manual")
                     .font(.caption2.weight(.medium))
@@ -1939,40 +1797,6 @@ private struct AccountEditor: View {
                     .foregroundStyle(.secondary)
             }
         }
-    }
-
-    private var syntheticModeBinding: Binding<SyntheticUsageMode> {
-        Binding(
-            get: { account.syntheticMode ?? .random },
-            set: { mode in
-                account.syntheticMode = mode
-                if mode == .random { onRegenerateSynthetic() }
-            }
-        )
-    }
-
-    private func syntheticPercentBinding(_ bucket: Binding<UsageBucket>) -> Binding<Double> {
-        Binding(
-            get: { (bucket.wrappedValue.resolvedPercentUsed ?? 0) * 100 },
-            set: { value in
-                bucket.wrappedValue.used = nil
-                bucket.wrappedValue.limit = nil
-                bucket.wrappedValue.percentUsed = min(max(value / 100, 0), 1)
-                account.syntheticMode = .manual
-            }
-        )
-    }
-
-    private func syntheticPercentIntegerBinding(_ bucket: Binding<UsageBucket>) -> Binding<Int> {
-        Binding(
-            get: { Int(((bucket.wrappedValue.resolvedPercentUsed ?? 0) * 100).rounded()) },
-            set: { value in
-                bucket.wrappedValue.used = nil
-                bucket.wrappedValue.limit = nil
-                bucket.wrappedValue.percentUsed = Double(min(max(value, 0), 100)) / 100
-                account.syntheticMode = .manual
-            }
-        )
     }
 
     private var accountWebURLBinding: Binding<String> {
@@ -2017,48 +1841,15 @@ private struct AccountEditor: View {
     private var sourceLabel: String {
         switch account.source {
         case .currentSession: return "Current login"
-        case .credentialFile: return "Credential file"
         case .profile: return "UsageDock profile"
-        case .manual: return "Account slot"
-        case .synthetic: return "Account"
-        case .mock: return "Mock"
-        case nil: return "Legacy"
+        case .legacyUnsupported, nil: return "Unavailable"
         }
     }
 
-    private var credentialFileName: String? {
-        guard account.source == .credentialFile || account.source == .profile, let path = account.credentialPath else { return nil }
+    private var profileCredentialName: String? {
+        guard account.source == .profile, let path = account.credentialPath else { return nil }
         let url = URL(fileURLWithPath: path)
         return "…/\(url.deletingLastPathComponent().lastPathComponent)/\(url.lastPathComponent)"
-    }
-
-    private func chooseCredentialFile() {
-        let panel = NSOpenPanel()
-        panel.title = "Choose \(account.provider.displayName) credential JSON"
-        panel.message = credentialHelpText
-        panel.canChooseDirectories = false
-        panel.canChooseFiles = true
-        panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = [.json]
-
-        if panel.runModal() == .OK, let url = panel.url {
-            onConnectCredentialFile(url.path)
-        }
-    }
-
-    private var credentialHelpText: String {
-        switch account.provider {
-        case .claude:
-            return "Choose a Claude Code .credentials.json from the account/profile you want to track."
-        case .codex:
-            return "Choose a Codex auth.json from the account/profile you want to track."
-        case .antigravity:
-            return "Direct Antigravity credential import is disabled until a provider-specific login boundary is verified."
-        case .kimi:
-            return "Choose a Kimi Code OAuth credential JSON from ~/.kimi-code/credentials or another Kimi Code profile."
-        case .cursor, .grok:
-            return "No live credential adapter is configured for this provider. Use manual or synthetic usage instead."
-        }
     }
 
     private func displayPercent(_ used: Double?) -> Double? {

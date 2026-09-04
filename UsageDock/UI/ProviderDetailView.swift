@@ -210,7 +210,6 @@ struct ProviderDetailView: View {
     }
 
     private var statusColor: Color {
-        if account?.source == .synthetic { return ProviderBrand.glow(for: provider, customHex: accentHex, theme: theme) }
         switch usageStore.refreshState(for: provider) {
         case .live: return .green
         case .partial: return .orange
@@ -223,12 +222,8 @@ struct ProviderDetailView: View {
     private func sourceLabel(_ source: UsageAccountSource?) -> String {
         switch source {
         case .currentSession: return "Local Login"
-        case .credentialFile: return "Credential"
         case .profile: return "UsageDock Profile"
-        case .synthetic: return "Account"
-        case .manual: return "Account Slot"
-        case .mock: return "Mock"
-        case nil: return "Account"
+        case .legacyUnsupported, nil: return "Unavailable"
         }
     }
 

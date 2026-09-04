@@ -122,38 +122,29 @@ struct UsageBucket: Identifiable, Codable, Hashable {
 
 enum UsageAccountSource: String, Codable, Hashable {
     case currentSession
-    case credentialFile
     case profile
-    case manual
-    case synthetic
-    case mock
+    case legacyUnsupported
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let rawValue = try container.decode(String.self)
+        self = Self(rawValue: rawValue) ?? .legacyUnsupported
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
 }
 
 enum UsageDockDistributionPolicy {
-    #if DEBUG
-    static let isPublicRelease = false
-    #else
-    static let isPublicRelease = true
-    #endif
-
-    static var allowsDevelopmentAccounts: Bool { !isPublicRelease }
-    static var allowsCredentialFileRegistration: Bool { !isPublicRelease }
-
     static func isPublicLoginSource(_ source: UsageAccountSource?) -> Bool {
         source == .currentSession || source == .profile
     }
 
     static func isAccountVisible(_ account: UsageAccount) -> Bool {
-        allowsDevelopmentAccounts || isPublicLoginSource(account.source)
+        isPublicLoginSource(account.source)
     }
-}
-
-enum SyntheticUsageMode: String, Codable, CaseIterable, Identifiable {
-    case random
-    case manual
-
-    var id: String { rawValue }
-    var label: String { self == .random ? "Coherent random" : "Manual" }
 }
 
 enum MultiplierMode: String, Codable, Hashable {
@@ -330,7 +321,6 @@ struct UsageAccount: Identifiable, Codable, Hashable {
     var planMultiplier: Int?
     var multiplierMode: MultiplierMode?
     var accentHex: String?
-    var syntheticMode: SyntheticUsageMode?
     var profileHomePath: String?
     var webURL: String?
     var railPercentSource: RailQuotaSource?
@@ -349,7 +339,6 @@ struct UsageAccount: Identifiable, Codable, Hashable {
         planMultiplier: Int? = nil,
         multiplierMode: MultiplierMode? = nil,
         accentHex: String? = nil,
-        syntheticMode: SyntheticUsageMode? = nil,
         profileHomePath: String? = nil,
         webURL: String? = nil,
         railPercentSource: RailQuotaSource? = nil,
@@ -367,7 +356,6 @@ struct UsageAccount: Identifiable, Codable, Hashable {
         self.planMultiplier = planMultiplier
         self.multiplierMode = multiplierMode
         self.accentHex = accentHex
-        self.syntheticMode = syntheticMode
         self.profileHomePath = profileHomePath
         self.webURL = webURL
         self.railPercentSource = railPercentSource

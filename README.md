@@ -1,17 +1,33 @@
 # UsageDock
 
-UsageDock is a lightweight macOS edge rail for viewing AI service usage and reset timing at a glance. It supports provider/account-level quota presentation, customizable rail layout and styling, and an elastic liquid-style drag interaction for moving the rail between screen edges.
+UsageDock is a lightweight macOS edge rail for checking AI service usage and reset timing at a glance. It keeps quota state visible without requiring a full dashboard.
 
-## Public account policy
+## Preview
 
-The supported public distribution is the **Release** build. Account registration is login-only:
+### Edge rail
+
+<img src="docs/images/usagedock-rail.png" alt="UsageDock edge rail showing live AI usage" width="763">
+
+### Settings
+
+<img src="docs/images/usagedock-settings.png" alt="UsageDock settings window" width="900">
+
+## What it does
+
+- Shows provider/account usage in a compact edge rail.
+- Supports up to three selected display accounts with independent menu bar selection.
+- Displays rings, percentages, reset timing, provider/account colors, and configurable quota sources.
+- Includes left/right edge placement, layout controls, border controls, materials, droplets, and elastic liquid-style drag interaction.
+- Provides a compact macOS menu bar status item and popover for selected accounts.
+- Persists appearance, placement, display-account, and menu-bar preferences across restarts.
+
+## Account policy
+
+UsageDock is **login-only**.
 
 - Claude, Codex, Antigravity, and Kimi can register through supported authenticated login/session flows.
-- Synthetic, mock, manual, and credential-file account registration is disabled in public Release builds.
-- Existing development-only account records are not deleted by a Release build, but they are excluded from public UI, aggregation, and refresh paths.
-- Cursor and Grok account registration remains unavailable until UsageDock has a verified login and live-usage integration for those providers.
-
-Development builds may retain internal test tooling, but that tooling is not part of the supported public distribution.
+- Cursor and Grok remain unavailable until UsageDock has a verified login and live-usage integration for those providers.
+- Accounts that are not backed by a supported authenticated login are excluded from the active account set.
 
 ## Requirements
 
@@ -44,7 +60,7 @@ xcodebuild \
 
 ## Account registration
 
-Open **Settings → Accounts** and use the provider login controls. Public Release builds do not expose synthetic or manual account creation controls.
+Open **Settings → Accounts** and use the provider login controls. UsageDock only registers supported authenticated login/session sources.
 
 ## Project structure
 

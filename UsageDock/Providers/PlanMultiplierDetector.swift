@@ -11,7 +11,7 @@ enum ProviderPlanMultiplierDetector {
         guard account.provider == .claude || account.provider == .codex else {
             return PlanMultiplierDetection(multiplier: nil, detail: "Automatic multiplier detection is available for Claude and Codex.")
         }
-        guard account.source == .currentSession || account.source == .credentialFile else {
+        guard account.source == .currentSession || account.source == .profile else {
             return PlanMultiplierDetection(multiplier: nil, detail: "Connect or register a real provider login before using Auto.")
         }
 
@@ -73,7 +73,7 @@ enum ProviderPlanMultiplierDetector {
     }
 
     private static func credentialData(for account: UsageAccount) -> Data? {
-        if account.source == .credentialFile, let path = account.credentialPath {
+        if account.source == .profile, let path = account.credentialPath {
             return try? Data(contentsOf: URL(fileURLWithPath: path))
         }
         switch account.provider {
