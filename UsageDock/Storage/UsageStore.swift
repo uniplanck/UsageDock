@@ -1402,7 +1402,7 @@ private enum UsageProfileLoginLauncher {
             missing = "Claude CLI not found. Install Claude Code, then retry."
             availabilityCheck = "command -v claude >/dev/null 2>&1"
             let config = shellQuote(profileHome.appendingPathComponent(".claude").path)
-            command = "HOME=\(home) CLAUDE_CONFIG_DIR=\(config) CLAUDE_SECURESTORAGE_CONFIG_DIR=\(config) claude auth login"
+            command = "CLAUDE_CONFIG_DIR=\(config) CLAUDE_SECURESTORAGE_CONFIG_DIR=\(config) claude auth login"
         case .codex:
             missing = "Codex CLI not found. Install Codex, then retry."
             availabilityCheck = "command -v codex >/dev/null 2>&1"
