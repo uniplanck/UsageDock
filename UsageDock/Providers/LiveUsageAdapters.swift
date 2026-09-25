@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Security
 
@@ -770,16 +771,56 @@ enum UsageAdapterError: LocalizedError {
     }
 }
 
+enum ClaudeCredentialStore {
+    static func credentialCandidates(credentialPath: String? = nil) -> [Data] {
+        if let credentialPath {
+            let credentialURL = URL(fileURLWithPath: credentialPath)
+            let configDirectory = credentialURL.deletingLastPathComponent().path
+            return [
+                keychainPayload(service: keychainServiceName(configDirectory: configDirectory)),
+                try? Data(contentsOf: credentialURL)
+            ].compactMap { $0 }
+        }
+
+        let fileURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/.credentials.json")
+        return [
+            keychainPayload(service: "Claude Code-credentials"),
+            try? Data(contentsOf: fileURL)
+        ].compactMap { $0 }
+    }
+
+    static func credentialData(credentialPath: String? = nil) -> Data? {
+        credentialCandidates(credentialPath: credentialPath).first
+    }
+
+    static func keychainServiceName(configDirectory: String) -> String {
+        let normalized = configDirectory.precomposedStringWithCanonicalMapping
+        let digest = SHA256.hash(data: Data(normalized.utf8))
+        let suffix = digest.prefix(4).map { String(format: "%02x", $0) }.joined()
+        return "Claude Code-credentials-\(suffix)"
+    }
+
+    private static func keychainPayload(service: String) -> Data? {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecReturnData: true,
+            kSecMatchLimit: kSecMatchLimitOne
+        ]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
+        return result as? Data
+    }
+}
+
 private struct ClaudeCredentialResolver {
     func accessToken(credentialPath: String? = nil) throws -> String {
-        let candidates: [Data]
-        if let credentialPath {
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: credentialPath)) else {
-                throw UsageAdapterError.credentialsUnavailable("Claude credential file could not be read: \(credentialPath)")
-            }
-            candidates = [data]
-        } else {
-            candidates = [keychainPayload(), filePayload()].compactMap { $0 }
+        let candidates = ClaudeCredentialStore.credentialCandidates(credentialPath: credentialPath)
+        if credentialPath != nil, candidates.isEmpty {
+            throw UsageAdapterError.credentialsUnavailable(
+                "Claude profile credentials could not be read. Re-authenticate this UsageDock profile."
+            )
         }
         var sawExpired = false
 
@@ -804,24 +845,6 @@ private struct ClaudeCredentialResolver {
             throw UsageAdapterError.authenticationExpired("Claude login has expired. Re-authenticate in Claude Code, then refresh UsageDock.")
         }
         throw UsageAdapterError.credentialsUnavailable("Claude OAuth credentials were not found. Sign in to Claude Code first.")
-    }
-
-    private func keychainPayload() -> Data? {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: "Claude Code-credentials",
-            kSecReturnData: true,
-            kSecMatchLimit: kSecMatchLimitOne
-        ]
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
-        return result as? Data
-    }
-
-    private func filePayload() -> Data? {
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/.credentials.json")
-        return try? Data(contentsOf: url)
     }
 }
 

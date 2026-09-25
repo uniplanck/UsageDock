@@ -1,5 +1,4 @@
 import Foundation
-import Security
 
 struct PlanMultiplierDetection: Equatable {
     let multiplier: Int?
@@ -54,7 +53,7 @@ enum ProviderPlanMultiplierDetector {
     static func hasCurrentSession(for provider: ProviderID) -> Bool {
         switch provider {
         case .claude:
-            guard let data = claudeCurrentCredentialData() else { return false }
+            guard let data = ClaudeCredentialStore.credentialData() else { return false }
             return jsonStrings(in: data).contains { !$0.isEmpty }
         case .codex:
             guard let data = fileData(".codex/auth.json"),
@@ -74,31 +73,19 @@ enum ProviderPlanMultiplierDetector {
 
     private static func credentialData(for account: UsageAccount) -> Data? {
         if account.source == .profile, let path = account.credentialPath {
+            if account.provider == .claude {
+                return ClaudeCredentialStore.credentialData(credentialPath: path)
+            }
             return try? Data(contentsOf: URL(fileURLWithPath: path))
         }
         switch account.provider {
         case .claude:
-            return claudeCurrentCredentialData()
+            return ClaudeCredentialStore.credentialData()
         case .codex:
             return fileData(".codex/auth.json")
         case .kimi, .antigravity, .cursor, .grok:
             return nil
         }
-    }
-
-    private static func claudeCurrentCredentialData() -> Data? {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: "Claude Code-credentials",
-            kSecReturnData: true,
-            kSecMatchLimit: kSecMatchLimitOne
-        ]
-        var result: CFTypeRef?
-        if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-           let data = result as? Data {
-            return data
-        }
-        return fileData(".claude/.credentials.json")
     }
 
     private static func fileData(_ relativePath: String) -> Data? {

@@ -20,6 +20,17 @@ final class UsageDockDistributionPolicyTests: XCTestCase {
     }
 }
 
+final class ClaudeCredentialStoreTests: XCTestCase {
+    func testProfileKeychainServiceUsesNormalizedConfigDirectoryHashPrefix() {
+        XCTAssertEqual(
+            ClaudeCredentialStore.keychainServiceName(
+                configDirectory: "/tmp/UsageDock/Profiles/claude/test/.claude"
+            ),
+            "Claude Code-credentials-fb1ebbbb"
+        )
+    }
+}
+
 final class UsageAggregatorTests: XCTestCase {
     func testExactAggregationUsesCapacityWeighting() throws {
         let accounts = [
