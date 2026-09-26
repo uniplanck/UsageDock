@@ -29,6 +29,69 @@ final class ClaudeCredentialStoreTests: XCTestCase {
             "Claude Code-credentials-fb1ebbbb"
         )
     }
+
+    func testRefreshMergeRotatesTokensAndUpdatesExpiryWithoutDroppingMetadata() throws {
+        let original = try JSONSerialization.data(withJSONObject: [
+            "claudeAiOauth": [
+                "accessToken": "old-access",
+                "refreshToken": "old-refresh",
+                "expiresAt": 1_000,
+                "subscriptionType": "pro",
+                "rateLimitTier": "default"
+            ],
+            "mcpOAuth": ["preserve": true]
+        ])
+        let refreshed = try JSONSerialization.data(withJSONObject: [
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "expires_in": 3_600,
+            "refresh_token_expires_in": 7_200,
+            "scope": "user:profile user:inference"
+        ])
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+
+        let merged = try ClaudeCredentialStore.mergedCredentialData(
+            originalData: original,
+            refreshData: refreshed,
+            now: now
+        )
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: merged.data) as? [String: Any])
+        let oauth = try XCTUnwrap(root["claudeAiOauth"] as? [String: Any])
+
+        XCTAssertEqual(merged.accessToken, "new-access")
+        XCTAssertEqual(oauth["accessToken"] as? String, "new-access")
+        XCTAssertEqual(oauth["refreshToken"] as? String, "new-refresh")
+        XCTAssertEqual(oauth["expiresAt"] as? Int, 1_700_003_600_000)
+        XCTAssertEqual(oauth["refreshTokenExpiresAt"] as? Int, 1_700_007_200_000)
+        XCTAssertEqual(oauth["scopes"] as? [String], ["user:profile", "user:inference"])
+        XCTAssertEqual(oauth["subscriptionType"] as? String, "pro")
+        XCTAssertNotNil(root["mcpOAuth"])
+    }
+
+    func testRefreshMergeKeepsExistingRefreshTokenWhenServerDoesNotRotateIt() throws {
+        let original = try JSONSerialization.data(withJSONObject: [
+            "claudeAiOauth": [
+                "accessToken": "old-access",
+                "refreshToken": "keep-refresh",
+                "expiresAt": 1_000
+            ]
+        ])
+        let refreshed = try JSONSerialization.data(withJSONObject: [
+            "access_token": "new-access",
+            "expires_in": 60
+        ])
+
+        let merged = try ClaudeCredentialStore.mergedCredentialData(
+            originalData: original,
+            refreshData: refreshed,
+            now: Date(timeIntervalSince1970: 2_000)
+        )
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: merged.data) as? [String: Any])
+        let oauth = try XCTUnwrap(root["claudeAiOauth"] as? [String: Any])
+
+        XCTAssertEqual(oauth["refreshToken"] as? String, "keep-refresh")
+        XCTAssertEqual(oauth["expiresAt"] as? Int, 2_060_000)
+    }
 }
 
 final class UsageAggregatorTests: XCTestCase {

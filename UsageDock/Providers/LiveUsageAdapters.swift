@@ -11,14 +11,25 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
     }
 
     func fetchAccounts() async throws -> [UsageAccount] {
-        let token = try ClaudeCredentialResolver().accessToken(credentialPath: credentialPath)
-        var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
-        request.httpMethod = "GET"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let resolver = ClaudeCredentialResolver()
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        func requestUsage(accessToken: String) async throws -> (Data, URLResponse) {
+            var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
+            request.httpMethod = "GET"
+            request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            return try await URLSession.shared.data(for: request)
+        }
+
+        var token = try await resolver.accessToken(credentialPath: credentialPath)
+        var (data, response) = try await requestUsage(accessToken: token)
+
+        if let http = response as? HTTPURLResponse, http.statusCode == 401 {
+            token = try await resolver.accessToken(credentialPath: credentialPath, forceRefresh: true)
+            (data, response) = try await requestUsage(accessToken: token)
+        }
+
         try HTTPUsageResponseValidator.validate(response: response, data: data, provider: .claude)
 
         return [
@@ -772,22 +783,36 @@ enum UsageAdapterError: LocalizedError {
 }
 
 enum ClaudeCredentialStore {
-    static func credentialCandidates(credentialPath: String? = nil) -> [Data] {
+    enum PersistenceTarget {
+        case keychain(service: String)
+        case file(URL)
+    }
+
+    struct CredentialRecord {
+        let data: Data
+        let target: PersistenceTarget
+    }
+
+    static func credentialRecords(credentialPath: String? = nil) -> [CredentialRecord] {
         if let credentialPath {
             let credentialURL = URL(fileURLWithPath: credentialPath)
             let configDirectory = credentialURL.deletingLastPathComponent().path
             return [
-                keychainPayload(service: keychainServiceName(configDirectory: configDirectory)),
-                try? Data(contentsOf: credentialURL)
+                keychainRecord(service: keychainServiceName(configDirectory: configDirectory)),
+                fileRecord(url: credentialURL)
             ].compactMap { $0 }
         }
 
         let fileURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/.credentials.json")
         return [
-            keychainPayload(service: "Claude Code-credentials"),
-            try? Data(contentsOf: fileURL)
+            keychainRecord(service: "Claude Code-credentials"),
+            fileRecord(url: fileURL)
         ].compactMap { $0 }
+    }
+
+    static func credentialCandidates(credentialPath: String? = nil) -> [Data] {
+        credentialRecords(credentialPath: credentialPath).map(\.data)
     }
 
     static func credentialData(credentialPath: String? = nil) -> Data? {
@@ -801,6 +826,76 @@ enum ClaudeCredentialStore {
         return "Claude Code-credentials-\(suffix)"
     }
 
+    static func persist(_ data: Data, to target: PersistenceTarget) throws {
+        switch target {
+        case .keychain(let service):
+            let query: [CFString: Any] = [
+                kSecClass: kSecClassGenericPassword,
+                kSecAttrService: service
+            ]
+            let attributes: [CFString: Any] = [
+                kSecValueData: data
+            ]
+            let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+            guard status == errSecSuccess else {
+                throw UsageAdapterError.invalidResponse(
+                    "Claude refreshed credentials could not be saved to Keychain (OSStatus \(status))."
+                )
+            }
+
+        case .file(let url):
+            try data.write(to: url, options: .atomic)
+        }
+    }
+
+    static func mergedCredentialData(
+        originalData: Data,
+        refreshData: Data,
+        now: Date = Date()
+    ) throws -> (data: Data, accessToken: String) {
+        guard
+            var object = try JSONSerialization.jsonObject(with: originalData) as? [String: Any],
+            var oauth = object["claudeAiOauth"] as? [String: Any],
+            let refreshed = try JSONSerialization.jsonObject(with: refreshData) as? [String: Any],
+            let accessToken = refreshed["access_token"] as? String,
+            !accessToken.isEmpty
+        else {
+            throw UsageAdapterError.invalidResponse("Claude token refresh returned malformed credentials.")
+        }
+
+        oauth["accessToken"] = accessToken
+
+        if let refreshToken = refreshed["refresh_token"] as? String, !refreshToken.isEmpty {
+            oauth["refreshToken"] = refreshToken
+        }
+
+        if let expiresIn = numeric(refreshed["expires_in"]), expiresIn > 0 {
+            oauth["expiresAt"] = Int((now.timeIntervalSince1970 + expiresIn) * 1000)
+        }
+
+        if let refreshTokenExpiresIn = numeric(refreshed["refresh_token_expires_in"]), refreshTokenExpiresIn > 0 {
+            oauth["refreshTokenExpiresAt"] = Int((now.timeIntervalSince1970 + refreshTokenExpiresIn) * 1000)
+        }
+
+        if let scope = refreshed["scope"] as? String {
+            oauth["scopes"] = scope.split(whereSeparator: \.isWhitespace).map(String.init)
+        }
+
+        object["claudeAiOauth"] = oauth
+        let encoded = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+        return (encoded, accessToken)
+    }
+
+    private static func keychainRecord(service: String) -> CredentialRecord? {
+        guard let data = keychainPayload(service: service) else { return nil }
+        return CredentialRecord(data: data, target: .keychain(service: service))
+    }
+
+    private static func fileRecord(url: URL) -> CredentialRecord? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return CredentialRecord(data: data, target: .file(url))
+    }
+
     private static func keychainPayload(service: String) -> Data? {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
@@ -812,39 +907,133 @@ enum ClaudeCredentialStore {
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
         return result as? Data
     }
+
+    private static func numeric(_ value: Any?) -> Double? {
+        switch value {
+        case let number as NSNumber: return number.doubleValue
+        case let string as String: return Double(string)
+        default: return nil
+        }
+    }
 }
 
 private struct ClaudeCredentialResolver {
-    func accessToken(credentialPath: String? = nil) throws -> String {
-        let candidates = ClaudeCredentialStore.credentialCandidates(credentialPath: credentialPath)
-        if credentialPath != nil, candidates.isEmpty {
+    private let tokenURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
+    private let clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+
+    func accessToken(
+        credentialPath: String? = nil,
+        forceRefresh: Bool = false
+    ) async throws -> String {
+        let records = ClaudeCredentialStore.credentialRecords(credentialPath: credentialPath)
+        if credentialPath != nil, records.isEmpty {
             throw UsageAdapterError.credentialsUnavailable(
                 "Claude profile credentials could not be read. Re-authenticate this UsageDock profile."
             )
         }
-        var sawExpired = false
 
-        for data in candidates {
+        var sawExpired = false
+        var lastRefreshError: Error?
+
+        for record in records {
             guard
-                let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let object = try? JSONSerialization.jsonObject(with: record.data) as? [String: Any],
                 let oauth = object["claudeAiOauth"] as? [String: Any],
                 let token = oauth["accessToken"] as? String,
                 !token.isEmpty
             else { continue }
 
-            if let expiresAt = (oauth["expiresAt"] as? NSNumber)?.doubleValue,
-               expiresAt > 0,
-               Date(timeIntervalSince1970: expiresAt / 1000) <= Date() {
-                sawExpired = true
+            let expired = Self.isExpired(oauth["expiresAt"])
+            if !forceRefresh && !expired {
+                return token
+            }
+            sawExpired = sawExpired || expired
+
+            guard let refreshToken = oauth["refreshToken"] as? String, !refreshToken.isEmpty else {
                 continue
             }
-            return token
+
+            do {
+                // Refresh tokens may rotate. Prove we can persist before consuming one.
+                try ClaudeCredentialStore.persist(record.data, to: record.target)
+                return try await refresh(
+                    record: record,
+                    oauth: oauth,
+                    refreshToken: refreshToken
+                )
+            } catch {
+                lastRefreshError = error
+            }
         }
 
-        if sawExpired {
-            throw UsageAdapterError.authenticationExpired("Claude login has expired. Re-authenticate in Claude Code, then refresh UsageDock.")
+        if let lastRefreshError {
+            throw lastRefreshError
+        }
+        if sawExpired || forceRefresh {
+            throw UsageAdapterError.authenticationExpired(
+                "Claude login has expired and could not be refreshed automatically. Re-authenticate in Claude Code, then refresh UsageDock."
+            )
         }
         throw UsageAdapterError.credentialsUnavailable("Claude OAuth credentials were not found. Sign in to Claude Code first.")
+    }
+
+    private func refresh(
+        record: ClaudeCredentialStore.CredentialRecord,
+        oauth: [String: Any],
+        refreshToken: String
+    ) async throws -> String {
+        var payload: [String: Any] = [
+            "grant_type": "refresh_token",
+            "refresh_token": refreshToken,
+            "client_id": clientID
+        ]
+
+        if let scopes = oauth["scopes"] as? [String], !scopes.isEmpty {
+            payload["scope"] = scopes.joined(separator: " ")
+        }
+
+        var request = URLRequest(url: tokenURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw UsageAdapterError.invalidResponse("Claude token refresh returned a non-HTTP response.")
+        }
+
+        guard (200..<300).contains(http.statusCode) else {
+            if http.statusCode == 400 || http.statusCode == 401 {
+                throw UsageAdapterError.authenticationExpired(
+                    "Claude refresh token was rejected. Re-authenticate in Claude Code, then refresh UsageDock."
+                )
+            }
+            throw UsageAdapterError.httpFailure(
+                provider: .claude,
+                statusCode: http.statusCode,
+                message: "OAuth token refresh failed"
+            )
+        }
+
+        let merged = try ClaudeCredentialStore.mergedCredentialData(
+            originalData: record.data,
+            refreshData: data
+        )
+        try ClaudeCredentialStore.persist(merged.data, to: record.target)
+        return merged.accessToken
+    }
+
+    private static func isExpired(_ value: Any?) -> Bool {
+        let raw: Double?
+        switch value {
+        case let number as NSNumber: raw = number.doubleValue
+        case let string as String: raw = Double(string)
+        default: raw = nil
+        }
+        guard let raw, raw > 0 else { return false }
+        let seconds = raw > 100_000_000_000 ? raw / 1000 : raw
+        return Date(timeIntervalSince1970: seconds) <= Date()
     }
 }
 
