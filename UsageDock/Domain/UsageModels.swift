@@ -34,15 +34,15 @@ enum ProviderID: String, CaseIterable, Codable, Identifiable {
 
     var supportsProfileLogin: Bool {
         switch self {
-        case .claude, .codex, .antigravity, .kimi: true
-        case .cursor, .grok: false
+        case .claude, .codex, .antigravity, .kimi, .grok: true
+        case .cursor: false
         }
     }
 
     var supportsLiveUsage: Bool {
         switch self {
-        case .claude, .codex, .antigravity, .kimi: true
-        case .cursor, .grok: false
+        case .claude, .codex, .antigravity, .kimi, .grok: true
+        case .cursor: false
         }
     }
 
@@ -53,7 +53,7 @@ enum ProviderID: String, CaseIterable, Codable, Identifiable {
         case .antigravity: "https://antigravity.google/"
         case .kimi: "https://www.kimi.ai/"
         case .cursor: "https://cursor.com/"
-        case .grok: "https://grok.com/"
+        case .grok: "https://grok.com/?_s=usage"
         }
     }
 }

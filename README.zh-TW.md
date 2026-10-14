@@ -42,9 +42,11 @@ UsageDock 是一款輕量級 macOS 螢幕邊緣用量列，可快速查看 AI �
 
 UsageDock **僅支援登入帳號**。
 
-- Claude、Codex、Antigravity 與 Kimi 可透過支援的已驗證登入/工作階段註冊。
-- Cursor 與 Grok 在具備經驗證的登入方式與即時用量整合之前暫不可用。
+- Claude、Codex、Antigravity、Kimi 與 Grok 可透過支援的已驗證登入/工作階段註冊。
+- Cursor 在具備經驗證的登入方式與即時用量整合之前暫不可用。
 - 未由支援的已驗證登入提供的帳號不會加入有效帳號集合。
+
+Grok 使用官方 Grok CLI 登入（`grok login`，位址為 auth.x.ai）。如果額度來自 X 訂閱，請先把該 X 帳號連結到同一個 xAI 帳號。UsageDock 從 `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` 讀取共享訂閱額度，並顯示已用百分比、重設時間，以及在有上限時的隨需額外用量。登入權杖留在 Grok CLI 的認證檔案中，不會複製到 UsageDock 的設定裡。依產品拆開的數字是同一額度的組成，不會當成各自獨立的上限。如果帳單回應沒有使用百分比，UsageDock 不會編造 0%。grok.com 上較短的查詢窗口屬於另一套瀏覽器 Cookie 工作階段，這裡不使用。
 
 ## 系統需求
 

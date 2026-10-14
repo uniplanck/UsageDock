@@ -42,9 +42,11 @@ UsageDock is a lightweight macOS edge rail for checking AI service usage and res
 
 UsageDock is **login-only**.
 
-- Claude, Codex, Antigravity, and Kimi can register through supported authenticated login/session flows.
-- Cursor and Grok remain unavailable until UsageDock has a verified login and live-usage integration for those providers.
+- Claude, Codex, Antigravity, Kimi, and Grok can register through supported authenticated login/session flows.
+- Cursor remains unavailable until UsageDock has a verified login and live-usage integration for that provider.
 - Accounts that are not backed by a supported authenticated login are excluded from the active account set.
+
+Grok uses the official Grok CLI login (`grok login` at auth.x.ai). Link an X subscription to that xAI account first if the allowance comes from X. UsageDock then reads the shared subscription pool from `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` and shows the used percentage, the reset time, and on-demand extra usage when that cap is present. The login token stays in the Grok CLI auth file. Product rows are shares of the same pool, so they are not separate limits. If the billing response omits the percentage, UsageDock does not invent 0%. The short grok.com query window is a separate browser-cookie surface and is not used.
 
 ## Requirements
 

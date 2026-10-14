@@ -899,6 +899,157 @@ final class LiveUsageAdapterParsingTests: XCTestCase {
         XCTAssertEqual(sparkWeekly.resolvedPercentUsed ?? -1, 0.18, accuracy: 0.0001)
     }
 
+    func testGrokProviderAcceptsLoginBackedUsage() {
+        XCTAssertTrue(ProviderID.grok.supportsLiveUsage)
+        XCTAssertTrue(ProviderID.grok.supportsProfileLogin)
+        XCTAssertFalse(ProviderID.cursor.supportsLiveUsage)
+        XCTAssertFalse(ProviderID.cursor.supportsProfileLogin)
+        XCTAssertEqual(ProviderBrand.assetName(for: .grok), "Grok")
+    }
+
+    func testGrokBillingParsesWeeklyPoolResetAndExtraUsage() throws {
+        let data = try jsonData([
+            "config": [
+                "currentPeriod": [
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "start": "2026-08-08T01:53:09.930537+00:00",
+                    "end": "2026-08-15T01:53:09.930537+00:00"
+                ],
+                "creditUsagePercent": 42.5,
+                "onDemandCap": ["val": 5000],
+                "onDemandUsed": ["val": "300"],
+                "prepaidBalance": ["val": 1250],
+                "isUnifiedBillingUser": true,
+                "productUsage": [
+                    ["product": "GrokBuild", "usagePercent": 30.0],
+                    ["product": "GrokChat"]
+                ],
+                "billingPeriodEnd": "2026-08-15T01:53:09.930537+00:00"
+            ]
+        ])
+
+        let buckets = try GrokUsageAdapter.parseUsage(data: data)
+        XCTAssertEqual(buckets.count, 2)
+
+        let weekly = try XCTUnwrap(buckets.first(where: { $0.kind == .weekly }))
+        XCTAssertEqual(weekly.quotaID, "grok-weekly")
+        XCTAssertEqual(weekly.label, "1w")
+        XCTAssertEqual(weekly.resolvedPercentUsed ?? -1, 0.425, accuracy: 0.0001)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let reset = try XCTUnwrap(weekly.resetsAt)
+        let parts = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: reset)
+        XCTAssertEqual(parts.year, 2026)
+        XCTAssertEqual(parts.month, 8)
+        XCTAssertEqual(parts.day, 15)
+        XCTAssertEqual(parts.hour, 1)
+        XCTAssertEqual(parts.minute, 53)
+
+        let extra = try XCTUnwrap(buckets.first(where: { $0.kind == .credits }))
+        XCTAssertEqual(extra.label, "Extra")
+        XCTAssertEqual(extra.used ?? -1, 300, accuracy: 0.0001)
+        XCTAssertEqual(extra.limit ?? -1, 5000, accuracy: 0.0001)
+        XCTAssertEqual(extra.resolvedPercentUsed ?? -1, 0.06, accuracy: 0.0001)
+        XCTAssertNil(buckets.first(where: { $0.model == "GrokChat" || $0.label == "GrokChat" }))
+    }
+
+    func testGrokBillingDoesNotInventZeroWhenPercentageIsOmitted() throws {
+        let omitted = try jsonData([
+            "config": [
+                "currentPeriod": [
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "start": "2026-08-16T12:54:39.515635+00:00",
+                    "end": "2026-08-23T12:54:39.515635+00:00"
+                ],
+                "onDemandCap": ["val": 0],
+                "onDemandUsed": ["val": 0],
+                "productUsage": [
+                    ["product": "GrokChat"]
+                ],
+                "isUnifiedBillingUser": true
+            ]
+        ])
+
+        XCTAssertThrowsError(try GrokUsageAdapter.parseUsage(data: omitted)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("will not invent 0%"))
+        }
+
+        let extraOnly = try jsonData([
+            "config": [
+                "currentPeriod": [
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "start": "2026-08-16T12:54:39.515635+00:00",
+                    "end": "2026-08-23T12:54:39.515635+00:00"
+                ],
+                "onDemandCap": ["val": 100],
+                "onDemandUsed": ["val": 0],
+                "productUsage": [
+                    ["product": "GrokChat"]
+                ]
+            ]
+        ])
+        let buckets = try GrokUsageAdapter.parseUsage(data: extraOnly)
+        XCTAssertEqual(buckets.count, 1)
+        XCTAssertEqual(buckets.first?.kind, .credits)
+        XCTAssertNil(buckets.first(where: { $0.kind == .weekly }))
+    }
+
+    func testGrokBillingParsesLegacyMonthlyAllowance() throws {
+        let data = try jsonData([
+            "config": [
+                "monthlyLimit": ["val": 2000],
+                "used": ["val": 1234],
+                "onDemandCap": ["val": 0],
+                "billingPeriodEnd": "2026-05-01T00:00:00Z"
+            ]
+        ])
+
+        let buckets = try GrokUsageAdapter.parseUsage(data: data)
+        XCTAssertEqual(buckets.count, 1)
+        let monthly = try XCTUnwrap(buckets.first)
+        XCTAssertEqual(monthly.quotaID, "grok-monthly")
+        XCTAssertEqual(monthly.label, "Month")
+        XCTAssertEqual(monthly.resolvedPercentUsed ?? -1, 0.617, accuracy: 0.0001)
+        XCTAssertNotNil(monthly.resetsAt)
+    }
+
+    func testGrokAuthFileRecognizesLoginSessionAndRejectsAPIKey() throws {
+        let session = try jsonData([
+            "https://accounts.x.ai/sign-in": [
+                "key": "session-token",
+                "auth_mode": "oidc",
+                "user_id": "user-1"
+            ],
+            "xai::api_key": [
+                "key": "xai-secret",
+                "auth_mode": "api_key"
+            ]
+        ])
+        XCTAssertTrue(GrokCredentialStore.containsSession(data: session))
+        let parsed = try GrokCredentialStore.session(in: session)
+        XCTAssertEqual(parsed.session.scope, "https://accounts.x.ai/sign-in")
+        XCTAssertEqual(parsed.session.userID, "user-1")
+
+        let apiKeyOnly = try jsonData([
+            "xai::api_key": [
+                "key": "xai-secret",
+                "auth_mode": "api_key"
+            ]
+        ])
+        XCTAssertFalse(GrokCredentialStore.containsSession(data: apiKeyOnly))
+        XCTAssertThrowsError(try GrokCredentialStore.session(in: apiKeyOnly)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("API key"))
+        }
+
+        let deprecated = try jsonData([
+            "https://accounts.x.ai/sign-in": [
+                "key": "old-web-token",
+                "auth_mode": "web_login"
+            ]
+        ])
+        XCTAssertFalse(GrokCredentialStore.containsSession(data: deprecated))
+    }
+
     private func jsonData(_ value: Any) throws -> Data {
         try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
     }

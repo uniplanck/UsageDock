@@ -42,9 +42,11 @@ UsageDock es una barra ligera para el borde de la pantalla en macOS que permite 
 
 UsageDock es **solo para cuentas autenticadas mediante inicio de sesión**.
 
-- Claude, Codex, Antigravity y Kimi pueden registrarse mediante flujos compatibles de inicio de sesión o sesión autenticada.
-- Cursor y Grok no están disponibles hasta que UsageDock disponga de un inicio de sesión verificado y una integración de uso en tiempo real para esos proveedores.
+- Claude, Codex, Antigravity, Kimi y Grok pueden registrarse mediante flujos compatibles de inicio de sesión o sesión autenticada.
+- Cursor no está disponible hasta que UsageDock disponga de un inicio de sesión verificado y una integración de uso en tiempo real para ese proveedor.
 - Las cuentas que no procedan de un inicio de sesión autenticado compatible quedan fuera del conjunto de cuentas activas.
+
+Grok usa el inicio de sesión oficial de la CLI de Grok (`grok login` en auth.x.ai). Si el cupo procede de una suscripción de X, vincula antes esa cuenta de X a la misma cuenta de xAI. UsageDock lee el fondo compartido de la suscripción en `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` y muestra el porcentaje usado, la hora de reinicio y el uso extra bajo demanda cuando ese tope existe. El token de acceso permanece en el archivo de autenticación de la CLI y no se copia a los ajustes de UsageDock. Las filas por producto son partes del mismo fondo, así que no se muestran como límites distintos. Si la respuesta no incluye el porcentaje, UsageDock no inventa un 0%. La ventana corta de consultas de grok.com pertenece a otra sesión de cookies del navegador y no se usa.
 
 ## Requisitos
 

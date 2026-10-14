@@ -1008,6 +1008,7 @@ final class UsageStore: ObservableObject {
         await refreshProvider(.codex)
         await refreshProvider(.antigravity)
         await refreshProvider(.kimi)
+        await refreshProvider(.grok)
     }
 
     func refreshState(for provider: ProviderID) -> ProviderRefreshState {
@@ -1120,7 +1121,15 @@ final class UsageStore: ObservableObject {
                         throw UsageAdapterError.invalidResponse("Kimi returned no account data.")
                     }
                     fetched = first
-                case .cursor, .grok:
+                case .grok:
+                    let fetchedAccounts = try await GrokUsageAdapter(
+                        credentialPath: account.source == .currentSession ? nil : account.credentialPath
+                    ).fetchAccounts()
+                    guard let first = fetchedAccounts.first else {
+                        throw UsageAdapterError.invalidResponse("Grok returned no account data.")
+                    }
+                    fetched = first
+                case .cursor:
                     throw UsageAdapterError.credentialsUnavailable("\(provider.displayName) login and live quota integration is not available yet.")
                 }
 
@@ -1386,7 +1395,9 @@ private enum UsageProfileLoginLauncher {
             return profileHome.appendingPathComponent(".gemini/antigravity-cli", isDirectory: true)
         case .kimi:
             return profileHome.appendingPathComponent(".kimi-code/credentials", isDirectory: true)
-        case .cursor, .grok:
+        case .grok:
+            return profileHome.appendingPathComponent(".grok/auth.json")
+        case .cursor:
             return profileHome.appendingPathComponent("usage.json")
         }
     }
@@ -1418,15 +1429,26 @@ private enum UsageProfileLoginLauncher {
             availabilityCheck = "command -v kimi >/dev/null 2>&1 || command -v kimi-code >/dev/null 2>&1"
             let kimiHome = shellQuote(profileHome.appendingPathComponent(".kimi-code").path)
             command = "if command -v kimi >/dev/null 2>&1; then HOME=\(home) KIMI_CODE_HOME=\(kimiHome) kimi login; else HOME=\(home) KIMI_CODE_HOME=\(kimiHome) kimi-code login; fi"
-        case .cursor, .grok:
+        case .grok:
+            missing = "Grok CLI not found. Install Grok, then retry."
+            availabilityCheck = "command -v grok >/dev/null 2>&1"
+            let grokHome = shellQuote(profileHome.appendingPathComponent(".grok").path)
+            command = "HOME=\(home) GROK_HOME=\(grokHome) grok login"
+        case .cursor:
             missing = "\(provider.displayName) profile login is not exposed by UsageDock."
             availabilityCheck = "false"
             command = "true"
         }
 
-        let boundaryMessage = provider == .antigravity
-            ? "Uses the official agy native macOS Keychain session."
-            : "This login is isolated from your normal HOME."
+        let boundaryMessage: String
+        switch provider {
+        case .antigravity:
+            boundaryMessage = "Uses the official agy native macOS Keychain session."
+        case .grok:
+            boundaryMessage = "Uses grok login in an isolated GROK_HOME. Sign in at auth.x.ai with the xAI account that has SuperGrok or your linked X subscription."
+        case .claude, .codex, .kimi, .cursor:
+            boundaryMessage = "This login is isolated from your normal HOME."
+        }
         return "\(availabilityCheck) || { printf '%s\\n' \(shellQuote(missing)); exit 127; }; clear; echo 'UsageDock · \(provider.displayName) Login'; echo \(shellQuote(boundaryMessage)); \(command)"
     }
 

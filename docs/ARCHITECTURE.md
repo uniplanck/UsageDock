@@ -15,6 +15,7 @@ Current providers:
 - Claude: live current-session and credential-file usage.
 - Codex / OpenAI: live current-session and credential-file usage.
 - Kimi: Kimi Code OAuth current-session and credential-file usage.
+- Grok: official `grok login` session and the CLI subscription billing endpoint.
 - Gemini: branded UI/provider slot exists; live quota acquisition is not connected yet.
 
 A `UsageBucket` represents one independently enforced quota window or pool, for example:
@@ -102,6 +103,7 @@ Provider marks are bundled in `Assets.xcassets` as vector SVG image sets:
 - OpenAI for Codex
 - Google Gemini
 - Kimi
+- Grok
 
 `ProviderBrand` owns asset lookup plus provider accent gradient/glow presentation. Business/domain code does not depend on visual asset names.
 
@@ -168,6 +170,24 @@ The parser accepts provider numeric fields encoded as either JSON numbers or str
 
 A direct token-bearing Kimi live probe is intentionally not part of automated verification in this environment. The local credential structure is inspected without exposing token values, while usage parsing is covered by a non-secret fixture test.
 
+### Grok
+
+The Grok adapter uses the official Grok CLI login, not a browser-cookie scrape and not an xAI Console API key.
+
+Current-session resolution reads `~/.grok/auth.json`. Profile login runs `grok login` with `GROK_HOME` pointed at a UsageDock profile directory, which is the CLI's documented config-directory override. The access token stays in that CLI-owned file. UsageDock does not copy it into preferences. When the stored session includes an OIDC issuer, client id, and refresh token, an expired access token is refreshed with the standard refresh-token grant and written back to the same auth file.
+
+Live usage is `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` with `Authorization: Bearer` and `X-XAI-Token-Auth: xai-grok-cli`. That is the endpoint the Grok CLI uses for Settings → Usage / `/usage`.
+
+The parser reads:
+
+- `config.creditUsagePercent` as used percent on a 0–100 scale;
+- the reset time from `config.currentPeriod.end`, then `billingPeriodEnd`;
+- a weekly or monthly label from the period type or the start/end span;
+- on-demand extra usage only when `onDemandCap.val` is greater than zero;
+- a legacy monthly allowance from `used.val / monthlyLimit.val` when the percentage field is absent.
+
+An omitted `creditUsagePercent` is never reported as 0%. `productUsage` rows are shares of the same subscription pool and are not drawn as separate limits. A console API key in `auth.json` is not a consumer login. The short grok.com `/rest/rate-limits` query window is a separate browser-cookie surface and is not queried.
+
 ### Gemini
 
 Gemini is present in the domain and branded UI, but live quota acquisition remains intentionally unimplemented until a stable supported account-level quota source is selected.
@@ -194,7 +214,7 @@ F12 acceptance requires:
 - asset catalog compiles and links;
 - all app Swift sources compile for arm64 macOS;
 - app and XCTest bundle link;
-- unit tests pass for aggregation, placement persistence, login-backed account persistence/migration, multiplier normal/Fusion semantics, Claude parser, Codex dynamic windows, and Kimi weekly/5h/extra usage parsing;
+- unit tests pass for aggregation, placement persistence, login-backed account persistence/migration, multiplier normal/Fusion semantics, Claude parser, Codex dynamic windows, Kimi weekly/5h/extra usage parsing, and Grok subscription-pool parsing;
 - a focused AppKit regression test proves `SettingsWindowController.show()` makes the concrete settings window visible;
 - source inspection confirms main and hover panels remain non-activating;
 - source inspection confirms context placement is inverse-only;

@@ -353,7 +353,7 @@ struct SettingsView: View {
                 ProviderSettingsSection(provider: provider, usageStore: usageStore)
             }
 
-            Text("UsageDock registers accounts only through authenticated provider logins. Cursor and Grok stay unavailable until a verified login and live-usage path exists.")
+            Text("UsageDock registers accounts only through authenticated provider logins. Cursor stays unavailable until a verified login and live-usage path exists.")
             .font(.footnote)
             .foregroundStyle(.secondary)
         }
@@ -1540,10 +1540,10 @@ private struct ProviderSettingsSection: View {
         case .codex: return "Uses the existing Codex login. Run codex login first if needed."
         case .antigravity: return "Uses the official Antigravity CLI (agy) and its native Google/Keychain authentication. Gemini CLI credentials are not used."
         case .kimi: return "Uses the existing Kimi Code OAuth login. Sign in with Kimi Code first."
+        case .grok:
+            return "Uses the official Grok CLI login (grok login at auth.x.ai). That session covers SuperGrok and an X subscription linked to the same xAI account."
         case .cursor:
             return "Cursor account registration is unavailable until UsageDock has a verified login and live quota source."
-        case .grok:
-            return "Grok account registration is unavailable until UsageDock has a verified login and live quota source."
         }
     }
 

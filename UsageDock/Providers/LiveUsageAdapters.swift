@@ -765,6 +765,401 @@ struct KimiUsageAdapter: UsageProviderAdapter {
     }
 }
 
+struct GrokUsageAdapter: UsageProviderAdapter {
+    let provider: ProviderID = .grok
+    let credentialPath: String?
+
+    init(credentialPath: String? = nil) {
+        self.credentialPath = credentialPath
+    }
+
+    func fetchAccounts() async throws -> [UsageAccount] {
+        let resolver = GrokCredentialResolver()
+        var session = try await resolver.credentials(credentialPath: credentialPath)
+        var (data, response) = try await Self.requestBilling(session)
+        if let http = response as? HTTPURLResponse, http.statusCode == 401 {
+            session = try await resolver.credentials(credentialPath: credentialPath, forceRefresh: true)
+            (data, response) = try await Self.requestBilling(session)
+        }
+        try HTTPUsageResponseValidator.validate(response: response, data: data, provider: .grok)
+        return [
+            UsageAccount(
+                provider: .grok,
+                name: "Current Session",
+                source: .currentSession,
+                buckets: try Self.parseUsage(data: data)
+            )
+        ]
+    }
+
+    /// Official Grok CLI subscription pool (`Settings → Usage` / `/usage`).
+    /// `creditUsagePercent` is used percent on a 0–100 scale. An omitted
+    /// percentage is not reported as 0. Product rows are shares of this same
+    /// pool, so they are not separate limits.
+    static func parseUsage(data: Data) throws -> [UsageBucket] {
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw UsageAdapterError.invalidResponse("Grok billing response is not a JSON object.")
+        }
+        let config = (root["config"] as? [String: Any]) ?? root
+        let window = periodWindow(config)
+        var buckets: [UsageBucket] = []
+
+        if let percent = numeric(config["creditUsagePercent"] ?? config["credit_usage_percent"]), percent >= 0 {
+            buckets.append(
+                UsageBucket(
+                    quotaID: window.quotaID,
+                    label: window.label,
+                    kind: window.kind,
+                    percentUsed: min(percent, 100) / 100,
+                    resetsAt: window.resetsAt
+                )
+            )
+        }
+
+        if let limit = cent(config["monthlyLimit"] ?? config["monthly_limit"]), limit > 0,
+           let used = cent(config["used"]) {
+            let resetsAt = UsageDateParser.date(from: config["billingPeriodEnd"] ?? config["billing_period_end"])
+            buckets.append(
+                UsageBucket(
+                    quotaID: "grok-monthly",
+                    label: "Month",
+                    kind: .custom,
+                    used: max(used, 0),
+                    limit: limit,
+                    unit: "cents",
+                    resetsAt: resetsAt
+                )
+            )
+        }
+
+        if let cap = cent(config["onDemandCap"] ?? config["on_demand_cap"]), cap > 0 {
+            let used = cent(config["onDemandUsed"] ?? config["on_demand_used"]) ?? 0
+            buckets.append(
+                UsageBucket(
+                    quotaID: "grok-extra",
+                    label: "Extra",
+                    kind: .credits,
+                    used: max(used, 0),
+                    limit: cap,
+                    unit: "cents",
+                    resetsAt: window.resetsAt
+                )
+            )
+        }
+
+        guard !buckets.isEmpty else {
+            throw UsageAdapterError.invalidResponse(
+                "Grok billing response did not include a usage percentage. UsageDock will not invent 0%."
+            )
+        }
+        return buckets
+    }
+
+    private static func requestBilling(_ session: GrokCredentialStore.Session) async throws -> (Data, URLResponse) {
+        var request = URLRequest(url: GrokCredentialStore.billingURL)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(GrokCredentialStore.tokenHeader, forHTTPHeaderField: "X-XAI-Token-Auth")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if let userID = session.userID, !userID.isEmpty {
+            request.setValue(userID, forHTTPHeaderField: "x-userid")
+        }
+        return try await URLSession.shared.data(for: request)
+    }
+
+    private static func periodWindow(
+        _ config: [String: Any]
+    ) -> (quotaID: String, label: String, kind: UsageWindowKind, resetsAt: Date?) {
+        let period = (config["currentPeriod"] as? [String: Any]) ?? (config["current_period"] as? [String: Any])
+        let type = ((period?["type"] as? String) ?? "").uppercased()
+        let start = UsageDateParser.date(from: period?["start"] ?? config["billingPeriodStart"] ?? config["billing_period_start"])
+        let end = UsageDateParser.date(from: period?["end"] ?? config["billingPeriodEnd"] ?? config["billing_period_end"])
+        if type.contains("WEEK") || spans(start, end, minDays: 6, maxDays: 8) {
+            return ("grok-weekly", "1w", .weekly, end)
+        }
+        if type.contains("MONTH") || spans(start, end, minDays: 27, maxDays: 32) {
+            return ("grok-month", "Month", .custom, end)
+        }
+        return ("grok-usage", "Usage", .custom, end)
+    }
+
+    private static func spans(_ start: Date?, _ end: Date?, minDays: Double, maxDays: Double) -> Bool {
+        guard let start, let end else { return false }
+        let days = end.timeIntervalSince(start) / 86_400
+        return days >= minDays && days <= maxDays
+    }
+
+    private static func cent(_ value: Any?) -> Double? {
+        if let object = value as? [String: Any] {
+            if object.isEmpty { return 0 }
+            return numeric(object["val"])
+        }
+        return numeric(value)
+    }
+
+    private static func numeric(_ value: Any?) -> Double? {
+        switch value {
+        case let number as NSNumber: number.doubleValue
+        case let string as String: Double(string)
+        default: nil
+        }
+    }
+}
+
+enum GrokCredentialStore {
+    static let billingURL = URL(string: "https://cli-chat-proxy.grok.com/v1/billing?format=credits")!
+    static let tokenHeader = "xai-grok-cli"
+
+    struct Session {
+        var scope: String
+        var accessToken: String
+        var refreshToken: String?
+        var expiresAt: Date?
+        var issuer: String?
+        var clientID: String?
+        var userID: String?
+    }
+
+    static func containsSession(data: Data) -> Bool {
+        (try? session(in: data).session) != nil
+    }
+
+    static func authURL(credentialPath: String?) -> URL {
+        if let credentialPath, !credentialPath.isEmpty {
+            return URL(fileURLWithPath: credentialPath)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".grok/auth.json")
+    }
+
+    static func load(credentialPath: String?) throws -> (root: [String: Any], session: Session) {
+        let url = authURL(credentialPath: credentialPath)
+        guard let data = try? Data(contentsOf: url) else {
+            throw UsageAdapterError.credentialsUnavailable(
+                "Grok CLI login was not found. Run grok login, then choose Use Current Login."
+            )
+        }
+        return try session(in: data)
+    }
+
+    static func session(in data: Data) throws -> (root: [String: Any], session: Session) {
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw UsageAdapterError.credentialsUnavailable("Grok auth file is not a JSON object.")
+        }
+
+        let candidates: [(Session, Int)] = root.compactMap { scope, value in
+            guard let entry = value as? [String: Any] else { return nil }
+            guard let token = entry["key"] as? String, !token.isEmpty else { return nil }
+            let mode = ((entry["auth_mode"] as? String) ?? "").lowercased()
+            if mode == "web_login" || mode == "grok" || mode == "api_key" { return nil }
+            if scope == "xai::api_key" || scope.hasSuffix("::api_key") { return nil }
+            var rank = 0
+            if scope.contains("accounts.x.ai") || scope.contains("auth.x.ai") { rank += 4 }
+            if mode == "oidc" || mode == "external" { rank += 2 }
+            guard rank > 0 else { return nil }
+            return (
+                Session(
+                    scope: scope,
+                    accessToken: token,
+                    refreshToken: nonEmpty(entry["refresh_token"]),
+                    expiresAt: UsageDateParser.date(from: entry["expires_at"]),
+                    issuer: nonEmpty(entry["oidc_issuer"]),
+                    clientID: nonEmpty(entry["oidc_client_id"]),
+                    userID: nonEmpty(entry["user_id"])
+                ),
+                rank
+            )
+        }
+
+        guard let best = candidates.max(by: { lhs, rhs in
+            if lhs.1 != rhs.1 { return lhs.1 < rhs.1 }
+            return (lhs.0.expiresAt ?? .distantPast) < (rhs.0.expiresAt ?? .distantPast)
+        }) else {
+            throw UsageAdapterError.credentialsUnavailable(rejectionMessage(root: root))
+        }
+        return (root, best.0)
+    }
+
+    static func persistRefreshedSession(
+        root: [String: Any],
+        session: Session,
+        accessToken: String,
+        refreshToken: String?,
+        expiresIn: Double?,
+        url: URL,
+        now: Date = Date()
+    ) throws -> Session {
+        var updatedRoot = root
+        var entry = (updatedRoot[session.scope] as? [String: Any]) ?? [:]
+        var updated = session
+        updated.accessToken = accessToken
+        entry["key"] = accessToken
+        if let refreshToken, !refreshToken.isEmpty {
+            updated.refreshToken = refreshToken
+            entry["refresh_token"] = refreshToken
+        }
+        if let expiresIn, expiresIn > 0 {
+            let expiry = now.addingTimeInterval(expiresIn)
+            updated.expiresAt = expiry
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            entry["expires_at"] = formatter.string(from: expiry)
+        }
+        updatedRoot[session.scope] = entry
+        let encoded = try JSONSerialization.data(withJSONObject: updatedRoot, options: [.prettyPrinted, .sortedKeys])
+        try encoded.write(to: url, options: .atomic)
+        return updated
+    }
+
+    private static func rejectionMessage(root: [String: Any]) -> String {
+        var sawAPIKey = false
+        var sawDeprecated = false
+        for (scope, value) in root {
+            guard let entry = value as? [String: Any] else { continue }
+            let mode = ((entry["auth_mode"] as? String) ?? "").lowercased()
+            if mode == "api_key" || scope.hasSuffix("::api_key") { sawAPIKey = true }
+            if mode == "web_login" || mode == "grok" { sawDeprecated = true }
+        }
+        if sawAPIKey {
+            return "Grok consumer usage needs a grok login session. An xAI API key does not expose the SuperGrok or X subscription pool."
+        }
+        if sawDeprecated {
+            return "This Grok login is out of date. Run grok login again, then refresh UsageDock."
+        }
+        return "Grok login session was not found. Run grok login, then choose Use Current Login."
+    }
+
+    private static func nonEmpty(_ value: Any?) -> String? {
+        guard let string = value as? String, !string.isEmpty else { return nil }
+        return string
+    }
+}
+
+private struct GrokCredentialResolver {
+    func credentials(credentialPath: String?, forceRefresh: Bool = false) async throws -> GrokCredentialStore.Session {
+        let loaded = try GrokCredentialStore.load(credentialPath: credentialPath)
+        let session = loaded.session
+        let refreshSoon = session.expiresAt.map { $0.timeIntervalSinceNow <= 60 } ?? false
+        guard forceRefresh || refreshSoon else { return session }
+
+        guard canRefresh(session) else {
+            let alreadyExpired = session.expiresAt.map { $0 <= Date() } ?? false
+            if forceRefresh || alreadyExpired {
+                throw UsageAdapterError.authenticationExpired(
+                    "Grok login has expired. Run grok login again, then refresh UsageDock."
+                )
+            }
+            return session
+        }
+
+        let url = GrokCredentialStore.authURL(credentialPath: credentialPath)
+        guard FileManager.default.isWritableFile(atPath: url.path) else {
+            throw UsageAdapterError.authenticationExpired(
+                "Grok login has expired and UsageDock cannot update the Grok auth file. Run grok login again."
+            )
+        }
+        return try await refresh(session, root: loaded.root, url: url)
+    }
+
+    private func canRefresh(_ session: GrokCredentialStore.Session) -> Bool {
+        guard let issuer = session.issuer, let issuerURL = URL(string: issuer), issuerURL.scheme == "https" else {
+            return false
+        }
+        guard session.clientID?.isEmpty == false, session.refreshToken?.isEmpty == false else { return false }
+        return true
+    }
+
+    private func refresh(
+        _ session: GrokCredentialStore.Session,
+        root: [String: Any],
+        url: URL
+    ) async throws -> GrokCredentialStore.Session {
+        guard
+            let issuer = session.issuer,
+            URL(string: issuer)?.scheme == "https",
+            let clientID = session.clientID,
+            let refreshToken = session.refreshToken
+        else {
+            throw UsageAdapterError.authenticationExpired(
+                "Grok login has expired. Run grok login again, then refresh UsageDock."
+            )
+        }
+
+        let trimmedIssuer = issuer.hasSuffix("/") ? String(issuer.dropLast()) : issuer
+        guard let discoveryURL = URL(string: trimmedIssuer + "/.well-known/openid-configuration") else {
+            throw UsageAdapterError.authenticationExpired(
+                "Grok login could not be refreshed. Run grok login again, then refresh UsageDock."
+            )
+        }
+        var discoveryRequest = URLRequest(url: discoveryURL)
+        discoveryRequest.httpMethod = "GET"
+        discoveryRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+        let (discoveryData, discoveryResponse) = try await URLSession.shared.data(for: discoveryRequest)
+        guard
+            let discoveryHTTP = discoveryResponse as? HTTPURLResponse,
+            (200..<300).contains(discoveryHTTP.statusCode),
+            let discovery = try? JSONSerialization.jsonObject(with: discoveryData) as? [String: Any],
+            let endpoint = discovery["token_endpoint"] as? String,
+            let tokenURL = URL(string: endpoint),
+            tokenURL.scheme == "https"
+        else {
+            throw UsageAdapterError.authenticationExpired(
+                "Grok login could not be refreshed. Run grok login again, then refresh UsageDock."
+            )
+        }
+
+        let body = [
+            "client_id": clientID,
+            "grant_type": "refresh_token",
+            "refresh_token": refreshToken
+        ]
+            .sorted { $0.key < $1.key }
+            .map { "\(formEncode($0.key))=\(formEncode($0.value))" }
+            .joined(separator: "&")
+
+        var request = URLRequest(url: tokenURL)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.httpBody = body.data(using: .utf8)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard
+            let http = response as? HTTPURLResponse,
+            (200..<300).contains(http.statusCode),
+            let refreshed = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let accessToken = refreshed["access_token"] as? String,
+            !accessToken.isEmpty
+        else {
+            throw UsageAdapterError.authenticationExpired(
+                "Grok token refresh was rejected. Run grok login again, then refresh UsageDock."
+            )
+        }
+
+        let expiresIn: Double?
+        switch refreshed["expires_in"] {
+        case let number as NSNumber: expiresIn = number.doubleValue
+        case let string as String: expiresIn = Double(string)
+        default: expiresIn = nil
+        }
+
+        return try GrokCredentialStore.persistRefreshedSession(
+            root: root,
+            session: session,
+            accessToken: accessToken,
+            refreshToken: refreshed["refresh_token"] as? String,
+            expiresIn: expiresIn,
+            url: url
+        )
+    }
+
+    private func formEncode(_ value: String) -> String {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+}
+
 enum UsageAdapterError: LocalizedError {
     case credentialsUnavailable(String)
     case authenticationExpired(String)
@@ -1310,12 +1705,35 @@ private enum HTTPUsageResponseValidator {
     }
 }
 
-private enum UsageDateParser {
+enum UsageDateParser {
     static func date(from value: Any?) -> Date? {
         guard let string = value as? String, !string.isEmpty else { return nil }
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractional.date(from: string) { return date }
-        return ISO8601DateFormatter().date(from: string)
+        for candidate in candidates(for: string) {
+            if let date = internetDate(candidate, fractional: true) { return date }
+            if let date = internetDate(candidate, fractional: false) { return date }
+        }
+        return nil
+    }
+
+    private static func candidates(for string: String) -> [String] {
+        guard let dot = string.firstIndex(of: ".") else { return [string] }
+        let afterDot = string.index(after: dot)
+        guard afterDot < string.endIndex else { return [string] }
+        var end = afterDot
+        while end < string.endIndex, string[end].isNumber {
+            end = string.index(after: end)
+        }
+        let digits = string.distance(from: afterDot, to: end)
+        guard digits > 3 else { return [string] }
+        let trimmed = String(string[..<string.index(afterDot, offsetBy: 3)]) + String(string[end...])
+        return [string, trimmed]
+    }
+
+    private static func internetDate(_ string: String, fractional: Bool) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = fractional
+            ? [.withInternetDateTime, .withFractionalSeconds]
+            : [.withInternetDateTime]
+        return formatter.date(from: string)
     }
 }

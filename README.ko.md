@@ -42,9 +42,11 @@ UsageDock은 AI 서비스의 사용량과 리셋 시간을 한눈에 확인할 �
 
 UsageDock은 **로그인 전용**입니다.
 
-- Claude, Codex, Antigravity, Kimi는 지원되는 인증 로그인/세션을 통해 등록할 수 있습니다.
-- Cursor와 Grok은 검증된 로그인 경로와 실시간 사용량 연동이 제공될 때까지 사용할 수 없습니다.
+- Claude, Codex, Antigravity, Kimi, Grok은 지원되는 인증 로그인/세션을 통해 등록할 수 있습니다.
+- Cursor는 검증된 로그인 경로와 실시간 사용량 연동이 제공될 때까지 사용할 수 없습니다.
 - 지원되는 인증 로그인에 연결되지 않은 계정은 활성 계정 집합에서 제외됩니다.
+
+Grok은 공식 Grok CLI 로그인(`grok login`, auth.x.ai)을 사용합니다. 한도가 X 구독에서 오는 경우에는 먼저 해당 X 계정을 같은 xAI 계정에 연결하세요. UsageDock은 `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits`에서 공유 구독 한도를 읽어 사용 비율, 초기화 시각, 그리고 상한이 있을 때의 온디맨드 추가 사용량을 표시합니다. 로그인 토큰은 Grok CLI 인증 파일에 남으며 UsageDock 설정으로 복사하지 않습니다. 제품별 수치는 같은 한도의 구성이므로 별도의 한도로 그리지 않습니다. 응답에 사용 비율이 없으면 0%를 만들지 않습니다. grok.com의 짧은 쿼리 창은 브라우저 쿠키의 별도 세션이라 이 경로에서는 사용하지 않습니다.
 
 ## 요구 사항
 
