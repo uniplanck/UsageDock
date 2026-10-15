@@ -34,15 +34,15 @@ enum ProviderID: String, CaseIterable, Codable, Identifiable {
 
     var supportsProfileLogin: Bool {
         switch self {
-        case .claude, .codex, .antigravity, .kimi: true
-        case .cursor, .grok: false
+        case .claude, .codex, .antigravity, .kimi, .grok: true
+        case .cursor: false
         }
     }
 
     var supportsLiveUsage: Bool {
         switch self {
-        case .claude, .codex, .antigravity, .kimi: true
-        case .cursor, .grok: false
+        case .claude, .codex, .antigravity, .kimi, .grok: true
+        case .cursor: false
         }
     }
 
@@ -53,7 +53,7 @@ enum ProviderID: String, CaseIterable, Codable, Identifiable {
         case .antigravity: "https://antigravity.google/"
         case .kimi: "https://www.kimi.ai/"
         case .cursor: "https://cursor.com/"
-        case .grok: "https://grok.com/"
+        case .grok: "https://grok.com/?_s=usage"
         }
     }
 }
@@ -327,6 +327,9 @@ struct UsageAccount: Identifiable, Codable, Hashable {
     var railOuterRingSource: RailQuotaSource?
     var railInnerRingSource: RailQuotaSource?
     var railTimeSource: RailQuotaSource?
+    /// Isolated grok.com website-data store for this account. The value is a
+    /// UUID, not a cookie or token.
+    var grokWebSessionID: String?
     var buckets: [UsageBucket]
 
     init(
@@ -345,6 +348,7 @@ struct UsageAccount: Identifiable, Codable, Hashable {
         railOuterRingSource: RailQuotaSource? = nil,
         railInnerRingSource: RailQuotaSource? = nil,
         railTimeSource: RailQuotaSource? = nil,
+        grokWebSessionID: String? = nil,
         buckets: [UsageBucket]
     ) {
         self.id = id
@@ -362,6 +366,7 @@ struct UsageAccount: Identifiable, Codable, Hashable {
         self.railOuterRingSource = railOuterRingSource
         self.railInnerRingSource = railInnerRingSource
         self.railTimeSource = railTimeSource
+        self.grokWebSessionID = grokWebSessionID
         self.buckets = buckets
     }
 

@@ -353,7 +353,7 @@ struct SettingsView: View {
                 ProviderSettingsSection(provider: provider, usageStore: usageStore)
             }
 
-            Text("UsageDock registers accounts only through authenticated provider logins. Cursor and Grok stay unavailable until a verified login and live-usage path exists.")
+            Text("UsageDock registers accounts only through authenticated provider logins. Grok's weekly percentage comes from a grok.com sign-in kept inside the app, with the CLI billing session as a fallback. Cursor stays unavailable until a verified login and live-usage path exists.")
             .font(.footnote)
             .foregroundStyle(.secondary)
         }
@@ -1370,7 +1370,13 @@ private struct ProviderSettingsSection: View {
                             },
                             onDelete: {
                                 usageStore.removeAccount(id: account.id)
-                            }
+                            },
+                            onGrokWebLogin: account.provider == .grok ? {
+                                usageStore.presentGrokWebLogin(for: account.id)
+                            } : nil,
+                            onCopyGrokDiagnostics: account.provider == .grok ? {
+                                _ = GrokWebDiagnostics.copyToPasteboard()
+                            } : nil
                         )
                     }
                 }
@@ -1385,6 +1391,15 @@ private struct ProviderSettingsSection: View {
                         .help(provider == .antigravity
                               ? "Opens the official agy login. Antigravity uses its native macOS Keychain session; UsageDock refreshes it automatically after sign-in."
                               : "Opens the official CLI in Terminal with a UsageDock-only HOME so profiles stay separated.")
+                    }
+
+                    if provider == .grok {
+                        Button {
+                            usageStore.presentGrokWebLogin(for: nil)
+                        } label: {
+                            Label("Sign in on grok.com", systemImage: "globe")
+                        }
+                        .help("Opens grok.com in an isolated UsageDock window. The session cookies stay in that window's data store. Settings → Usage is preferred over the CLI billing percentage.")
                     }
 
                     if provider.supportsLiveUsage {
@@ -1540,10 +1555,10 @@ private struct ProviderSettingsSection: View {
         case .codex: return "Uses the existing Codex login. Run codex login first if needed."
         case .antigravity: return "Uses the official Antigravity CLI (agy) and its native Google/Keychain authentication. Gemini CLI credentials are not used."
         case .kimi: return "Uses the existing Kimi Code OAuth login. Sign in with Kimi Code first."
+        case .grok:
+            return "Use Current Login reads the Grok CLI session. Sign in on grok.com reads the weekly percentage shown in Settings → Usage. That web session stays inside UsageDock."
         case .cursor:
             return "Cursor account registration is unavailable until UsageDock has a verified login and live quota source."
-        case .grok:
-            return "Grok account registration is unavailable until UsageDock has a verified login and live quota source."
         }
     }
 
@@ -1580,6 +1595,8 @@ private struct AccountEditor: View {
     let onMoveDown: () -> Void
     let onAutoDetectMultiplier: () -> Void
     let onDelete: () -> Void
+    var onGrokWebLogin: (() -> Void)? = nil
+    var onCopyGrokDiagnostics: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1637,9 +1654,18 @@ private struct AccountEditor: View {
             HStack(spacing: 8) {
                 Text(statusText)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .foregroundStyle(statusText.localizedCaseInsensitiveContains("sign in again") ? .orange : .secondary)
+                    .lineLimit(3)
                     .textSelection(.enabled)
+
+                if onGrokWebLogin != nil {
+                    Button("Sign in on grok.com", action: { onGrokWebLogin?() })
+                        .controlSize(.small)
+                    Button("Copy diagnostics", action: { onCopyGrokDiagnostics?() })
+                        .controlSize(.small)
+                        .help("Copies decoded field paths and values from the last grok.com usage response. Cookies and tokens are not included.")
+                        .disabled(GrokWebDiagnostics.latest.isEmpty)
+                }
 
                 if let profileCredentialName {
                     Text(profileCredentialName)
@@ -1839,6 +1865,13 @@ private struct AccountEditor: View {
     }
 
     private var sourceLabel: String {
+        if account.provider == .grok, account.grokWebSessionID != nil {
+            switch account.source {
+            case .currentSession: return "Web login"
+            case .profile: return "Web login · profile"
+            case .legacyUnsupported, nil: return "Web login"
+            }
+        }
         switch account.source {
         case .currentSession: return "Current login"
         case .profile: return "UsageDock profile"

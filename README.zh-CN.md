@@ -42,9 +42,11 @@ UsageDock 是一款轻量级 macOS 屏幕边缘用量栏，可快速查看 AI �
 
 UsageDock **仅支持登录账号**。
 
-- Claude、Codex、Antigravity 和 Kimi 可通过受支持的已认证登录/会话注册。
-- Cursor 与 Grok 在拥有经过验证的登录方式及实时用量集成之前暂不可用。
+- Claude、Codex、Antigravity、Kimi 和 Grok 可通过受支持的已认证登录/会话注册。
+- Cursor 在拥有经过验证的登录方式及实时用量集成之前暂不可用。
 - 未由受支持的认证登录提供的账号不会进入活动账号集合。
+
+Grok 有两种登录。**Sign in on grok.com** 会在应用内窗口打开 `https://grok.com/?_s=usage`。该会话留在按账号隔离的网页存储中，是 grok.com Settings → Usage 上每周用量百分比和重置时间的来源。**Use Current Login** 与 **Login New Profile** 仍使用 `grok login`。如果没有网页会话、会话已过期，或响应无法解码，UsageDock 会显示 CLI 账单读数，并说明需要重新登录网页。无法解码的网页响应不会被当成 0%。Cookie 和令牌不会复制到 UsageDock 的设置中。Copy diagnostics 只复制解码出的字段路径。
 
 ## 系统要求
 

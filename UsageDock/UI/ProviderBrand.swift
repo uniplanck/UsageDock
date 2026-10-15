@@ -7,7 +7,8 @@ enum ProviderBrand {
         case .claude: "Claude"
         case .codex: "OpenAI"
         case .kimi: "Kimi"
-        case .antigravity, .cursor, .grok: nil
+        case .grok: "Grok"
+        case .antigravity, .cursor: nil
         }
     }
 
@@ -15,8 +16,7 @@ enum ProviderBrand {
         switch provider {
         case .antigravity: "sparkles"
         case .cursor: "cursorarrow"
-        case .grok: "bolt.circle"
-        case .claude, .codex, .kimi: "circle"
+        case .claude, .codex, .kimi, .grok: "circle"
         }
     }
 

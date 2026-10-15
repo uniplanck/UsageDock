@@ -42,9 +42,11 @@ UsageDock is a lightweight macOS edge rail for checking AI service usage and res
 
 UsageDock is **login-only**.
 
-- Claude, Codex, Antigravity, and Kimi can register through supported authenticated login/session flows.
-- Cursor and Grok remain unavailable until UsageDock has a verified login and live-usage integration for those providers.
+- Claude, Codex, Antigravity, Kimi, and Grok can register through supported authenticated login/session flows.
+- Cursor remains unavailable until UsageDock has a verified login and live-usage integration for that provider.
 - Accounts that are not backed by a supported authenticated login are excluded from the active account set.
+
+Grok has two logins. **Sign in on grok.com** opens an in-app window at `https://grok.com/?_s=usage`. That session stays in an isolated per-account web store and is the source for the weekly percentage and reset shown on grok.com Settings → Usage (`GetGrokCreditsConfig`). **Use Current Login** / **Login New Profile** still use `grok login`. If the web session is missing, expired, or the response cannot be decoded, UsageDock shows the CLI billing reading and says that the web login needs attention. It does not turn an undecodable web response into 0%. Cookies and tokens are not copied into UsageDock settings. Copy diagnostics copies decoded field paths only.
 
 ## Requirements
 

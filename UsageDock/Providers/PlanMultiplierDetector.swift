@@ -66,7 +66,10 @@ enum ProviderPlanMultiplierDetector {
                 atPath: FileManager.default.homeDirectoryForCurrentUser
                     .appendingPathComponent(".kimi-code/credentials", isDirectory: true).path
             )
-        case .antigravity, .cursor, .grok:
+        case .grok:
+            guard let data = fileData(".grok/auth.json") else { return false }
+            return GrokCredentialStore.containsSession(data: data)
+        case .antigravity, .cursor:
             return false
         }
     }

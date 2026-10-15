@@ -15,6 +15,7 @@ Current providers:
 - Claude: live current-session and credential-file usage.
 - Codex / OpenAI: live current-session and credential-file usage.
 - Kimi: Kimi Code OAuth current-session and credential-file usage.
+- Grok: official `grok login` session and the CLI subscription billing endpoint.
 - Gemini: branded UI/provider slot exists; live quota acquisition is not connected yet.
 
 A `UsageBucket` represents one independently enforced quota window or pool, for example:
@@ -102,6 +103,7 @@ Provider marks are bundled in `Assets.xcassets` as vector SVG image sets:
 - OpenAI for Codex
 - Google Gemini
 - Kimi
+- Grok
 
 `ProviderBrand` owns asset lookup plus provider accent gradient/glow presentation. Business/domain code does not depend on visual asset names.
 
@@ -168,6 +170,32 @@ The parser accepts provider numeric fields encoded as either JSON numbers or str
 
 A direct token-bearing Kimi live probe is intentionally not part of automated verification in this environment. The local credential structure is inspected without exposing token values, while usage parsing is covered by a non-secret fixture test.
 
+### Grok
+
+The Grok adapter has two login-backed sources. The weekly percentage shown in grok.com Settings → Usage is preferred. The official Grok CLI billing session is the fallback. Neither path copies a token or cookie into UsageDock preferences.
+
+Current-session resolution reads `~/.grok/auth.json`. Profile login runs `grok login` with `GROK_HOME` pointed at a UsageDock profile directory, which is the CLI's documented config-directory override. The access token stays in that CLI-owned file. UsageDock does not copy it into preferences. When the stored session includes an OIDC issuer, client id, and refresh token, an expired access token is refreshed with the standard refresh-token grant and written back to the same auth file.
+
+Live usage is `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` with `Authorization: Bearer` and `X-XAI-Token-Auth: xai-grok-cli`. That is the endpoint the Grok CLI uses for Settings → Usage / `/usage`.
+
+The parser follows the Grok CLI function that feeds both `/usage` and Settings → Usage (`credit_balance_from_config`):
+
+- `config.creditUsagePercent` as used percent on a 0–100 scale when the field is present;
+- otherwise `used.val / monthlyLimit.val` when that limit is greater than zero;
+- otherwise 0% when `currentPeriod` is present and the monthly limit is missing or zero.
+
+That 0% is the CLI's reading of a proto3 body. `creditUsagePercent` is a scalar, so the API omits it at zero, while zero money values still arrive as `{"val":0}`. The reset time comes from `config.currentPeriod.end`, then `billingPeriodEnd`. The window label comes from the period type or the start/end span. On-demand extra usage is shown only when `onDemandCap.val` is greater than zero.
+
+`GET /v1/billing` without `format=credits` is not the CLI usage source. A body whose `monthlyLimit` is 0 cannot be turned into a percentage, even when `used` is nonzero, and UsageDock does not invent 0% from that ledger. `productUsage` rows are shares of the same subscription pool and are not drawn as separate CLI limits. A console API key in `auth.json` is not a consumer login. The login session is the `key` field under a scope such as `https://auth.x.ai::<uuid>`, with `expires_at` and `auth_mode` `oidc`.
+
+The web source is an in-app `WKWebView` opened at `https://grok.com/?_s=usage`. Each Grok account gets its own persistent `WKWebsiteDataStore` identifier. The cookies that sign the page in stay in that store. UsageDock does not read them into preferences, the clipboard, or the diagnostic log. After sign-in, refresh loads grok.com in that same store and runs the page's own request:
+
+`POST https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig`
+
+The body is an empty gRPC-web data frame (`application/grpc-web+proto`). A decoded `[1,1]` value is the used percent on a 0–100 scale. `[1,5]` is the reset, `[1,4]` the period start, and `[1,7]` optional per-product messages. Known product enums are API, Grok Build, Other, Chat, Imagine, and Voice. Any other enum is labeled `Product N` until a capture confirms it. A response with no `[1,1]` percent is undecodable and is not shown as 0%. HTTP 401/403, an HTML page, or gRPC status 7 or 16 means the web session needs sign-in again. In that case the CLI reading is shown and the account status says so. Copy diagnostics copies the decoded field paths and values only.
+
+The CLI OAuth bearer is not sent to this grok.com method. The short grok.com `/rest/rate-limits` query window is still unused.
+
 ### Gemini
 
 Gemini is present in the domain and branded UI, but live quota acquisition remains intentionally unimplemented until a stable supported account-level quota source is selected.
@@ -194,7 +222,7 @@ F12 acceptance requires:
 - asset catalog compiles and links;
 - all app Swift sources compile for arm64 macOS;
 - app and XCTest bundle link;
-- unit tests pass for aggregation, placement persistence, login-backed account persistence/migration, multiplier normal/Fusion semantics, Claude parser, Codex dynamic windows, and Kimi weekly/5h/extra usage parsing;
+- unit tests pass for aggregation, placement persistence, login-backed account persistence/migration, multiplier normal/Fusion semantics, Claude parser, Codex dynamic windows, Kimi weekly/5h/extra usage parsing, and Grok subscription-pool parsing;
 - a focused AppKit regression test proves `SettingsWindowController.show()` makes the concrete settings window visible;
 - source inspection confirms main and hover panels remain non-activating;
 - source inspection confirms context placement is inverse-only;

@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Foundation
+import WebKit
 
 @MainActor
 final class UsageStore: ObservableObject {
@@ -835,6 +836,44 @@ final class UsageStore: ObservableObject {
     }
 
     @discardableResult
+    /// Opens the grok.com sign-in window for one account. Cookies stay in that
+    /// account's website data store. Passing nil uses the current Grok login,
+    /// or creates a Grok account when none exists yet.
+    func presentGrokWebLogin(for accountID: UUID?) {
+        let targetID = grokWebAccountID(preferred: accountID)
+        guard let index = accounts.firstIndex(where: { $0.id == targetID }) else { return }
+        let sessionID: UUID
+        if let existing = accounts[index].grokWebSessionID, let parsed = UUID(uuidString: existing) {
+            sessionID = parsed
+        } else {
+            sessionID = UUID()
+            accounts[index].grokWebSessionID = sessionID.uuidString
+        }
+        GrokWebLoginPresenter.shared.present(sessionID: sessionID) { [weak self] in
+            Task { await self?.refreshLiveUsage() }
+        }
+    }
+
+    private func grokWebAccountID(preferred: UUID?) -> UUID {
+        if let preferred, accounts.contains(where: { $0.id == preferred && $0.provider == .grok }) {
+            return preferred
+        }
+        if let current = accounts.first(where: { $0.provider == .grok && $0.source == .currentSession }) {
+            return current.id
+        }
+        if let existing = accounts.first(where: { $0.provider == .grok }) {
+            return existing.id
+        }
+        let account = UsageAccount(
+            provider: .grok,
+            name: "Grok Web",
+            source: .currentSession,
+            buckets: []
+        )
+        accounts.append(account)
+        return account.id
+    }
+
     func launchLoginProfile(provider: ProviderID) -> Bool {
         guard provider.supportsProfileLogin else {
             refreshStates[provider] = .failed("Direct \(provider.displayName) profile login is not available in UsageDock yet.")
@@ -876,6 +915,10 @@ final class UsageStore: ObservableObject {
     }
 
     func removeAccount(id: UUID) {
+        if let raw = accounts.first(where: { $0.id == id })?.grokWebSessionID,
+           let sessionID = UUID(uuidString: raw) {
+            Task { try? await WKWebsiteDataStore.remove(forIdentifier: sessionID) }
+        }
         accounts.removeAll { $0.id == id }
         accountRefreshStates[id] = nil
         multiplierDetectionStates[id] = nil
@@ -1008,6 +1051,7 @@ final class UsageStore: ObservableObject {
         await refreshProvider(.codex)
         await refreshProvider(.antigravity)
         await refreshProvider(.kimi)
+        await refreshProvider(.grok)
     }
 
     func refreshState(for provider: ProviderID) -> ProviderRefreshState {
@@ -1052,6 +1096,8 @@ final class UsageStore: ObservableObject {
             return "Refreshing…"
         case .live(let date):
             return "Live · \(Self.timeFormatter.string(from: date))"
+        case .degraded(let date, let message):
+            return "\(message) · \(Self.timeFormatter.string(from: date))"
         case .failed(let message):
             return message
         }
@@ -1074,6 +1120,7 @@ final class UsageStore: ObservableObject {
         refreshStates[provider] = .refreshing
         var successes = 0
         var failureMessages: [String] = []
+        var notices: [String] = []
         var lastSuccessAt: Date?
 
         for accountID in accountIDs {
@@ -1087,6 +1134,7 @@ final class UsageStore: ObservableObject {
 
             do {
                 let fetched: UsageAccount
+                var webNotice: String?
                 switch provider {
                 case .claude:
                     let fetchedAccounts = try await ClaudeUsageAdapter(
@@ -1120,7 +1168,14 @@ final class UsageStore: ObservableObject {
                         throw UsageAdapterError.invalidResponse("Kimi returned no account data.")
                     }
                     fetched = first
-                case .cursor, .grok:
+                case .grok:
+                    let outcome = try await GrokUsageAdapter(
+                        credentialPath: account.source == .currentSession ? nil : account.credentialPath,
+                        webSessionID: account.grokWebSessionID
+                    ).fetchOutcome()
+                    webNotice = outcome.notice
+                    fetched = UsageAccount(provider: .grok, name: account.name, buckets: outcome.buckets)
+                case .cursor:
                     throw UsageAdapterError.credentialsUnavailable("\(provider.displayName) login and live quota integration is not available yet.")
                 }
 
@@ -1130,7 +1185,12 @@ final class UsageStore: ObservableObject {
                     fetched: fetched.buckets
                 )
                 let now = Date()
-                accountRefreshStates[accountID] = .live(now)
+                if let webNotice {
+                    accountRefreshStates[accountID] = .degraded(now, webNotice)
+                    notices.append(webNotice)
+                } else {
+                    accountRefreshStates[accountID] = .live(now)
+                }
                 lastSuccessAt = now
                 successes += 1
             } catch {
@@ -1144,14 +1204,14 @@ final class UsageStore: ObservableObject {
             }
         }
 
-        if successes == accountIDs.count, let lastSuccessAt {
+        if successes == accountIDs.count, notices.isEmpty, let lastSuccessAt {
             refreshStates[provider] = .live(lastSuccessAt, accountCount: successes)
         } else if successes > 0 {
             refreshStates[provider] = .partial(
                 lastSuccessAt ?? Date(),
                 success: successes,
                 total: accountIDs.count,
-                message: failureMessages.first ?? "Some accounts failed"
+                message: notices.first ?? failureMessages.first ?? "Some accounts failed"
             )
         } else {
             refreshStates[provider] = .failed(failureMessages.first ?? "No registered account returned live usage.")
@@ -1275,6 +1335,7 @@ enum AccountRefreshState: Equatable {
     case idle
     case refreshing
     case live(Date)
+    case degraded(Date, String)
     case failed(String)
 }
 
@@ -1298,7 +1359,7 @@ enum DisplayAccountPolicy {
         }
 
         switch refreshState {
-        case .live:
+        case .live, .degraded:
             return .valid
         case .refreshing:
             return account.buckets.isEmpty ? .checking : .valid
@@ -1386,7 +1447,9 @@ private enum UsageProfileLoginLauncher {
             return profileHome.appendingPathComponent(".gemini/antigravity-cli", isDirectory: true)
         case .kimi:
             return profileHome.appendingPathComponent(".kimi-code/credentials", isDirectory: true)
-        case .cursor, .grok:
+        case .grok:
+            return profileHome.appendingPathComponent(".grok/auth.json")
+        case .cursor:
             return profileHome.appendingPathComponent("usage.json")
         }
     }
@@ -1418,15 +1481,26 @@ private enum UsageProfileLoginLauncher {
             availabilityCheck = "command -v kimi >/dev/null 2>&1 || command -v kimi-code >/dev/null 2>&1"
             let kimiHome = shellQuote(profileHome.appendingPathComponent(".kimi-code").path)
             command = "if command -v kimi >/dev/null 2>&1; then HOME=\(home) KIMI_CODE_HOME=\(kimiHome) kimi login; else HOME=\(home) KIMI_CODE_HOME=\(kimiHome) kimi-code login; fi"
-        case .cursor, .grok:
+        case .grok:
+            missing = "Grok CLI not found. Install Grok, then retry."
+            availabilityCheck = "command -v grok >/dev/null 2>&1"
+            let grokHome = shellQuote(profileHome.appendingPathComponent(".grok").path)
+            command = "HOME=\(home) GROK_HOME=\(grokHome) grok login"
+        case .cursor:
             missing = "\(provider.displayName) profile login is not exposed by UsageDock."
             availabilityCheck = "false"
             command = "true"
         }
 
-        let boundaryMessage = provider == .antigravity
-            ? "Uses the official agy native macOS Keychain session."
-            : "This login is isolated from your normal HOME."
+        let boundaryMessage: String
+        switch provider {
+        case .antigravity:
+            boundaryMessage = "Uses the official agy native macOS Keychain session."
+        case .grok:
+            boundaryMessage = "Uses grok login in an isolated GROK_HOME. Sign in at auth.x.ai with the xAI account that has SuperGrok or your linked X subscription."
+        case .claude, .codex, .kimi, .cursor:
+            boundaryMessage = "This login is isolated from your normal HOME."
+        }
         return "\(availabilityCheck) || { printf '%s\\n' \(shellQuote(missing)); exit 127; }; clear; echo 'UsageDock · \(provider.displayName) Login'; echo \(shellQuote(boundaryMessage)); \(command)"
     }
 

@@ -42,9 +42,11 @@ UsageDock은 AI 서비스의 사용량과 리셋 시간을 한눈에 확인할 �
 
 UsageDock은 **로그인 전용**입니다.
 
-- Claude, Codex, Antigravity, Kimi는 지원되는 인증 로그인/세션을 통해 등록할 수 있습니다.
-- Cursor와 Grok은 검증된 로그인 경로와 실시간 사용량 연동이 제공될 때까지 사용할 수 없습니다.
+- Claude, Codex, Antigravity, Kimi, Grok은 지원되는 인증 로그인/세션을 통해 등록할 수 있습니다.
+- Cursor는 검증된 로그인 경로와 실시간 사용량 연동이 제공될 때까지 사용할 수 없습니다.
 - 지원되는 인증 로그인에 연결되지 않은 계정은 활성 계정 집합에서 제외됩니다.
+
+Grok에는 로그인이 두 가지입니다. **Sign in on grok.com**은 앱 안 창에서 `https://grok.com/?_s=usage`를 엽니다. 그 세션은 계정마다 격리된 웹 저장소에 남으며, grok.com Settings → Usage에 나오는 주간 사용률과 초기화 시각의 출처입니다. **Use Current Login**과 **Login New Profile**은 그대로 `grok login`입니다. 웹 세션이 없거나 만료되었거나 응답을 해석할 수 없으면 UsageDock은 CLI 청구 값을 보여주고 웹 로그인을 다시 해야 한다고 표시합니다. 해석할 수 없는 웹 응답을 0%로 만들지 않습니다. 쿠키와 토큰은 UsageDock 설정으로 복사하지 않습니다. Copy diagnostics는 해석된 필드 경로만 복사합니다.
 
 ## 요구 사항
 

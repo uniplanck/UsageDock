@@ -42,9 +42,11 @@ UsageDock es una barra ligera para el borde de la pantalla en macOS que permite 
 
 UsageDock es **solo para cuentas autenticadas mediante inicio de sesión**.
 
-- Claude, Codex, Antigravity y Kimi pueden registrarse mediante flujos compatibles de inicio de sesión o sesión autenticada.
-- Cursor y Grok no están disponibles hasta que UsageDock disponga de un inicio de sesión verificado y una integración de uso en tiempo real para esos proveedores.
+- Claude, Codex, Antigravity, Kimi y Grok pueden registrarse mediante flujos compatibles de inicio de sesión o sesión autenticada.
+- Cursor no está disponible hasta que UsageDock disponga de un inicio de sesión verificado y una integración de uso en tiempo real para ese proveedor.
 - Las cuentas que no procedan de un inicio de sesión autenticado compatible quedan fuera del conjunto de cuentas activas.
+
+Grok tiene dos inicios de sesión. **Sign in on grok.com** abre una ventana dentro de la app en `https://grok.com/?_s=usage`. Esa sesión permanece en un almacén web aislado por cuenta y es la fuente del porcentaje semanal y del reinicio que muestra Settings → Usage en grok.com. **Use Current Login** y **Login New Profile** siguen usando `grok login`. Si la sesión web falta, caduca o la respuesta no se puede decodificar, UsageDock muestra la lectura de facturación de la CLI e indica que hay que volver a entrar en la web. Una respuesta web ilegible no se convierte en 0%. Las cookies y los tokens no se copian a los ajustes de UsageDock. Copy diagnostics copia solo las rutas de campos decodificadas.
 
 ## Requisitos
 
