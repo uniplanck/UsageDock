@@ -17,6 +17,8 @@
 		8C61A350EE8FE16F992199B3 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C08309C2FCE0862704E88A88 /* SettingsView.swift */; };
 		8EBA367E5500B07B6DDA0C75 /* UsageAggregator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DC95DD2D94D1838392914C9 /* UsageAggregator.swift */; };
 		A3CE2F3F159C711AF0DEEFA7 /* LiveUsageAdapters.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9541F70F7A01071B8AA2068 /* LiveUsageAdapters.swift */; };
+		B4E0A11B0C0D0E0F10111213 /* GrokWebCredits.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4E0A11B0C0D0E0F10111213 /* GrokWebCredits.swift */; };
+		B4E0A11B0C0D0E0F10111214 /* GrokWebSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4E0A11B0C0D0E0F10111214 /* GrokWebSession.swift */; };
 		B6C8D893994C3923C0BB4B8F /* PlacementStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E28006DC6285DC5F3407905A /* PlacementStore.swift */; };
 		BE88A31695D8174E11896425 /* HoverDetailPanelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B079508705561BD3F04061AE /* HoverDetailPanelController.swift */; };
 		CDC861882ABBD5D60BFD62FA /* ProviderDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 737D9B80A9D2CAAA97D80E32 /* ProviderDetailView.swift */; };
@@ -52,6 +54,8 @@
 		E28006DC6285DC5F3407905A /* PlacementStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacementStore.swift; sourceTree = "<group>"; };
 		E45B33B556BF9E1CDA647B25 /* SettingsWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindowController.swift; sourceTree = "<group>"; };
 		E6B7F6D8CE9C258C20073993 /* UsageDockTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageDockTests.swift; sourceTree = "<group>"; };
+		C4E0A11B0C0D0E0F10111213 /* GrokWebCredits.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GrokWebCredits.swift; sourceTree = "<group>"; };
+		C4E0A11B0C0D0E0F10111214 /* GrokWebSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GrokWebSession.swift; sourceTree = "<group>"; };
 		E9541F70F7A01071B8AA2068 /* LiveUsageAdapters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveUsageAdapters.swift; sourceTree = "<group>"; };
 		F3A3A5EC6AD681223A036740 /* UsageDock.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = UsageDock.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		F5C42F2B3E751E2E6FFDF3BE /* UsageDockTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = UsageDockTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -135,6 +139,8 @@
 		C880AC56141FCD4F5F7A2AF5 /* Providers */ = {
 			isa = PBXGroup;
 			children = (
+				C4E0A11B0C0D0E0F10111213 /* GrokWebCredits.swift */,
+				C4E0A11B0C0D0E0F10111214 /* GrokWebSession.swift */,
 				E9541F70F7A01071B8AA2068 /* LiveUsageAdapters.swift */,
 				9D75809C9D8D13F1589E7116 /* PlanMultiplierDetector.swift */,
 			);
@@ -267,6 +273,8 @@
 				D51083D41F225E0C1EECA76E /* DockPanelController.swift in Sources */,
 				BE88A31695D8174E11896425 /* HoverDetailPanelController.swift in Sources */,
 				A3CE2F3F159C711AF0DEEFA7 /* LiveUsageAdapters.swift in Sources */,
+				B4E0A11B0C0D0E0F10111213 /* GrokWebCredits.swift in Sources */,
+				B4E0A11B0C0D0E0F10111214 /* GrokWebSession.swift in Sources */,
 				B6C8D893994C3923C0BB4B8F /* PlacementStore.swift in Sources */,
 				8710B05487526CF1FF028CEE /* PlanMultiplierDetector.swift in Sources */,
 				5B11BB8B228CAC7EAB148F48 /* ProviderBrand.swift in Sources */,

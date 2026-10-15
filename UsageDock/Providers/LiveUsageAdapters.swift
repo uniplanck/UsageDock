@@ -765,15 +765,61 @@ struct KimiUsageAdapter: UsageProviderAdapter {
     }
 }
 
+struct GrokUsageFetch {
+    var buckets: [UsageBucket]
+    var notice: String?
+}
+
 struct GrokUsageAdapter: UsageProviderAdapter {
     let provider: ProviderID = .grok
     let credentialPath: String?
+    let webSessionID: String?
 
-    init(credentialPath: String? = nil) {
+    init(credentialPath: String? = nil, webSessionID: String? = nil) {
         self.credentialPath = credentialPath
+        self.webSessionID = webSessionID
     }
 
     func fetchAccounts() async throws -> [UsageAccount] {
+        let outcome = try await fetchOutcome()
+        return [
+            UsageAccount(
+                provider: .grok,
+                name: "Current Session",
+                source: .currentSession,
+                buckets: outcome.buckets
+            )
+        ]
+    }
+
+    /// Prefers the grok.com Settings → Usage reading. A web failure falls back
+    /// to the CLI billing session and keeps a notice instead of hiding it.
+    /// An undecodable web body never becomes 0%.
+    func fetchOutcome() async throws -> GrokUsageFetch {
+        var notice: String?
+        if let webSessionID, let sessionID = UUID(uuidString: webSessionID) {
+            let payload = await GrokWebSession.fetchCredits(sessionID: sessionID)
+            switch payload.interpretation {
+            case .usage(let reading):
+                return GrokUsageFetch(buckets: GrokWebCredits.buckets(from: reading), notice: nil)
+            case .needsReLogin(let message):
+                notice = "\(message) Showing the CLI billing reading until then."
+            case .undecodable(let message), .unavailable(let message):
+                notice = "\(message) Showing the CLI billing reading until then."
+            }
+        }
+
+        do {
+            return GrokUsageFetch(buckets: try await fetchCLIBuckets(), notice: notice)
+        } catch {
+            if let notice {
+                throw UsageAdapterError.authenticationExpired("\(notice) CLI billing also failed: \(error.localizedDescription)")
+            }
+            throw error
+        }
+    }
+
+    private func fetchCLIBuckets() async throws -> [UsageBucket] {
         let resolver = GrokCredentialResolver()
         var session = try await resolver.credentials(credentialPath: credentialPath)
         var (data, response) = try await Self.requestBilling(session)
@@ -782,14 +828,7 @@ struct GrokUsageAdapter: UsageProviderAdapter {
             (data, response) = try await Self.requestBilling(session)
         }
         try HTTPUsageResponseValidator.validate(response: response, data: data, provider: .grok)
-        return [
-            UsageAccount(
-                provider: .grok,
-                name: "Current Session",
-                source: .currentSession,
-                buckets: try Self.parseUsage(data: data)
-            )
-        ]
+        return try Self.parseUsage(data: data)
     }
 
     /// Official Grok CLI subscription pool (`Settings → Usage` / `/usage`).

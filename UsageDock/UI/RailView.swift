@@ -1634,6 +1634,14 @@ struct RailView: View {
     @ViewBuilder
     private func providerAccountMenu(_ provider: ProviderID) -> some View {
         Menu(provider.displayName) {
+            if provider == .grok {
+                Button {
+                    usageStore.presentGrokWebLogin(for: nil)
+                } label: {
+                    Label("Sign in on grok.com", systemImage: "globe")
+                }
+            }
+
             if provider.supportsProfileLogin {
                 Button {
                     _ = usageStore.launchLoginProfile(provider: provider)

@@ -172,7 +172,7 @@ A direct token-bearing Kimi live probe is intentionally not part of automated ve
 
 ### Grok
 
-The Grok adapter uses the official Grok CLI login, not a browser-cookie scrape and not an xAI Console API key.
+The Grok adapter has two login-backed sources. The weekly percentage shown in grok.com Settings → Usage is preferred. The official Grok CLI billing session is the fallback. Neither path copies a token or cookie into UsageDock preferences.
 
 Current-session resolution reads `~/.grok/auth.json`. Profile login runs `grok login` with `GROK_HOME` pointed at a UsageDock profile directory, which is the CLI's documented config-directory override. The access token stays in that CLI-owned file. UsageDock does not copy it into preferences. When the stored session includes an OIDC issuer, client id, and refresh token, an expired access token is refreshed with the standard refresh-token grant and written back to the same auth file.
 
@@ -186,7 +186,15 @@ The parser follows the Grok CLI function that feeds both `/usage` and Settings �
 
 That 0% is the CLI's reading of a proto3 body. `creditUsagePercent` is a scalar, so the API omits it at zero, while zero money values still arrive as `{"val":0}`. The reset time comes from `config.currentPeriod.end`, then `billingPeriodEnd`. The window label comes from the period type or the start/end span. On-demand extra usage is shown only when `onDemandCap.val` is greater than zero.
 
-`GET /v1/billing` without `format=credits` is not the CLI usage source. A body whose `monthlyLimit` is 0 cannot be turned into a percentage, even when `used` is nonzero, and UsageDock does not invent 0% from that ledger. `productUsage` rows are shares of the same subscription pool and are not drawn as separate limits. A console API key in `auth.json` is not a consumer login. The short grok.com `/rest/rate-limits` query window is a separate browser-cookie surface and is not queried. The login session is the `key` field under a scope such as `https://auth.x.ai::<uuid>`, with `expires_at` and `auth_mode` `oidc`.
+`GET /v1/billing` without `format=credits` is not the CLI usage source. A body whose `monthlyLimit` is 0 cannot be turned into a percentage, even when `used` is nonzero, and UsageDock does not invent 0% from that ledger. `productUsage` rows are shares of the same subscription pool and are not drawn as separate CLI limits. A console API key in `auth.json` is not a consumer login. The login session is the `key` field under a scope such as `https://auth.x.ai::<uuid>`, with `expires_at` and `auth_mode` `oidc`.
+
+The web source is an in-app `WKWebView` opened at `https://grok.com/?_s=usage`. Each Grok account gets its own persistent `WKWebsiteDataStore` identifier. The cookies that sign the page in stay in that store. UsageDock does not read them into preferences, the clipboard, or the diagnostic log. After sign-in, refresh loads grok.com in that same store and runs the page's own request:
+
+`POST https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig`
+
+The body is an empty gRPC-web data frame (`application/grpc-web+proto`). A decoded `[1,1]` value is the used percent on a 0–100 scale. `[1,5]` is the reset, `[1,4]` the period start, and `[1,7]` optional per-product messages. Known product enums are API, Grok Build, Other, Chat, Imagine, and Voice. Any other enum is labeled `Product N` until a capture confirms it. A response with no `[1,1]` percent is undecodable and is not shown as 0%. HTTP 401/403, an HTML page, or gRPC status 7 or 16 means the web session needs sign-in again. In that case the CLI reading is shown and the account status says so. Copy diagnostics copies the decoded field paths and values only.
+
+The CLI OAuth bearer is not sent to this grok.com method. The short grok.com `/rest/rate-limits` query window is still unused.
 
 ### Gemini
 

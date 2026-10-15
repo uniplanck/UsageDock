@@ -1120,8 +1120,176 @@ final class LiveUsageAdapterParsingTests: XCTestCase {
         XCTAssertEqual(parts.minute, 29)
     }
 
+    func testGrokWebCreditsReadsWeeklyPercentResetAndProducts() throws {
+        let config = protoDouble(1, 6)
+            + protoString(4, "2026-10-14T15:27:00Z")
+            + protoString(5, "2026-10-21T15:27:00Z")
+            + protoMessage(7, protoVarintField(1, 9) + protoDouble(2, 4))
+            + protoMessage(7, protoVarintField(1, 3) + protoDouble(2, 2))
+        let body = grpcFrame(protoMessage(1, config)) + grpcFrame(Data("grpc-status: 0\r\n".utf8), trailer: true)
+
+        let verdict = GrokWebCredits.interpret(body: body, httpStatus: 200, contentType: "application/grpc-web+proto")
+        guard case .usage(let reading) = verdict.interpretation else {
+            return XCTFail(verdict.diagnostic)
+        }
+        XCTAssertEqual(reading.percentUsed, 0.06, accuracy: 0.0001)
+        XCTAssertEqual(reading.products.map(\.name), ["Product 9", "Other"])
+        XCTAssertEqual(reading.products[0].percentUsed, 0.04, accuracy: 0.0001)
+        XCTAssertEqual(reading.products[1].percentUsed, 0.02, accuracy: 0.0001)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let reset = try XCTUnwrap(reading.resetsAt)
+        let parts = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: reset)
+        XCTAssertEqual(parts.year, 2026)
+        XCTAssertEqual(parts.month, 10)
+        XCTAssertEqual(parts.day, 21)
+        XCTAssertEqual(parts.hour, 15)
+        XCTAssertEqual(parts.minute, 27)
+        XCTAssertTrue(verdict.diagnostic.contains("1.1"))
+        XCTAssertFalse(verdict.diagnostic.localizedCaseInsensitiveContains("cookie"))
+        XCTAssertFalse(verdict.diagnostic.contains("sso="))
+
+        let buckets = GrokWebCredits.buckets(from: reading)
+        let weekly = try XCTUnwrap(buckets.first(where: { $0.kind == .weekly }))
+        XCTAssertEqual(weekly.quotaID, "grok-weekly")
+        XCTAssertEqual(weekly.label, "1w")
+        XCTAssertEqual(weekly.resolvedPercentUsed ?? -1, 0.06, accuracy: 0.0001)
+        XCTAssertEqual(buckets.first(where: { $0.label == "Other" })?.resolvedPercentUsed ?? -1, 0.02, accuracy: 0.0001)
+    }
+
+    func testGrokWebCreditsReadsVarintPercentAndTimestampMessage() throws {
+        let reset = protoMessage(5, protoVarintField(1, 1_792_596_420))
+        let config = protoVarintField(1, 6) + reset
+        let verdict = GrokWebCredits.interpret(body: grpcFrame(protoMessage(1, config)), httpStatus: 200)
+        guard case .usage(let reading) = verdict.interpretation else {
+            return XCTFail(verdict.diagnostic)
+        }
+        XCTAssertEqual(reading.percentUsed, 0.06, accuracy: 0.0001)
+        let date = try XCTUnwrap(reading.resetsAt)
+        XCTAssertEqual(date.timeIntervalSince1970, 1_792_596_420, accuracy: 0.5)
+    }
+
+    func testGrokWebCreditsDoesNotInventZeroOrShiftOmittedProductPercents() {
+        let missing = protoMessage(1, protoString(5, "2026-10-21T15:27:00Z") + protoMessage(7, protoVarintField(1, 3) + protoDouble(2, 2)))
+        let omitted = GrokWebCredits.interpret(body: grpcFrame(missing), httpStatus: 200)
+        guard case .undecodable(let message) = omitted.interpretation else {
+            return XCTFail("missing percent was accepted")
+        }
+        XCTAssertTrue(message.contains("will not invent 0%"))
+
+        let shifted = protoMessage(1, protoDouble(1, 21) + protoMessage(7, protoVarintField(1, 6)) + protoMessage(7, protoVarintField(1, 4) + protoDouble(2, 21)))
+        let parsed = GrokWebCredits.interpret(body: grpcFrame(shifted), httpStatus: 200)
+        guard case .usage(let reading) = parsed.interpretation else {
+            return XCTFail(parsed.diagnostic)
+        }
+        XCTAssertEqual(reading.products.map(\.name), ["Chat"])
+        XCTAssertEqual(reading.products.first?.percentUsed ?? -1, 0.21, accuracy: 0.0001)
+
+        let explicitZero = GrokWebCredits.interpret(body: grpcFrame(protoMessage(1, protoDouble(1, 0))), httpStatus: 200)
+        guard case .usage(let zero) = explicitZero.interpretation else {
+            return XCTFail(explicitZero.diagnostic)
+        }
+        XCTAssertEqual(zero.percentUsed, 0, accuracy: 0.0001)
+    }
+
+    func testGrokWebCreditsTreatsAuthFailuresAsReLogin() {
+        let html = GrokWebCredits.interpret(body: Data("<!DOCTYPE html><html>".utf8), httpStatus: 200, contentType: "text/html")
+        guard case .needsReLogin = html.interpretation else {
+            return XCTFail("HTML was not treated as a signed-out page")
+        }
+        let denied = GrokWebCredits.interpret(body: Data(), httpStatus: 403)
+        guard case .needsReLogin = denied.interpretation else {
+            return XCTFail("HTTP 403 was not treated as a signed-out session")
+        }
+        let trailer = grpcFrame(Data()) + grpcFrame(Data("grpc-status: 16\r\n".utf8), trailer: true)
+        let unauthenticated = GrokWebCredits.interpret(body: trailer, httpStatus: 200)
+        guard case .needsReLogin = unauthenticated.interpretation else {
+            return XCTFail("grpc-status 16 was not treated as a signed-out session")
+        }
+        let compressed = Data([0x01, 0, 0, 0, 1, 0])
+        let compressedVerdict = GrokWebCredits.interpret(body: compressed, httpStatus: 200)
+        guard case .undecodable(let message) = compressedVerdict.interpretation else {
+            return XCTFail("compressed frame was accepted")
+        }
+        XCTAssertTrue(message.contains("will not invent 0%"))
+    }
+
+    func testGrokWebSessionIDSurvivesAccountDecoding() throws {
+        let account = UsageAccount(
+            provider: .grok,
+            name: "Grok Web",
+            source: .currentSession,
+            grokWebSessionID: "6f1c2a40-1111-2222-3333-444455556666",
+            buckets: []
+        )
+        let data = try JSONEncoder().encode(account)
+        let decoded = try JSONDecoder().decode(UsageAccount.self, from: data)
+        XCTAssertEqual(decoded.grokWebSessionID, account.grokWebSessionID)
+
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        object.removeValue(forKey: "grokWebSessionID")
+        let legacy = try JSONDecoder().decode(UsageAccount.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(legacy.grokWebSessionID)
+        XCTAssertEqual(
+            DisplayAccountPolicy.authenticationState(
+                account: account,
+                refreshState: .degraded(Date(), "Grok web login expired. Sign in again on grok.com.")
+            ),
+            .valid
+        )
+    }
+
     private func jsonData(_ value: Any) throws -> Data {
         try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+    }
+
+    private func protoVarint(_ value: UInt64) -> Data {
+        var rest = value
+        var data = Data()
+        while true {
+            var byte = UInt8(rest & 0x7F)
+            rest >>= 7
+            if rest != 0 { byte |= 0x80 }
+            data.append(byte)
+            if rest == 0 { break }
+        }
+        return data
+    }
+
+    private func protoKey(_ field: Int, wire: Int) -> Data {
+        protoVarint(UInt64((field << 3) | wire))
+    }
+
+    private func protoVarintField(_ field: Int, _ value: UInt64) -> Data {
+        protoKey(field, wire: 0) + protoVarint(value)
+    }
+
+    private func protoDouble(_ field: Int, _ value: Double) -> Data {
+        var data = protoKey(field, wire: 1)
+        let bits = value.bitPattern
+        for offset in 0..<8 {
+            data.append(UInt8((bits >> UInt64(offset * 8)) & 0xFF))
+        }
+        return data
+    }
+
+    private func protoMessage(_ field: Int, _ payload: Data) -> Data {
+        protoKey(field, wire: 2) + protoVarint(UInt64(payload.count)) + payload
+    }
+
+    private func protoString(_ field: Int, _ value: String) -> Data {
+        protoMessage(field, Data(value.utf8))
+    }
+
+    private func grpcFrame(_ payload: Data, trailer: Bool = false) -> Data {
+        var data = Data([trailer ? 0x80 : 0x00])
+        let length = UInt32(payload.count)
+        data.append(UInt8((length >> 24) & 0xFF))
+        data.append(UInt8((length >> 16) & 0xFF))
+        data.append(UInt8((length >> 8) & 0xFF))
+        data.append(UInt8(length & 0xFF))
+        data.append(payload)
+        return data
     }
 }
 

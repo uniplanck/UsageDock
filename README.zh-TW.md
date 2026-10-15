@@ -46,7 +46,7 @@ UsageDock **僅支援登入帳號**。
 - Cursor 在具備經驗證的登入方式與即時用量整合之前暫不可用。
 - 未由支援的已驗證登入提供的帳號不會加入有效帳號集合。
 
-Grok 使用官方 Grok CLI 登入（`grok login`，位址為 auth.x.ai）。如果額度來自 X 訂閱，請先把該 X 帳號連結到同一個 xAI 帳號。UsageDock 從 `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` 讀取共享訂閱額度，並顯示已用百分比、重設時間，以及在有上限時的隨需額外用量。登入權杖留在 Grok CLI 的認證檔案中，不會複製到 UsageDock 的設定裡。依產品拆開的數字是同一額度的組成，不會當成各自獨立的上限。當已確認的用量週期裡沒有 `creditUsagePercent`，且沒有正數月度額度時，UsageDock 顯示 0%。這與 Grok CLI 的讀法相同：該欄位是 proto3 數值，為 0 時會被介面省略。不帶 `format` 的 `/v1/billing` 在 `monthlyLimit` 為 0 時不能當成使用百分比。grok.com 上較短的查詢窗口屬於另一套瀏覽器 Cookie 工作階段，這裡不使用。
+Grok 有兩種登入。**Sign in on grok.com** 會在應用程式內視窗開啟 `https://grok.com/?_s=usage`。該工作階段留在依帳號隔離的網頁儲存中，是 grok.com Settings → Usage 上每週用量百分比和重設時間的來源。**Use Current Login** 與 **Login New Profile** 仍使用 `grok login`。如果沒有網頁工作階段、工作階段已過期，或回應無法解碼，UsageDock 會顯示 CLI 帳單讀數，並說明需要重新登入網頁。無法解碼的網頁回應不會被當成 0%。Cookie 和權杖不會複製到 UsageDock 的設定中。Copy diagnostics 只複製解碼出的欄位路徑。
 
 ## 系統需求
 
