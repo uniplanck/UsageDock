@@ -178,15 +178,15 @@ Current-session resolution reads `~/.grok/auth.json`. Profile login runs `grok l
 
 Live usage is `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` with `Authorization: Bearer` and `X-XAI-Token-Auth: xai-grok-cli`. That is the endpoint the Grok CLI uses for Settings → Usage / `/usage`.
 
-The parser reads:
+The parser follows the Grok CLI function that feeds both `/usage` and Settings → Usage (`credit_balance_from_config`):
 
-- `config.creditUsagePercent` as used percent on a 0–100 scale;
-- the reset time from `config.currentPeriod.end`, then `billingPeriodEnd`;
-- a weekly or monthly label from the period type or the start/end span;
-- on-demand extra usage only when `onDemandCap.val` is greater than zero;
-- a legacy monthly allowance from `used.val / monthlyLimit.val` when the percentage field is absent.
+- `config.creditUsagePercent` as used percent on a 0–100 scale when the field is present;
+- otherwise `used.val / monthlyLimit.val` when that limit is greater than zero;
+- otherwise 0% when `currentPeriod` is present and the monthly limit is missing or zero.
 
-An omitted `creditUsagePercent` is never reported as 0%. `productUsage` rows are shares of the same subscription pool and are not drawn as separate limits. A console API key in `auth.json` is not a consumer login. The short grok.com `/rest/rate-limits` query window is a separate browser-cookie surface and is not queried.
+That 0% is the CLI's reading of a proto3 body. `creditUsagePercent` is a scalar, so the API omits it at zero, while zero money values still arrive as `{"val":0}`. The reset time comes from `config.currentPeriod.end`, then `billingPeriodEnd`. The window label comes from the period type or the start/end span. On-demand extra usage is shown only when `onDemandCap.val` is greater than zero.
+
+`GET /v1/billing` without `format=credits` is not the CLI usage source. A body whose `monthlyLimit` is 0 cannot be turned into a percentage, even when `used` is nonzero, and UsageDock does not invent 0% from that ledger. `productUsage` rows are shares of the same subscription pool and are not drawn as separate limits. A console API key in `auth.json` is not a consumer login. The short grok.com `/rest/rate-limits` query window is a separate browser-cookie surface and is not queried. The login session is the `key` field under a scope such as `https://auth.x.ai::<uuid>`, with `expires_at` and `auth_mode` `oidc`.
 
 ### Gemini
 

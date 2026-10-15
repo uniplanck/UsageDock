@@ -953,28 +953,44 @@ final class LiveUsageAdapterParsingTests: XCTestCase {
         XCTAssertNil(buckets.first(where: { $0.model == "GrokChat" || $0.label == "GrokChat" }))
     }
 
-    func testGrokBillingDoesNotInventZeroWhenPercentageIsOmitted() throws {
+    func testGrokBillingReadsOmittedWeeklyPercentAsZeroLikeTheCLI() throws {
+        // Live SuperGrok credits body: proto3 dropped creditUsagePercent, and
+        // every zero money field is still present as {"val":0}.
         let omitted = try jsonData([
             "config": [
                 "currentPeriod": [
                     "type": "USAGE_PERIOD_TYPE_WEEKLY",
-                    "start": "2026-08-16T12:54:39.515635+00:00",
-                    "end": "2026-08-23T12:54:39.515635+00:00"
+                    "start": "2026-10-08T12:29:30.534268+00:00",
+                    "end": "2026-10-15T12:29:30.534268+00:00"
                 ],
                 "onDemandCap": ["val": 0],
                 "onDemandUsed": ["val": 0],
-                "productUsage": [
-                    ["product": "GrokChat"]
-                ],
-                "isUnifiedBillingUser": true
+                "isUnifiedBillingUser": true,
+                "prepaidBalance": ["val": 0],
+                "topUpMethod": "TOP_UP_METHOD_SAVED_PAYMENT_METHOD",
+                "billingPeriodStart": "2026-10-08T12:29:30.534268+00:00",
+                "billingPeriodEnd": "2026-10-15T12:29:30.534268+00:00"
             ]
         ])
 
-        XCTAssertThrowsError(try GrokUsageAdapter.parseUsage(data: omitted)) { error in
-            XCTAssertTrue(error.localizedDescription.contains("will not invent 0%"))
-        }
+        let buckets = try GrokUsageAdapter.parseUsage(data: omitted)
+        XCTAssertEqual(buckets.count, 1)
+        let weekly = try XCTUnwrap(buckets.first)
+        XCTAssertEqual(weekly.quotaID, "grok-weekly")
+        XCTAssertEqual(weekly.label, "1w")
+        XCTAssertEqual(weekly.kind, .weekly)
+        XCTAssertEqual(weekly.resolvedPercentUsed ?? -1, 0, accuracy: 0.0001)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let reset = try XCTUnwrap(weekly.resetsAt)
+        let parts = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: reset)
+        XCTAssertEqual(parts.year, 2026)
+        XCTAssertEqual(parts.month, 10)
+        XCTAssertEqual(parts.day, 15)
+        XCTAssertEqual(parts.hour, 12)
+        XCTAssertEqual(parts.minute, 29)
 
-        let extraOnly = try jsonData([
+        let extraAndZero = try jsonData([
             "config": [
                 "currentPeriod": [
                     "type": "USAGE_PERIOD_TYPE_WEEKLY",
@@ -982,16 +998,36 @@ final class LiveUsageAdapterParsingTests: XCTestCase {
                     "end": "2026-08-23T12:54:39.515635+00:00"
                 ],
                 "onDemandCap": ["val": 100],
-                "onDemandUsed": ["val": 0],
-                "productUsage": [
-                    ["product": "GrokChat"]
-                ]
+                "onDemandUsed": ["val": 0]
             ]
         ])
-        let buckets = try GrokUsageAdapter.parseUsage(data: extraOnly)
-        XCTAssertEqual(buckets.count, 1)
-        XCTAssertEqual(buckets.first?.kind, .credits)
-        XCTAssertNil(buckets.first(where: { $0.kind == .weekly }))
+        let withExtra = try GrokUsageAdapter.parseUsage(data: extraAndZero)
+        XCTAssertEqual(withExtra.count, 2)
+        let included = try XCTUnwrap(withExtra.first(where: { $0.kind == .weekly }))
+        XCTAssertEqual(included.resolvedPercentUsed ?? -1, 0, accuracy: 0.0001)
+        XCTAssertNotNil(withExtra.first(where: { $0.kind == .credits }))
+    }
+
+    func testGrokBillingDoesNotInventZeroFromTheUnformattedLedger() throws {
+        // GET /v1/billing without format=credits. monthlyLimit is 0, so used
+        // cannot be a percentage, and there is no credits currentPeriod.
+        let ledger = try jsonData([
+            "config": [
+                "monthlyLimit": ["val": 0],
+                "used": ["val": 190],
+                "onDemandCap": ["val": 0],
+                "billingPeriodStart": "2026-10-01T00:00:00+00:00",
+                "billingPeriodEnd": "2026-11-01T00:00:00+00:00",
+                "history": []
+            ]
+        ])
+        XCTAssertThrowsError(try GrokUsageAdapter.parseUsage(data: ledger)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("will not invent 0%"))
+        }
+
+        XCTAssertThrowsError(try GrokUsageAdapter.parseUsage(data: try jsonData(["config": [:]]))) { error in
+            XCTAssertTrue(error.localizedDescription.contains("will not invent 0%"))
+        }
     }
 
     func testGrokBillingParsesLegacyMonthlyAllowance() throws {
@@ -1048,6 +1084,40 @@ final class LiveUsageAdapterParsingTests: XCTestCase {
             ]
         ])
         XCTAssertFalse(GrokCredentialStore.containsSession(data: deprecated))
+    }
+
+    func testGrokAuthFileReadsOIDCKeyUnderAuthXAIScope() throws {
+        let session = try jsonData([
+            "https://auth.x.ai::6f1c2a40-1111-2222-3333-444455556666": [
+                "key": "oidc-access-key",
+                "refresh_token": "refresh-token",
+                "expires_at": "2026-10-15T12:29:30Z",
+                "auth_mode": "oidc",
+                "oidc_issuer": "https://auth.x.ai",
+                "oidc_client_id": "client",
+                "user_id": "user-oidc"
+            ],
+            "xai::api_key": [
+                "key": "xai-secret",
+                "auth_mode": "api_key"
+            ]
+        ])
+
+        let parsed = try GrokCredentialStore.session(in: session)
+        XCTAssertEqual(parsed.session.scope, "https://auth.x.ai::6f1c2a40-1111-2222-3333-444455556666")
+        XCTAssertEqual(parsed.session.accessToken, "oidc-access-key")
+        XCTAssertEqual(parsed.session.refreshToken, "refresh-token")
+        XCTAssertEqual(parsed.session.userID, "user-oidc")
+        XCTAssertEqual(parsed.session.issuer, "https://auth.x.ai")
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let expiry = try XCTUnwrap(parsed.session.expiresAt)
+        let parts = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: expiry)
+        XCTAssertEqual(parts.year, 2026)
+        XCTAssertEqual(parts.month, 10)
+        XCTAssertEqual(parts.day, 15)
+        XCTAssertEqual(parts.hour, 12)
+        XCTAssertEqual(parts.minute, 29)
     }
 
     private func jsonData(_ value: Any) throws -> Data {

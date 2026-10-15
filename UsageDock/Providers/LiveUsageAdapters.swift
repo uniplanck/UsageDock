@@ -793,9 +793,14 @@ struct GrokUsageAdapter: UsageProviderAdapter {
     }
 
     /// Official Grok CLI subscription pool (`Settings → Usage` / `/usage`).
-    /// `creditUsagePercent` is used percent on a 0–100 scale. An omitted
-    /// percentage is not reported as 0. Product rows are shares of this same
-    /// pool, so they are not separate limits.
+    ///
+    /// The CLI maps this payload in `credit_balance_from_config`: use
+    /// `creditUsagePercent` (0–100) when present; otherwise `used / monthlyLimit`
+    /// when that limit is positive; otherwise 0. The last branch is how `/usage`
+    /// renders a proto3 response that omitted a zero percentage. UsageDock
+    /// applies that 0 only when `currentPeriod` is present, so an empty body
+    /// or the unformatted billing ledger is not shown as a subscription
+    /// percentage. Product rows are shares of this same pool.
     static func parseUsage(data: Data) throws -> [UsageBucket] {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw UsageAdapterError.invalidResponse("Grok billing response is not a JSON object.")
@@ -804,30 +809,17 @@ struct GrokUsageAdapter: UsageProviderAdapter {
         let window = periodWindow(config)
         var buckets: [UsageBucket] = []
 
-        if let percent = numeric(config["creditUsagePercent"] ?? config["credit_usage_percent"]), percent >= 0 {
+        if let reading = subscriptionReading(config) {
+            let display = reading.legacyMonthly && window.quotaID == "grok-usage"
+                ? (quotaID: "grok-monthly", label: "Month", kind: UsageWindowKind.custom, resetsAt: window.resetsAt)
+                : window
             buckets.append(
                 UsageBucket(
-                    quotaID: window.quotaID,
-                    label: window.label,
-                    kind: window.kind,
-                    percentUsed: min(percent, 100) / 100,
-                    resetsAt: window.resetsAt
-                )
-            )
-        }
-
-        if let limit = cent(config["monthlyLimit"] ?? config["monthly_limit"]), limit > 0,
-           let used = cent(config["used"]) {
-            let resetsAt = UsageDateParser.date(from: config["billingPeriodEnd"] ?? config["billing_period_end"])
-            buckets.append(
-                UsageBucket(
-                    quotaID: "grok-monthly",
-                    label: "Month",
-                    kind: .custom,
-                    used: max(used, 0),
-                    limit: limit,
-                    unit: "cents",
-                    resetsAt: resetsAt
+                    quotaID: display.quotaID,
+                    label: display.label,
+                    kind: display.kind,
+                    percentUsed: reading.percentUsed,
+                    resetsAt: display.resetsAt
                 )
             )
         }
@@ -853,6 +845,26 @@ struct GrokUsageAdapter: UsageProviderAdapter {
             )
         }
         return buckets
+    }
+
+    /// Same precedence as the Grok CLI's `credit_balance_from_config`.
+    /// An omitted percentage becomes 0 only for a credits config that included
+    /// `currentPeriod` and has no positive monthly allowance to divide.
+    private static func subscriptionReading(
+        _ config: [String: Any]
+    ) -> (percentUsed: Double, legacyMonthly: Bool)? {
+        if let percent = numeric(config["creditUsagePercent"] ?? config["credit_usage_percent"]), percent >= 0 {
+            return (min(percent, 100) / 100, false)
+        }
+        if let limit = cent(config["monthlyLimit"] ?? config["monthly_limit"]), limit > 0 {
+            let used = max(cent(config["used"]) ?? 0, 0)
+            return (min(used / limit, 1), true)
+        }
+        let period = (config["currentPeriod"] as? [String: Any]) ?? (config["current_period"] as? [String: Any])
+        if period != nil {
+            return (0, false)
+        }
+        return nil
     }
 
     private static func requestBilling(_ session: GrokCredentialStore.Session) async throws -> (Data, URLResponse) {
