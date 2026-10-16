@@ -38,6 +38,12 @@ UsageDock es una barra ligera para el borde de la pantalla en macOS que permite 
 - Ofrece un elemento compacto en la barra de menús de macOS con un panel emergente para las cuentas seleccionadas.
 - Conserva la apariencia, la posición, las cuentas visibles y las preferencias del menú tras reiniciar.
 
+## Destino al hacer clic
+
+En **Settings → Data → Provider Order, Colors & Click Targets**, elige **App (predeterminado)** o **Link** por proveedor. **Choose App…** permite seleccionar una app en ejecución o un archivo `.app` con el selector de Finder, que comienza en `/Applications`. Se muestran el nombre y el icono, y la selección persiste tras reiniciar. La barra lateral, los menús de cuenta y las filas de cuentas de la barra de menús comparten el destino.
+
+Las apps predeterminadas, si están instaladas, son Claude.app, ChatGPT.app para Codex, Antigravity.app, Kimi Code.app, Cursor.app y Grok Bot.app para Grok. Si la app no existe o no se inicia, se abre la URL alternativa editable y aparece un estado en los ajustes y en la ayuda del clic. La URL de la cuenta tiene prioridad; las URL vacías o inválidas usan una URL válida del proveedor. **Use Default App / Use Default URL** restaura los valores originales. Elegir una app no cambia la política de cuentas con inicio de sesión.
+
 ## Política de cuentas
 
 UsageDock es **solo para cuentas autenticadas mediante inicio de sesión**.

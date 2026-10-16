@@ -37,4 +37,12 @@ enum UsageDockLanguage: String, CaseIterable, Identifiable, Codable {
     var settingsWindowTitle: String {
         prefersJapanese ? "UsageDock 設定" : "UsageDock Settings"
     }
+
+    /// AppKit tooltips/panels follow the same explicit language as SwiftUI.
+    func localized(_ key: String) -> String {
+        guard prefersJapanese,
+              let path = Bundle.main.path(forResource: "ja", ofType: "lproj"),
+              let bundle = Bundle(path: path) else { return key }
+        return bundle.localizedString(forKey: key, value: key, table: nil)
+    }
 }

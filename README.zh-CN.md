@@ -38,6 +38,12 @@ UsageDock 是一款轻量级 macOS 屏幕边缘用量栏，可快速查看 AI �
 - 在 macOS 菜单栏中提供紧凑状态项与弹出面板。
 - 外观、位置、显示账号与菜单栏设置均可跨重启保存。
 
+## 点击打开目标
+
+在 **Settings → Data → Provider Order, Colors & Click Targets** 中，为每个服务商选择 **App（默认）** 或 **Link**。通过 **Choose App…** 选择正在运行的应用，或使用从 `/Applications` 开始的 Finder 文件选择器指定 `.app`。设置显示应用名称和图标，并在重启后保留。边缘栏、账号菜单和菜单栏账号行使用同一设置。
+
+已安装时的默认应用为 Claude.app、Codex 对应的 ChatGPT.app、Antigravity.app、Kimi Code.app、Cursor.app 和 Grok 对应的 Grok Bot.app。应用缺失或启动失败时会打开可编辑的备用 URL，并在设置和工具提示中显示状态。账号 URL 优先；空白或无效的 URL 会回退到有效的服务商 URL。**Use Default App / Use Default URL** 可恢复默认值。应用选择不改变仅限登录账号的策略。
+
 ## 账号策略
 
 UsageDock **仅支持登录账号**。

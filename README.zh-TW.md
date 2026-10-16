@@ -38,6 +38,12 @@ UsageDock 是一款輕量級 macOS 螢幕邊緣用量列，可快速查看 AI �
 - 在 macOS 選單列提供精簡狀態項目與彈出面板。
 - 外觀、位置、顯示帳號與選單列設定都可在重新啟動後保留。
 
+## 點擊開啟目標
+
+在 **Settings → Data → Provider Order, Colors & Click Targets** 中，為每個服務商選擇 **App（預設）** 或 **Link**。透過 **Choose App…** 選取正在執行的應用程式，或使用從 `/Applications` 開始的 Finder 檔案選擇器指定 `.app`。設定顯示名稱與圖示，並在重新啟動後保留。邊緣列、帳號選單與選單列帳號行使用相同設定。
+
+已安裝時的預設應用程式為 Claude.app、Codex 對應的 ChatGPT.app、Antigravity.app、Kimi Code.app、Cursor.app 與 Grok 對應的 Grok Bot.app。應用程式遺失或無法啟動時會開啟可編輯的備用 URL，並在設定與工具提示中顯示狀態。帳號 URL 優先；空白或無效的 URL 會退回有效的服務商 URL。**Use Default App / Use Default URL** 可還原預設值。選取應用程式不會改變僅限登入帳號的政策。
+
 ## 帳號政策
 
 UsageDock **僅支援登入帳號**。
