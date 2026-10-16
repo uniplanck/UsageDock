@@ -689,7 +689,7 @@ struct RailView: View {
                     .contentShape(Rectangle())
                     .simultaneousGesture(backgroundDragGesture)
                     .onTapGesture {
-                        _ = usageStore.openWeb(for: target)
+                        Task { await usageStore.openTarget(for: target) }
                     }
                     .onHover { inside in
                         guard usageStore.railHoverEnabled else {
@@ -702,7 +702,7 @@ struct RailView: View {
                         }
                         onTargetHover(target, inside)
                     }
-                    .help(usageStore.webURL(for: target).map { "Open \($0.absoluteString)" } ?? "No web URL configured")
+                    .help(usageStore.openTargetHelp(for: target))
                 }
             }
             .padding(.vertical, RailMetrics.edgePadding(scale: usageStore.railScale, amount: usageStore.railInnerPaddingY))
@@ -1673,12 +1673,12 @@ struct RailView: View {
                 ForEach(accounts) { account in
                     Menu(account.name) {
                         Button {
-                            if let target = RailDisplayTarget.account(id: account.id, provider: provider) as RailDisplayTarget? {
-                                _ = usageStore.openWeb(for: target)
-                            }
+                            let target = RailDisplayTarget.account(id: account.id, provider: provider)
+                            Task { await usageStore.openTarget(for: target) }
                         } label: {
-                            Label("Open Web", systemImage: "safari")
+                            Label("Open App or Link", systemImage: "arrow.up.forward.app")
                         }
+                        .help(usageStore.openTargetHelp(for: .account(id: account.id, provider: provider)))
 
                         Button {
                             onOpenSettings()

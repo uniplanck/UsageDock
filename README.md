@@ -38,6 +38,12 @@ UsageDock is a lightweight macOS edge rail for checking AI service usage and res
 - Provides a compact macOS menu bar status item and popover for selected accounts.
 - Persists appearance, placement, display-account, and menu-bar preferences across restarts.
 
+## Provider click targets
+
+In **Settings → Data → Provider Order, Colors & Click Targets**, choose **App** (default) or **Link** for each provider. **Choose App…** lists running apps or opens a Finder picker at `/Applications` for an `.app`; the chosen name/icon and preference persist across restarts. The same target is used by rail clicks, account menu actions, and menu-bar account rows.
+
+Installed defaults are Claude → Claude.app, Codex → ChatGPT.app, Antigravity → Antigravity.app, Kimi → Kimi Code.app, Cursor → Cursor.app, and Grok → Grok Bot.app. If an app is missing or cannot launch, UsageDock opens the editable fallback URL and shows a status in settings and the click tooltip. Existing account URL overrides still take priority; empty/invalid URLs fall back to a valid provider URL. **Use Default App** and **Use Default URL** restore defaults. Choosing an app does not change account/login eligibility.
+
 ## Account policy
 
 UsageDock is **login-only**.

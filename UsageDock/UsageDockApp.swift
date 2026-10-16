@@ -318,44 +318,51 @@ private struct MenuBarPopoverContent: View {
 
     private func usageRow(_ item: MenuBarUsageItem) -> some View {
         let accent = ProviderBrand.glow(for: item.provider, customHex: item.accentHex, theme: usageStore.theme)
-        return HStack(spacing: 11) {
-            ZStack {
-                Circle().fill(accent.opacity(0.10))
-                ProviderIcon(
-                    provider: item.provider,
-                    size: 20,
-                    accentHex: item.accentHex,
-                    theme: usageStore.theme
-                )
-            }
-            .frame(width: 34, height: 34)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(item.accountName)
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .lineLimit(1)
-                Text(item.provider.displayName)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 8)
-            CompactUsageRing(percent: item.percent, accent: accent, diameter: 30, lineWidth: 3.2)
-            Text(percentText(item.percent))
-                .font(.system(size: 14, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(item.percent == nil ? Color.secondary : accent)
-                .frame(width: 42, alignment: .trailing)
-        }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 9)
-        .background(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .fill(Color.primary.opacity(0.045))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .stroke(accent.opacity(0.13), lineWidth: 0.7)
+        let target = RailDisplayTarget.account(id: item.id, provider: item.provider)
+        return Button {
+            Task { await usageStore.openTarget(for: target) }
+        } label: {
+            HStack(spacing: 11) {
+                ZStack {
+                    Circle().fill(accent.opacity(0.10))
+                    ProviderIcon(
+                        provider: item.provider,
+                        size: 20,
+                        accentHex: item.accentHex,
+                        theme: usageStore.theme
+                    )
                 }
-        )
+                .frame(width: 34, height: 34)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.accountName)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .lineLimit(1)
+                    Text(item.provider.displayName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                CompactUsageRing(percent: item.percent, accent: accent, diameter: 30, lineWidth: 3.2)
+                Text(percentText(item.percent))
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(item.percent == nil ? Color.secondary : accent)
+                    .frame(width: 42, alignment: .trailing)
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .background(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(Color.primary.opacity(0.045))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .stroke(accent.opacity(0.13), lineWidth: 0.7)
+                    }
+            )
+        }
+        .buttonStyle(.plain)
+        .help(usageStore.openTargetHelp(for: target))
     }
 
     private var controls: some View {

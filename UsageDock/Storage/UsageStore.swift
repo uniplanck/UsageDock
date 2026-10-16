@@ -38,6 +38,7 @@ final class UsageStore: ObservableObject {
     private static let bubblePointerDepthKey = "UsageDock.bubblePointerDepth.v1"
     private static let bubblePointerWidthKey = "UsageDock.bubblePointerWidth.v1"
     private static let providerWebURLKey = "UsageDock.providerWebURLs.v1"
+    private static let providerOpenPreferencesKey = "UsageDock.providerOpenPreferences.v1"
     private static let railEdgeProfileKey = "UsageDock.railEdgeProfile.v1"
     private static let railInnerEdgeProfileKey = "UsageDock.railInnerEdgeProfile.v1"
     private static let railPercentSourceKey = "UsageDock.railPercentSource.v1"
@@ -354,6 +355,15 @@ final class UsageStore: ObservableObject {
     @Published private(set) var providerWebURLs: [ProviderID: String] {
         didSet { persistProviderWebURLs() }
     }
+    @Published private(set) var providerOpenPreferences: [ProviderID: ProviderOpenPreference] {
+        didSet {
+            let saved = Dictionary(uniqueKeysWithValues: providerOpenPreferences.map { ($0.key.rawValue, $0.value) })
+            if let data = try? encoder.encode(saved) {
+                defaults.set(data, forKey: Self.providerOpenPreferencesKey)
+            }
+        }
+    }
+    @Published private(set) var providerOpenStatuses: [ProviderID: ProviderOpenStatus] = [:]
     @Published private(set) var refreshStates: [ProviderID: ProviderRefreshState] = [:]
     @Published private(set) var accountRefreshStates: [UUID: AccountRefreshState] = [:]
     @Published private(set) var multiplierDetectionStates: [UUID: MultiplierDetectionState] = [:]
@@ -361,12 +371,25 @@ final class UsageStore: ObservableObject {
     @Published var settingsBubblePreviewRequested = false
 
     private let defaults: UserDefaults
+    private let appLocator: any ProviderAppLocating
+    private let targetOpener: any ProviderTargetOpening
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var autoRefreshTask: Task<Void, Never>?
 
-    init(defaults: UserDefaults = .standard) {
+    init(
+        defaults: UserDefaults = .standard,
+        appLocator: (any ProviderAppLocating)? = nil,
+        targetOpener: (any ProviderTargetOpening)? = nil
+    ) {
         self.defaults = defaults
+        self.appLocator = appLocator ?? WorkspaceProviderAppLocator()
+        self.targetOpener = targetOpener ?? WorkspaceProviderTargetOpener()
+        let savedPreferences = defaults.data(forKey: Self.providerOpenPreferencesKey)
+            .flatMap { try? JSONDecoder().decode([String: ProviderOpenPreference].self, from: $0) } ?? [:]
+        providerOpenPreferences = Dictionary(uniqueKeysWithValues: savedPreferences.compactMap { key, value in
+            ProviderID(rawValue: key).map { ($0, value) }
+        })
         fusionProviders = Set(
             (defaults.stringArray(forKey: Self.fusionProvidersKey) ?? [])
                 .compactMap(ProviderID.init(rawValue:))
@@ -787,20 +810,98 @@ final class UsageStore: ObservableObject {
 
     func setProviderWebURL(_ value: String, for provider: ProviderID) {
         providerWebURLs[provider] = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        providerOpenStatuses[provider] = nil
     }
 
     func webURL(for target: RailDisplayTarget) -> URL? {
         let raw = account(for: target)?.webURL?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let fallback = providerWebURL(for: target.provider)
-        let value = (raw?.isEmpty == false ? raw! : fallback)
-        guard let url = URL(string: value), let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http" else { return nil }
-        return url
+        // Invalid edits must not break an app's fallback link. Preserve the
+        // account -> provider -> original default URL precedence.
+        return [raw, providerWebURL(for: target.provider), target.provider.defaultWebURL]
+            .compactMap { value -> URL? in
+                guard let value, let url = URL(string: value),
+                      let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http",
+                      let host = url.host, !host.isEmpty else { return nil }
+                return url
+            }
+            .first
+    }
+
+    func openPreference(for provider: ProviderID) -> ProviderOpenPreference {
+        providerOpenPreferences[provider] ?? ProviderOpenPreference()
+    }
+
+    func setOpenMode(_ mode: ProviderOpenMode, for provider: ProviderID) {
+        var preference = openPreference(for: provider)
+        preference.mode = mode
+        providerOpenPreferences[provider] = preference
+        providerOpenStatuses[provider] = nil
+    }
+
+    func setSelectedApp(_ app: ProviderAppSelection?, for provider: ProviderID) {
+        var preference = openPreference(for: provider)
+        preference.app = app
+        providerOpenPreferences[provider] = preference
+        providerOpenStatuses[provider] = nil
+    }
+
+    func applicationSelection(at url: URL) -> ProviderAppSelection? {
+        appLocator.application(at: url)
+    }
+
+    func runningApplications() -> [ProviderAppSelection] {
+        appLocator.runningApplications()
+    }
+
+    func openResolution(for target: RailDisplayTarget) -> ProviderOpenResolution {
+        // Every provider has a built-in valid HTTP(S) URL.
+        let link = webURL(for: target) ?? URL(string: target.provider.defaultWebURL)!
+        return ProviderOpenResolver(locator: appLocator).resolve(
+            provider: target.provider,
+            preference: openPreference(for: target.provider),
+            linkURL: link
+        )
+    }
+
+    func openStatus(for provider: ProviderID) -> ProviderOpenStatus? {
+        if let status = providerOpenStatuses[provider] { return status }
+        if case .link(_, appUnavailable: true) = openResolution(for: .provider(provider)) {
+            return .appUnavailable
+        }
+        return nil
+    }
+
+    func openTargetHelp(for target: RailDisplayTarget) -> String {
+        let label: String
+        switch openResolution(for: target) {
+        case .app(let app): label = app.name
+        case .link(let url, _): label = url.absoluteString
+        }
+        let title = String(format: appLanguage.localized("Open %@"), label)
+        guard let status = openStatus(for: target.provider) else { return title }
+        return title + "\n" + appLanguage.localized(status.message)
     }
 
     @discardableResult
-    func openWeb(for target: RailDisplayTarget) -> Bool {
-        guard let url = webURL(for: target) else { return false }
-        return NSWorkspace.shared.open(url)
+    func openTarget(for target: RailDisplayTarget) async -> Bool {
+        let resolution = openResolution(for: target)
+        providerOpenStatuses[target.provider] = nil
+        switch resolution {
+        case .app(let app):
+            do {
+                try await targetOpener.openApplication(at: app.url)
+                return true
+            } catch {
+                providerOpenStatuses[target.provider] = .appLaunchFailed
+            }
+        case .link(_, let appUnavailable):
+            if appUnavailable { providerOpenStatuses[target.provider] = .appUnavailable }
+        }
+        guard let url = webURL(for: target), targetOpener.openLink(url) else {
+            providerOpenStatuses[target.provider] = .linkOpenFailed
+            return false
+        }
+        return true
     }
 
     func moveProvider(_ provider: ProviderID, direction: Int) {

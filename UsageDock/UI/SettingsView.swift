@@ -1232,71 +1232,64 @@ struct SettingsView: View {
     }
 
     private var providerOrderSection: some View {
-        GroupBox("Provider Order, Colors & Links") {
-            VStack(spacing: 6) {
+        GroupBox("Provider Order, Colors & Click Targets") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Choose what provider clicks open on the rail and in the menu bar. Apps use the link if unavailable.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 ForEach(Array(usageStore.providerOrder.enumerated()), id: \.element) { index, provider in
-                    HStack(spacing: 10) {
-                        ProviderIcon(
-                            provider: provider,
-                            size: 19,
-                            accentHex: usageStore.providerAccentHex[provider]
-                        )
-                        Text(provider.displayName)
-                            .frame(width: 90, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(spacing: 10) {
+                            ProviderIcon(
+                                provider: provider,
+                                size: 19,
+                                accentHex: usageStore.providerAccentHex[provider]
+                            )
+                            Text(provider.displayName)
+                                .frame(width: 90, alignment: .leading)
 
-                        ColorPicker(
-                            "Accent",
-                            selection: providerColorBinding(provider),
-                            supportsOpacity: false
-                        )
-                        .labelsHidden()
-                        .frame(width: 30)
+                            ColorPicker(
+                                "Accent",
+                                selection: providerColorBinding(provider),
+                                supportsOpacity: false
+                            )
+                            .labelsHidden()
+                            .frame(width: 30)
 
-                        Button("Reset") {
-                            usageStore.setProviderAccent(nil, for: provider)
+                            Button("Reset") {
+                                usageStore.setProviderAccent(nil, for: provider)
+                            }
+                            .controlSize(.small)
+                            .help("Use default provider color")
+
+                            Spacer()
+
+                            Button {
+                                usageStore.moveProvider(provider, direction: -1)
+                            } label: {
+                                Image(systemName: "chevron.up")
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(index == 0)
+                            .help("Move provider up")
+
+                            Button {
+                                usageStore.moveProvider(provider, direction: 1)
+                            } label: {
+                                Image(systemName: "chevron.down")
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(index == usageStore.providerOrder.count - 1)
+                            .help("Move provider down")
                         }
-                        .controlSize(.small)
-                        .help("Use default provider color")
-
-                        TextField("Web URL", text: providerURLBinding(provider))
-                            .textFieldStyle(.roundedBorder)
-                            .frame(maxWidth: 260)
-                            .help("Clicking this provider/account on the rail opens this URL unless the account has its own override.")
-
-                        Spacer()
-
-                        Button {
-                            usageStore.moveProvider(provider, direction: -1)
-                        } label: {
-                            Image(systemName: "chevron.up")
-                        }
-                        .buttonStyle(.borderless)
-                        .disabled(index == 0)
-                        .help("Move provider up")
-
-                        Button {
-                            usageStore.moveProvider(provider, direction: 1)
-                        } label: {
-                            Image(systemName: "chevron.down")
-                        }
-                        .buttonStyle(.borderless)
-                        .disabled(index == usageStore.providerOrder.count - 1)
-                        .help("Move provider down")
+                        ProviderOpenTargetSettings(provider: provider, usageStore: usageStore)
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
+                    .padding(12)
                     .background(.secondary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
                 }
             }
             .padding(.vertical, 6)
         }
-    }
-
-    private func providerURLBinding(_ provider: ProviderID) -> Binding<String> {
-        Binding(
-            get: { usageStore.providerWebURL(for: provider) },
-            set: { usageStore.setProviderWebURL($0, for: provider) }
-        )
     }
 
     private func providerColorBinding(_ provider: ProviderID) -> Binding<Color> {

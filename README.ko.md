@@ -38,6 +38,12 @@ UsageDock은 AI 서비스의 사용량과 리셋 시간을 한눈에 확인할 �
 - macOS 메뉴 막대에 컴팩트한 상태 항목과 팝오버를 제공합니다.
 - 외형, 위치, 표시 계정 및 메뉴 막대 설정이 재시작 후에도 유지됩니다.
 
+## 클릭 시 열 대상
+
+**Settings → Data → Provider Order, Colors & Click Targets**에서 제공자별로 **App(기본값)** 또는 **Link**를 선택합니다. **Choose App…**에서 실행 중인 앱을 선택하거나 `/Applications`에서 시작하는 Finder 파일 선택기로 `.app`을 지정할 수 있습니다. 이름과 아이콘이 표시되고 설정은 재시작 후에도 유지됩니다. 레일, 계정 메뉴, 메뉴 막대의 계정 행에 같은 설정이 적용됩니다.
+
+설치된 기본 앱은 Claude.app, Codex의 ChatGPT.app, Antigravity.app, Kimi Code.app, Cursor.app, Grok의 Grok Bot.app입니다. 앱이 없거나 실행되지 않으면 편집 가능한 대체 URL을 열고 설정과 도구 설명에 상태를 표시합니다. 계정 URL이 우선하며, 비어 있거나 잘못된 URL은 유효한 제공자 URL로 대체됩니다. **Use Default App / Use Default URL**로 기본값을 복원합니다. 앱 선택은 로그인 전용 계정 정책에 영향을 주지 않습니다.
+
 ## 계정 정책
 
 UsageDock은 **로그인 전용**입니다.
