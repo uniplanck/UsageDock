@@ -142,3 +142,8 @@
 "App not found. Clicks open the link. Choose another app or use the default." = "アプリが見つからないため、クリック時はリンクを開きます。別のアプリを選ぶか、既定のアプリに戻してください。";
 "App could not open. Using the link. Choose another app or try again." = "アプリを開けないため、リンクを開きます。別のアプリを選ぶか、もう一度お試しください。";
 "Link could not open. Check the URL and your default browser." = "リンクを開けませんでした。URLと既定のブラウザを確認してください。";
+"Global follows the Display defaults. Choose a quota by name to use a specific model and window for this account. Hidden or unavailable quotas show no value until enabled and available again." = "「全体設定」は表示設定の既定値に従います。利用枠を名前で選ぶと、このアカウントのモデルと期間を指定できます。非表示・取得できない利用枠は、有効かつ取得可能になるまで値を表示しません。";
+"Unavailable quota: %@" = "取得できない利用枠: %@";
+"%@ (hidden)" = "%@（非表示）";
+"Outer" = "外側";
+"Inner" = "内側";

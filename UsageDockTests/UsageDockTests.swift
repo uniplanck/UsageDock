@@ -146,6 +146,426 @@ final class UsageAggregatorTests: XCTestCase {
 }
 
 @MainActor
+final class AntigravityRailQuotaTests: XCTestCase {
+    private let fixtureText = """
+    Gemini Models\t5 hour\t80%\t2026-10-22T17:00:00Z
+    Gemini Models\tweekly\t60%\t2026-10-29T17:00:00Z
+    Claude and GPT models\t5 hour\t45%\t2026-10-22T18:00:00Z
+    Claude and GPT models\tweekly\t25%\t2026-10-29T18:00:00Z
+    """
+
+    private func fixtureBuckets() throws -> [UsageBucket] {
+        try AntigravityUsageAdapter.parseUsage(text: fixtureText)
+    }
+
+    private func date(_ value: String) -> Date {
+        ISO8601DateFormatter().date(from: value)!
+    }
+
+    private func bucket(_ quotaID: String, in buckets: [UsageBucket]) throws -> UsageBucket {
+        try XCTUnwrap(buckets.first(where: { $0.quotaID == quotaID }))
+    }
+
+    func testAntigravityFixtureParsesAllBucketsWithActualValuesAndResets() throws {
+        let buckets = try fixtureBuckets()
+        let expected: [(id: String, label: String, kind: UsageWindowKind, percent: Double, reset: String)] = [
+            ("antigravity-gemini-models-fiveHour", "Gemini Models · 5h", .fiveHour, 0.20, "2026-10-22T17:00:00Z"),
+            ("antigravity-gemini-models-weekly", "Gemini Models · 1w", .weekly, 0.40, "2026-10-29T17:00:00Z"),
+            ("antigravity-claude-and-gpt-models-fiveHour", "Claude and GPT models · 5h", .fiveHour, 0.55, "2026-10-22T18:00:00Z"),
+            ("antigravity-claude-and-gpt-models-weekly", "Claude and GPT models · 1w", .weekly, 0.75, "2026-10-29T18:00:00Z")
+        ]
+
+        XCTAssertEqual(buckets.count, expected.count)
+        for item in expected {
+            let parsed = try bucket(item.id, in: buckets)
+            XCTAssertEqual(parsed.label, item.label)
+            XCTAssertEqual(parsed.kind, item.kind)
+            XCTAssertEqual(parsed.percentUsed ?? -1, item.percent, accuracy: 0.0001)
+            XCTAssertEqual(parsed.resetsAt, date(item.reset))
+        }
+    }
+
+    func testAntigravityRailBucketSourcesReturnSelectedValuesAndResetDates() throws {
+        let buckets = try fixtureBuckets()
+        let accountID = UUID()
+        let account = UsageAccount(
+            id: accountID,
+            provider: .antigravity,
+            name: "Antigravity Session",
+            source: .currentSession,
+            buckets: buckets
+        )
+        let suiteName = "UsageDockTests.AntigravityRailValues.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = UsageStore(defaults: defaults)
+        store.accounts = [account]
+        let target = RailDisplayTarget.account(id: accountID, provider: .antigravity)
+        let expected: [(id: String, percent: Double, reset: String)] = [
+            ("antigravity-gemini-models-fiveHour", 0.20, "2026-10-22T17:00:00Z"),
+            ("antigravity-gemini-models-weekly", 0.40, "2026-10-29T17:00:00Z"),
+            ("antigravity-claude-and-gpt-models-fiveHour", 0.55, "2026-10-22T18:00:00Z"),
+            ("antigravity-claude-and-gpt-models-weekly", 0.75, "2026-10-29T18:00:00Z")
+        ]
+
+        for item in expected {
+            let source = RailQuotaSource.bucket(quotaID: item.id)
+            let aggregate = try XCTUnwrap(store.railAggregate(for: target, source: source))
+            XCTAssertEqual(aggregate.quotaID, item.id)
+            XCTAssertEqual(aggregate.percentUsed ?? -1, item.percent, accuracy: 0.0001)
+            XCTAssertEqual(store.railDisplayPercent(for: target, source: source) ?? -1, item.percent, accuracy: 0.0001)
+            XCTAssertEqual(store.railResetDate(for: target, source: source), date(item.reset))
+            store.presentationMode = .remaining
+            XCTAssertEqual(store.railDisplayPercent(for: target, source: source) ?? -1, 1 - item.percent, accuracy: 0.0001)
+            store.presentationMode = .used
+        }
+    }
+
+    func testAntigravityDefaultsAndLegacyWindowSelectionStayUnchanged() throws {
+        let suiteName = "UsageDockTests.AntigravityRailDefaults.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = UsageStore(defaults: defaults)
+        let buckets = try fixtureBuckets()
+        let account = UsageAccount(provider: .antigravity, name: "Antigravity", source: .currentSession, buckets: buckets)
+        store.accounts = [account]
+        let target = RailDisplayTarget.account(id: account.id, provider: .antigravity)
+
+        XCTAssertEqual(store.railPercentSource(for: target), .automatic)
+        XCTAssertEqual(store.railOuterRingSource(for: target), .automatic)
+        XCTAssertEqual(store.railInnerRingSource(for: target), .none)
+        XCTAssertEqual(store.railTimeSource(for: target), .weekly)
+        XCTAssertEqual(store.railAggregate(for: target, source: .fiveHour)?.quotaID, buckets[0].quotaID)
+        XCTAssertEqual(store.railAggregate(for: target, source: .weekly)?.quotaID, buckets[1].quotaID)
+        XCTAssertEqual(store.railDisplayPercent(for: target, source: .automatic) ?? -1, 0.75, accuracy: 0.0001)
+        XCTAssertEqual(store.railResetDate(for: target, source: .automatic), buckets[3].resetsAt)
+        XCTAssertNil(store.railDisplayPercent(for: target, source: .none))
+        XCTAssertNil(store.railResetDate(for: target, source: .none))
+    }
+
+    func testAntigravityRailOverridesPersistIndependentlyByAccountAndProvider() throws {
+        let buckets = try fixtureBuckets()
+        let firstID = UUID()
+        let secondID = UUID()
+        let claudeID = UUID()
+        var first = UsageAccount(
+            id: firstID,
+            provider: .antigravity,
+            name: "Antigravity A",
+            source: .currentSession,
+            buckets: buckets
+        )
+        first.railPercentSource = .bucket(quotaID: "antigravity-gemini-models-fiveHour")
+        first.railOuterRingSource = .bucket(quotaID: "antigravity-gemini-models-weekly")
+        first.railInnerRingSource = .bucket(quotaID: "antigravity-claude-and-gpt-models-fiveHour")
+        first.railTimeSource = .bucket(quotaID: "antigravity-claude-and-gpt-models-weekly")
+        let second = UsageAccount(
+            id: secondID,
+            provider: .antigravity,
+            name: "Antigravity B",
+            source: .currentSession,
+            buckets: buckets
+        )
+        let otherProvider = UsageAccount(
+            id: claudeID,
+            provider: .claude,
+            name: "Claude",
+            source: .currentSession,
+            buckets: [UsageBucket(quotaID: "claude-weekly", label: "1w", kind: .weekly, percentUsed: 0.3)]
+        )
+        let suiteName = "UsageDockTests.AntigravityRailOverrides.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = UsageStore(defaults: defaults)
+        store.railPercentSource = .automatic
+        store.railOuterRingSource = .weekly
+        store.railInnerRingSource = .none
+        store.railTimeSource = .fiveHour
+        store.accounts = [first, second, otherProvider]
+
+        let restored = UsageStore(defaults: defaults)
+        let firstTarget = RailDisplayTarget.account(id: firstID, provider: .antigravity)
+        let secondTarget = RailDisplayTarget.account(id: secondID, provider: .antigravity)
+        let providerTarget = RailDisplayTarget.provider(.claude)
+        XCTAssertEqual(restored.railPercentSource(for: firstTarget), .bucket(quotaID: "antigravity-gemini-models-fiveHour"))
+        XCTAssertEqual(restored.railOuterRingSource(for: firstTarget), .bucket(quotaID: "antigravity-gemini-models-weekly"))
+        XCTAssertEqual(restored.railInnerRingSource(for: firstTarget), .bucket(quotaID: "antigravity-claude-and-gpt-models-fiveHour"))
+        XCTAssertEqual(restored.railTimeSource(for: firstTarget), .bucket(quotaID: "antigravity-claude-and-gpt-models-weekly"))
+        XCTAssertEqual(restored.railPercentSource(for: secondTarget), .automatic)
+        XCTAssertEqual(restored.railOuterRingSource(for: secondTarget), .weekly)
+        XCTAssertEqual(restored.railInnerRingSource(for: secondTarget), .none)
+        XCTAssertEqual(restored.railTimeSource(for: secondTarget), .fiveHour)
+        XCTAssertEqual(restored.railPercentSource(for: providerTarget), .automatic)
+        XCTAssertEqual(restored.railOuterRingSource(for: providerTarget), .weekly)
+        XCTAssertEqual(restored.railInnerRingSource(for: providerTarget), .none)
+        XCTAssertEqual(restored.railTimeSource(for: providerTarget), .fiveHour)
+    }
+
+    func testRailQuotaSourceKeepsLegacyRawValuesAndBucketEncoding() throws {
+        let expected: [(source: RailQuotaSource, raw: String)] = [
+            (.none, "none"),
+            (.automatic, "automatic"),
+            (.fiveHour, "fiveHour"),
+            (.weekly, "weekly"),
+            (.bucket(quotaID: "antigravity-claude-and-gpt-models-weekly"), "bucket:antigravity-claude-and-gpt-models-weekly")
+        ]
+
+        for item in expected {
+            XCTAssertEqual(item.source.rawValue, item.raw)
+            let encoded = try JSONEncoder().encode(item.source)
+            XCTAssertEqual(String(data: encoded, encoding: .utf8), "\"\(item.raw)\"")
+            XCTAssertEqual(try JSONDecoder().decode(RailQuotaSource.self, from: encoded), item.source)
+        }
+    }
+
+    func testAntigravityOldSettingsAndAccountsWithoutOverridesRemainReadable() throws {
+        let accountID = UUID()
+        let legacyAccount = UsageAccount(
+            id: accountID,
+            provider: .antigravity,
+            name: "Legacy Antigravity",
+            source: .currentSession,
+            buckets: [UsageBucket(quotaID: "legacy-weekly", label: "1w", kind: .weekly, percentUsed: 0.4)]
+        )
+        var legacyObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(legacyAccount)) as? [String: Any]
+        )
+        for key in ["railPercentSource", "railOuterRingSource", "railInnerRingSource", "railTimeSource"] {
+            legacyObject.removeValue(forKey: key)
+        }
+        let suiteName = "UsageDockTests.AntigravityLegacySettings.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(
+            try JSONSerialization.data(withJSONObject: [legacyObject]),
+            forKey: "UsageDock.accounts.v3"
+        )
+        defaults.set("fiveHour", forKey: "UsageDock.railPercentSource.v1")
+        defaults.set("weekly", forKey: "UsageDock.railOuterRingSource.v1")
+        defaults.set("none", forKey: "UsageDock.railInnerRingSource.v1")
+        defaults.set("fiveHour", forKey: "UsageDock.railTimeSource.v1")
+
+        let store = UsageStore(defaults: defaults)
+        let account = try XCTUnwrap(store.accounts.first)
+        XCTAssertEqual(account.id, accountID)
+        XCTAssertNil(account.railPercentSource)
+        XCTAssertNil(account.railOuterRingSource)
+        XCTAssertNil(account.railInnerRingSource)
+        XCTAssertNil(account.railTimeSource)
+        let target = RailDisplayTarget.account(id: accountID, provider: .antigravity)
+        XCTAssertEqual(store.railPercentSource(for: target), .fiveHour)
+        XCTAssertEqual(store.railOuterRingSource(for: target), .weekly)
+        XCTAssertEqual(store.railInnerRingSource(for: target), .none)
+        XCTAssertEqual(store.railTimeSource(for: target), .fiveHour)
+    }
+
+    func testAntigravityBucketSelectionSurvivesRefreshUUIDRenameAndReorder() throws {
+        let original = try fixtureBuckets().enumerated().map { index, bucket in
+            var bucket = bucket
+            bucket.id = UUID(uuidString: "00000000-0000-0000-0000-00000000000\(index + 1)")!
+            return bucket
+        }
+        let fetched = original.reversed().map { bucket -> UsageBucket in
+            var refreshed = bucket
+            refreshed.id = UUID()
+            refreshed.label = "Renamed \(bucket.label)"
+            refreshed.percentUsed = min((bucket.percentUsed ?? 0) + 0.1, 1)
+            return refreshed
+        }
+        let merged = UsageStore.mergeRefreshedBuckets(existing: original, fetched: fetched)
+        XCTAssertEqual(merged.map(\.quotaID), original.map(\.quotaID))
+        for saved in original {
+            let refreshed = try XCTUnwrap(merged.first(where: { $0.quotaID == saved.quotaID }))
+            XCTAssertEqual(refreshed.id, saved.id)
+            XCTAssertTrue(refreshed.label.hasPrefix("Renamed "))
+        }
+
+        let selectedID = "antigravity-claude-and-gpt-models-weekly"
+        let accountID = UUID()
+        var account = UsageAccount(
+            id: accountID,
+            provider: .antigravity,
+            name: "Antigravity",
+            source: .currentSession,
+            railPercentSource: .bucket(quotaID: selectedID),
+            buckets: original
+        )
+        let suiteName = "UsageDockTests.AntigravityRefreshSelection.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = UsageStore(defaults: defaults)
+        store.accounts = [account]
+        account.buckets = merged
+        store.accounts = [account]
+        let target = RailDisplayTarget.account(id: accountID, provider: .antigravity)
+        let aggregate = try XCTUnwrap(store.railAggregate(for: target, source: .bucket(quotaID: selectedID)))
+        let selectedFetched = try XCTUnwrap(fetched.first(where: { $0.quotaID == selectedID }))
+        XCTAssertEqual(store.railPercentSource(for: target), .bucket(quotaID: selectedID))
+        XCTAssertEqual(aggregate.label, selectedFetched.label)
+        XCTAssertEqual(aggregate.percentUsed ?? -1, selectedFetched.percentUsed ?? -1, accuracy: 0.0001)
+    }
+
+    func testAntigravityHiddenOrMissingSelectedBucketDoesNotFallbackAndRecovers() throws {
+        let allBuckets = try fixtureBuckets()
+        let selectedID = "antigravity-gemini-models-fiveHour"
+        let weeklyID = "antigravity-gemini-models-weekly"
+        let accountID = UUID()
+        var account = UsageAccount(
+            id: accountID,
+            provider: .antigravity,
+            name: "Antigravity",
+            source: .currentSession,
+            railPercentSource: .bucket(quotaID: selectedID),
+            buckets: allBuckets
+        )
+        let suiteName = "UsageDockTests.AntigravityMissingSelection.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = UsageStore(defaults: defaults)
+        let target = RailDisplayTarget.account(id: accountID, provider: .antigravity)
+
+        account.buckets[account.buckets.firstIndex(where: { $0.quotaID == selectedID })!].isEnabled = false
+        store.accounts = [account]
+        XCTAssertNil(store.railAggregate(for: target, source: .bucket(quotaID: selectedID)))
+        XCTAssertNil(store.railDisplayPercent(for: target, source: .bucket(quotaID: selectedID)))
+        XCTAssertNil(store.railResetDate(for: target, source: .bucket(quotaID: selectedID)))
+        XCTAssertEqual(store.railAggregate(for: target, source: .bucket(quotaID: weeklyID))?.quotaID, weeklyID)
+
+        account.buckets[account.buckets.firstIndex(where: { $0.quotaID == selectedID })!].isEnabled = true
+        store.accounts = [account]
+        XCTAssertEqual(store.railAggregate(for: target, source: .bucket(quotaID: selectedID))?.quotaID, selectedID)
+
+        account.buckets.removeAll(where: { $0.quotaID == selectedID })
+        store.accounts = [account]
+        XCTAssertNil(store.railAggregate(for: target, source: .bucket(quotaID: selectedID)))
+        XCTAssertNil(store.railDisplayPercent(for: target, source: .bucket(quotaID: selectedID)))
+        XCTAssertNil(store.railResetDate(for: target, source: .bucket(quotaID: selectedID)))
+        let missingSelection = RailQuotaSource.bucket(quotaID: selectedID)
+        XCTAssertTrue(RailQuotaSource.options(buckets: account.buckets, selection: missingSelection, allowNone: false).contains(missingSelection))
+
+        account.buckets = allBuckets
+        store.accounts = [account]
+        XCTAssertEqual(store.railAggregate(for: target, source: missingSelection)?.quotaID, selectedID)
+    }
+
+    func testAntigravityQuotaOptionsIncludeHiddenMissingAndNoDuplicates() throws {
+        var buckets = try fixtureBuckets()
+        var hidden = try bucket("antigravity-claude-and-gpt-models-weekly", in: buckets)
+        hidden.id = UUID()
+        hidden.isEnabled = false
+        hidden.label = "Hidden renamed Claude and GPT models · 1w"
+        buckets.append(hidden)
+        let uniqueHiddenID = "antigravity-hidden-model-weekly"
+        buckets.append(UsageBucket(quotaID: uniqueHiddenID, label: "Hidden model · 1w", kind: .weekly, isEnabled: false))
+        let missing = RailQuotaSource.bucket(quotaID: "antigravity-removed-model-weekly")
+
+        let options = RailQuotaSource.options(buckets: buckets, selection: missing, allowNone: false)
+        let bucketIDs = options.compactMap { source -> String? in
+            guard case .bucket(let quotaID) = source else { return nil }
+            return quotaID
+        }
+        XCTAssertFalse(options.contains(.none))
+        XCTAssertTrue(bucketIDs.contains(hidden.quotaID))
+        XCTAssertTrue(bucketIDs.contains(uniqueHiddenID))
+        XCTAssertTrue(bucketIDs.contains("antigravity-removed-model-weekly"))
+        XCTAssertEqual(bucketIDs.filter { $0 == hidden.quotaID }.count, 1)
+        XCTAssertEqual(Set(options).count, options.count)
+        XCTAssertTrue(RailQuotaSource.options(buckets: buckets, selection: missing, allowNone: true).contains(.none))
+        XCTAssertFalse(RailQuotaSource.options(buckets: buckets, selection: .some(.none), allowNone: false).contains(.none))
+    }
+
+    func testNamedQuotaSelectionAlsoWorksForOtherProvidersAndWindowKinds() throws {
+        let buckets = [
+            UsageBucket(quotaID: "included-credits", label: "Included credits", kind: .credits, percentUsed: 0.2),
+            UsageBucket(quotaID: "extra-credits", label: "Additional credits", kind: .credits, percentUsed: 0.6)
+        ]
+        let selected = RailQuotaSource.bucket(quotaID: "extra-credits")
+        let account = UsageAccount(
+            provider: .codex,
+            name: "Codex",
+            source: .currentSession,
+            railPercentSource: selected,
+            buckets: buckets
+        )
+        let suiteName = "UsageDockTests.OtherProviderRailQuota.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = UsageStore(defaults: defaults)
+        store.accounts = [account]
+        let target = RailDisplayTarget.account(id: account.id, provider: .codex)
+        XCTAssertTrue(RailQuotaSource.options(buckets: buckets, selection: nil, allowNone: false).contains(selected))
+        XCTAssertEqual(store.railPercentSource(for: target), selected)
+        XCTAssertEqual(store.railDisplayPercent(for: target, source: selected) ?? -1, 0.6, accuracy: 0.0001)
+    }
+
+    func testQuotaNameWrapsInsteadOfTruncatingAtNarrowWidths() {
+        func height(_ name: String, width: CGFloat) -> CGFloat {
+            let view = NSHostingView(rootView: QuotaNameLabel(name: name)
+                .font(.caption.weight(.medium))
+                .frame(width: width))
+            return view.fittingSize.height
+        }
+
+        let name = "Claude and GPT models · 1w"
+        let singleLineHeight = height("5h", width: 100)
+        XCTAssertGreaterThan(height(name, width: 100), singleLineHeight * 1.5)
+        XCTAssertEqual(height(name, width: 400), singleLineHeight, accuracy: 1)
+    }
+
+    func testAccountEditorRendersNamedQuotasInEnglishAndJapanese() throws {
+        let account = UsageAccount(
+            provider: .antigravity,
+            name: "Antigravity",
+            source: .currentSession,
+            railPercentSource: .bucket(quotaID: "antigravity-claude-and-gpt-models-fiveHour"),
+            railOuterRingSource: .bucket(quotaID: "antigravity-gemini-models-weekly"),
+            railInnerRingSource: .bucket(quotaID: "antigravity-claude-and-gpt-models-weekly"),
+            railTimeSource: .bucket(quotaID: "antigravity-claude-and-gpt-models-weekly"),
+            buckets: try fixtureBuckets()
+        )
+
+        // Match the account content area at the minimum and default settings
+        // window widths, including native macOS pickers in the render.
+        for width: CGFloat in [630, 670] {
+            for language in ["en", "ja"] {
+                let editor = AccountEditor(
+                    account: .constant(account),
+                    statusText: "Live",
+                    presentationMode: .used,
+                    canMoveUp: false,
+                    canMoveDown: false,
+                    supportsMultiplier: false,
+                    multiplierDetectionText: nil,
+                    onMoveUp: {},
+                    onMoveDown: {},
+                    onAutoDetectMultiplier: {},
+                    onDelete: {}
+                )
+                let view = NSHostingView(rootView: editor
+                    .environment(\.locale, Locale(identifier: language))
+                    .environment(\.colorScheme, .light)
+                    .frame(width: width)
+                    .padding(16)
+                    .background(Color(nsColor: .windowBackgroundColor)))
+                view.appearance = NSAppearance(named: .aqua)
+                let size = view.fittingSize
+                XCTAssertEqual(size.width, width + 32, accuracy: 1)
+                XCTAssertGreaterThan(size.height, 300)
+                view.frame = NSRect(origin: .zero, size: size)
+                view.layoutSubtreeIfNeeded()
+                let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+                attachment.name = "AccountEditor-\(language)-\(Int(width))"
+                attachment.lifetime = .keepAlways
+                add(attachment)
+            }
+        }
+    }
+}
+
+@MainActor
 final class PersistenceTests: XCTestCase {
     private func loginAccount(
         provider: ProviderID,

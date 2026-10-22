@@ -1507,8 +1507,7 @@ private struct ProviderSettingsSection: View {
                 ForEach(summary.aggregates) { aggregate in
                     let displayed = usageStore.displayPercent(aggregate.percentUsed)
                     HStack(spacing: 12) {
-                        Text(aggregate.label)
-                            .lineLimit(1)
+                        QuotaNameLabel(name: aggregate.label)
                             .frame(width: 145, alignment: .leading)
 
                         ProgressView(value: displayed ?? 0)
@@ -1576,7 +1575,19 @@ private struct ProviderSettingsSection: View {
     }
 }
 
-private struct AccountEditor: View {
+/// Shared by account and combined quota rows for every provider.
+struct QuotaNameLabel: View {
+    let name: String
+
+    var body: some View {
+        Text(verbatim: name)
+            .lineLimit(nil)
+            .fixedSize(horizontal: false, vertical: true)
+            .help(name)
+    }
+}
+
+struct AccountEditor: View {
     @Binding var account: UsageAccount
     let statusText: String
     let presentationMode: UsagePresentationMode
@@ -1704,16 +1715,13 @@ private struct AccountEditor: View {
                                 .labelsHidden()
                                 .controlSize(.mini)
 
-                            Text(bucket.label)
+                            QuotaNameLabel(name: bucket.label)
                                 .font(.caption.weight(.medium))
-                                .frame(width: 100, alignment: .leading)
-                                .lineLimit(1)
+                                .frame(maxWidth: .infinity, alignment: .leading)
 
                             Text(percentText(displayPercent(bucket.resolvedPercentUsed)))
                                 .font(.caption.monospacedDigit())
                                 .frame(width: 44, alignment: .trailing)
-
-                            Spacer()
 
                             Button {
                                 moveBucket(bucket.id, direction: -1)
@@ -1749,15 +1757,14 @@ private struct AccountEditor: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
 
-            HStack(spacing: 12) {
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 12) {
                 accountQuotaPicker("Percent", selection: $account.railPercentSource, allowNone: false)
                 accountQuotaPicker("Outer", selection: $account.railOuterRingSource, allowNone: true)
                 accountQuotaPicker("Inner", selection: $account.railInnerRingSource, allowNone: true)
                 accountQuotaPicker("Timer", selection: $account.railTimeSource, allowNone: false)
-                Spacer()
             }
 
-            Text("Global follows the Display defaults. Override only this account when, for example, Codex should show 1w while Kimi shows 5h.")
+            Text("Global follows the Display defaults. Choose a quota by name to use a specific model and window for this account. Hidden or unavailable quotas show no value until enabled and available again.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
@@ -1769,18 +1776,28 @@ private struct AccountEditor: View {
         allowNone: Bool
     ) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title)
+            Text(LocalizedStringKey(title))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            Picker(title, selection: selection) {
+            Picker(LocalizedStringKey(title), selection: selection) {
                 Text("Global").tag(Optional<RailQuotaSource>.none)
-                ForEach(RailQuotaSource.allCases.filter { allowNone || $0 != .none }) { source in
-                    Text(LocalizedStringKey(source.label)).tag(Optional<RailQuotaSource>.some(source))
+                ForEach(RailQuotaSource.options(buckets: account.buckets, selection: selection.wrappedValue, allowNone: allowNone)) { source in
+                    accountQuotaLabel(source).tag(Optional<RailQuotaSource>.some(source))
                 }
             }
             .labelsHidden()
-            .frame(width: 104)
+            .frame(maxWidth: .infinity)
+            .help(accountQuotaLabel(selection.wrappedValue))
         }
+    }
+
+    private func accountQuotaLabel(_ source: RailQuotaSource?) -> Text {
+        guard let source else { return Text("Global") }
+        guard case .bucket(let quotaID) = source else { return Text(LocalizedStringKey(source.label)) }
+        guard let bucket = account.buckets.first(where: { $0.quotaID == quotaID }) else {
+            return Text("Unavailable quota: \(quotaID)")
+        }
+        return bucket.isEnabled ? Text(bucket.label) : Text("\(bucket.label) (hidden)")
     }
 
     private var multiplierControls: some View {
