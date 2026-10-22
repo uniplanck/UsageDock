@@ -1,4 +1,5 @@
 import CryptoKit
+import CoreFoundation
 import Foundation
 import Security
 
@@ -574,36 +575,92 @@ struct GeminiUsageAdapter: UsageProviderAdapter {
     }
 }
 
+struct KimiUsageFetch {
+    var buckets: [UsageBucket]
+    var notice: String?
+}
+
 struct KimiUsageAdapter: UsageProviderAdapter {
     let provider: ProviderID = .kimi
     let credentialPath: String?
+    let desktopCredentialPath: String?
+    let session: URLSession
 
-    init(credentialPath: String? = nil) {
+    static let totalUnavailableNotice = "Kimi total usage is unavailable. Open Kimi and sign in to the same account. Showing Code quotas only."
+    static let codeUnavailableNotice = "Kimi Code quotas could not be refreshed. Showing total usage only."
+
+    init(credentialPath: String? = nil, desktopCredentialPath: String? = nil, session: URLSession = .shared) {
         self.credentialPath = credentialPath
+        self.desktopCredentialPath = desktopCredentialPath
+        self.session = session
     }
 
     func fetchAccounts() async throws -> [UsageAccount] {
+        let outcome = try await fetchOutcome()
+        return [UsageAccount(provider: .kimi, name: "Current Session", source: .currentSession, buckets: outcome.buckets)]
+    }
+
+    func fetchOutcome() async throws -> KimiUsageFetch {
         let credentials = try await KimiCredentialResolver().credentials(credentialPath: credentialPath)
-        guard let url = URL(string: credentials.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/usages") else {
-            throw UsageAdapterError.invalidResponse("Kimi managed API base URL is invalid.")
+        var buckets: [UsageBucket] = []
+        var codeError: Error?
+        do {
+            guard let url = URL(string: credentials.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/usages") else {
+                throw UsageAdapterError.invalidResponse("Kimi managed API base URL is invalid.")
+            }
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.timeoutInterval = 20
+            let (data, response) = try await session.data(for: request)
+            try HTTPUsageResponseValidator.validate(response: response, data: data, provider: .kimi)
+            buckets = try Self.parseUsage(data: data)
+        } catch {
+            codeError = error
         }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        try HTTPUsageResponseValidator.validate(response: response, data: data, provider: .kimi)
-
-        return [
-            UsageAccount(
-                provider: .kimi,
-                name: "Current Session",
-                source: .currentSession,
-                buckets: try Self.parseUsage(data: data)
+        do {
+            // The Code OAuth token cannot call the membership API. Read Kimi's
+            // existing desktop session without copying or refreshing its secrets.
+            let token = try KimiDesktopCredentialResolver().accessToken(
+                codeAccessToken: credentials.accessToken,
+                credentialPath: desktopCredentialPath
             )
-        ]
+            var request = URLRequest(url: URL(string: "https://www.kimi.com/apiv2/kimi.gateway.membership.v2.MembershipService/GetSubscription")!)
+            request.httpMethod = "POST"
+            request.httpBody = Data("{}".utf8)
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.setValue("1", forHTTPHeaderField: "Connect-Protocol-Version")
+            request.timeoutInterval = 20
+            let (data, response) = try await session.data(for: request)
+            try HTTPUsageResponseValidator.validate(response: response, data: data, provider: .kimi)
+            buckets.insert(try Self.parseSubscription(data: data), at: 0)
+        } catch {
+            guard !buckets.isEmpty else { throw codeError ?? error }
+            return KimiUsageFetch(buckets: buckets, notice: Self.totalUnavailableNotice)
+        }
+        return KimiUsageFetch(buckets: buckets, notice: codeError == nil ? nil : Self.codeUnavailableNotice)
+    }
+
+    static func parseSubscription(data: Data) throws -> UsageBucket {
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let balances = root["balances"] as? [[String: Any]] else {
+            throw UsageAdapterError.invalidResponse("Kimi subscription response contained no total usage balance.")
+        }
+        let totals = balances.filter {
+            $0["feature"] as? String == "FEATURE_OMNI" &&
+            $0["unit"] as? String == "UNIT_CREDIT" &&
+            $0["type"] as? String == "SUBSCRIPTION"
+        }
+        guard totals.count == 1, let total = totals.first,
+              let used = ratio(total["amountUsedRatio"]),
+              let reset = UsageDateParser.date(from: total["expireTime"]) else {
+            throw UsageAdapterError.invalidResponse("Kimi subscription response contained no unambiguous total usage and reset time.")
+        }
+        return UsageBucket(quotaID: "kimi-total", label: "Total", kind: .custom, percentUsed: used, resetsAt: reset)
     }
 
     static func parseUsage(data: Data) throws -> [UsageBucket] {
@@ -638,6 +695,21 @@ struct KimiUsageAdapter: UsageProviderAdapter {
                 if let bucket = parseQuotaRow(item, fallbackLabel: "Limit \(index + 1)", fallbackMinutes: nil) {
                     bucketsByID[bucket.quotaID] = bucket
                 }
+            }
+        }
+
+        // These fractional pools retain precision lost by the older integer
+        // limit/remaining fields (for example 0.01% weekly usage).
+        if let usages = payload["usages"] as? [String: Any] {
+            for (key, quotaID, label, kind) in [
+                ("limit_5h", "kimi-300", "5h Code", UsageWindowKind.fiveHour),
+                ("limit_7d", "kimi-weekly", "7d Code", UsageWindowKind.weekly)
+            ] {
+                guard let window = usages[key] as? [String: Any], let used = ratio(window["used_ratio"]) else { continue }
+                bucketsByID[quotaID] = UsageBucket(
+                    quotaID: quotaID, label: label, kind: kind, percentUsed: used,
+                    resetsAt: UsageDateParser.date(from: window["reset_time"])
+                )
             }
         }
 
@@ -720,8 +792,8 @@ struct KimiUsageAdapter: UsageProviderAdapter {
 
     private static func labelForWindow(minutes: Int?, fallback: String) -> String {
         guard let minutes else { return fallback }
-        if (295...305).contains(minutes) { return "5h" }
-        if (10_000...10_160).contains(minutes) { return "1w" }
+        if (295...305).contains(minutes) { return "5h Code" }
+        if (10_000...10_160).contains(minutes) { return "7d Code" }
         if minutes % 10_080 == 0 { return "\(minutes / 10_080)w" }
         if minutes % 1_440 == 0 { return "\(minutes / 1_440)d" }
         if minutes % 60 == 0 { return "\(minutes / 60)h" }
@@ -745,6 +817,12 @@ struct KimiUsageAdapter: UsageProviderAdapter {
         case let string as String: Double(string)
         default: nil
         }
+    }
+
+    private static func ratio(_ value: Any?) -> Double? {
+        if let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() { return nil }
+        guard let number = numeric(value), number.isFinite, (0...1).contains(number) else { return nil }
+        return number
     }
 
     private static func rank(_ kind: UsageWindowKind) -> Int {
@@ -1552,6 +1630,45 @@ private struct GeminiCredentialResolver {
         case let string as String: return Double(string)
         default: return nil
         }
+    }
+}
+
+struct KimiDesktopCredentialResolver {
+    func accessToken(codeAccessToken: String, credentialPath: String? = nil) throws -> String {
+        let url = credentialPath.map { URL(fileURLWithPath: $0) }
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
+                "Library/Application Support/kimi-desktop/daimon-share/daimon/config.json"
+            )
+        guard let data = try? Data(contentsOf: url) else {
+            throw UsageAdapterError.credentialsUnavailable(KimiUsageAdapter.totalUnavailableNotice)
+        }
+        return try Self.parseAccessToken(data: data, codeAccessToken: codeAccessToken)
+    }
+
+    static func parseAccessToken(data: Data, codeAccessToken: String, now: Date = Date()) throws -> String {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let credentials = root["credentials"] as? [String: Any],
+              let web = credentials["kimiWeb"] as? [String: Any],
+              let token = web["accessToken"] as? String, !token.isEmpty,
+              let webClaims = claims(token), let codeClaims = claims(codeAccessToken),
+              let webUser = webClaims["sub"] as? String, !webUser.isEmpty,
+              let codeUser = codeClaims["sub"] as? String, webUser == codeUser,
+              let expiration = webClaims["exp"] as? NSNumber,
+              expiration.doubleValue.isFinite, expiration.doubleValue > now.timeIntervalSince1970 else {
+            // Never combine the current desktop user's plan with another CLI
+            // profile, and never persist the desktop token in UsageDock settings.
+            throw UsageAdapterError.credentialsUnavailable(KimiUsageAdapter.totalUnavailableNotice)
+        }
+        return token
+    }
+
+    private static func claims(_ token: String) -> [String: Any]? {
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3 else { return nil }
+        var payload = String(parts[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        payload += String(repeating: "=", count: (4 - payload.count % 4) % 4)
+        guard let data = Data(base64Encoded: payload) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 }
 

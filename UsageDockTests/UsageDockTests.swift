@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import XCTest
 @testable import UsageDock
@@ -1255,6 +1256,16 @@ final class LiveUsageAdapterParsingTests: XCTestCase {
                     ]
                 ]
             ],
+            "usages": [
+                "limit_5h": [
+                    "used_ratio": 0.12,
+                    "reset_time": "2026-08-29T18:00:00Z"
+                ],
+                "limit_7d": [
+                    "used_ratio": 0.0001,
+                    "reset_time": "2026-09-05T00:00:00Z"
+                ]
+            ],
             "extra_usage": [
                 "monthly_used_cents": 150,
                 "monthly_charge_limit_cents": 1000,
@@ -1264,15 +1275,155 @@ final class LiveUsageAdapterParsingTests: XCTestCase {
 
         let buckets = try KimiUsageAdapter.parseUsage(data: data)
         let weekly = try XCTUnwrap(buckets.first(where: { $0.kind == .weekly }))
-        XCTAssertEqual(weekly.label, "1w")
-        XCTAssertEqual(weekly.resolvedPercentUsed ?? -1, 0.25, accuracy: 0.0001)
+        XCTAssertEqual(weekly.quotaID, "kimi-weekly")
+        XCTAssertEqual(weekly.label, "7d Code")
+        XCTAssertEqual(weekly.resolvedPercentUsed ?? -1, 0.0001, accuracy: 0.000001)
+        XCTAssertEqual(weekly.resetsAt?.timeIntervalSince1970 ?? -1, 1_788_566_400, accuracy: 0.001)
 
         let fiveHour = try XCTUnwrap(buckets.first(where: { $0.kind == .fiveHour }))
-        XCTAssertEqual(fiveHour.label, "5h")
-        XCTAssertEqual(fiveHour.resolvedPercentUsed ?? -1, 0.20, accuracy: 0.0001)
+        XCTAssertEqual(fiveHour.quotaID, "kimi-300")
+        XCTAssertEqual(fiveHour.label, "5h Code")
+        XCTAssertEqual(fiveHour.resolvedPercentUsed ?? -1, 0.12, accuracy: 0.0001)
+        XCTAssertEqual(fiveHour.resetsAt?.timeIntervalSince1970 ?? -1, 1_788_026_400, accuracy: 0.001)
 
         let extra = try XCTUnwrap(buckets.first(where: { $0.kind == .credits }))
         XCTAssertEqual(extra.resolvedPercentUsed ?? -1, 0.15, accuracy: 0.0001)
+    }
+
+    func testKimiUsageLegacyRowsKeepStableCodeQuotaIDsAndLabels() throws {
+        let data = try jsonData([
+            "usage": [
+                "used": "25",
+                "limit": "100",
+                "resetTime": "2026-09-01T00:00:00Z"
+            ],
+            "limits": [[
+                "name": "rolling-five-hour",
+                "used": "20",
+                "limit": "100",
+                "reset_at": "2026-08-29T18:00:00Z",
+                "window": [
+                    "duration": 300,
+                    "timeUnit": "TIME_UNIT_MINUTE"
+                ]
+            ]]
+        ])
+
+        let buckets = try KimiUsageAdapter.parseUsage(data: data)
+        let weekly = try XCTUnwrap(buckets.first(where: { $0.kind == .weekly }))
+        XCTAssertEqual(weekly.quotaID, "kimi-weekly")
+        XCTAssertEqual(weekly.label, "7d Code")
+        XCTAssertEqual(weekly.resolvedPercentUsed ?? -1, 0.25, accuracy: 0.0001)
+
+        let fiveHour = try XCTUnwrap(buckets.first(where: { $0.kind == .fiveHour }))
+        XCTAssertEqual(fiveHour.quotaID, "kimi-300")
+        XCTAssertEqual(fiveHour.label, "5h Code")
+        XCTAssertEqual(fiveHour.resolvedPercentUsed ?? -1, 0.20, accuracy: 0.0001)
+    }
+
+    func testKimiSubscriptionParsesPlanWideTotalRatiosAndFractionalReset() throws {
+        let reset = "2026-11-07T15:51:00.685263Z"
+        for ratio in [0.0289, 0.029, 0.0] {
+            let data = try jsonData([
+                "balances": [[
+                    "feature": "FEATURE_OMNI",
+                    "unit": "UNIT_CREDIT",
+                    "type": "SUBSCRIPTION",
+                    "amountUsedRatio": ratio,
+                    "expireTime": reset
+                ]]
+            ])
+
+            let bucket = try KimiUsageAdapter.parseSubscription(data: data)
+            XCTAssertEqual(bucket.quotaID, "kimi-total")
+            XCTAssertEqual(bucket.label, "Total")
+            XCTAssertEqual(bucket.kind, .custom)
+            XCTAssertEqual(bucket.resolvedPercentUsed ?? -1, ratio, accuracy: 0.000001)
+            XCTAssertEqual(bucket.resetsAt?.timeIntervalSince1970 ?? -1, 1_794_066_660.685263, accuracy: 0.001)
+        }
+    }
+
+    func testKimiSubscriptionRejectsMissingMalformedAndAmbiguousTotalRows() throws {
+        let validRow: [String: Any] = [
+            "feature": "FEATURE_OMNI",
+            "unit": "UNIT_CREDIT",
+            "type": "SUBSCRIPTION",
+            "amountUsedRatio": 0.0289,
+            "expireTime": "2026-11-07T15:51:00.685263Z"
+        ]
+        var missingRatio = validRow
+        missingRatio.removeValue(forKey: "amountUsedRatio")
+        var missingReset = validRow
+        missingReset.removeValue(forKey: "expireTime")
+
+        let malformedValues: [Any] = [
+            "not-a-number",
+            true,
+            -0.001,
+            1.001
+        ]
+        var invalidRows = [missingRatio, missingReset]
+        invalidRows.append(contentsOf: malformedValues.map { value in
+            var row = validRow
+            row["amountUsedRatio"] = value
+            return row
+        })
+        invalidRows.append(contentsOf: ["feature", "unit", "type"].map { key in
+            var row = validRow
+            row[key] = "WRONG"
+            return row
+        })
+
+        for row in invalidRows {
+            XCTAssertThrowsError(try KimiUsageAdapter.parseSubscription(data: jsonData(["balances": [row]])))
+        }
+
+        XCTAssertThrowsError(
+            try KimiUsageAdapter.parseSubscription(
+                data: jsonData(["balances": [validRow, validRow]])
+            )
+        )
+    }
+
+    func testKimiDesktopCredentialResolverRequiresMatchingUnexpiredWebJWT() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let codeToken = try syntheticJWT(subject: "kimi-user", expiration: now.timeIntervalSince1970 + 3_600)
+        let webToken = try syntheticJWT(subject: "kimi-user", expiration: now.timeIntervalSince1970 + 7_200)
+        let data = try jsonData([
+            "credentials": [
+                "kimiWeb": ["accessToken": webToken]
+            ]
+        ])
+
+        XCTAssertEqual(
+            try KimiDesktopCredentialResolver.parseAccessToken(data: data, codeAccessToken: codeToken, now: now),
+            webToken
+        )
+    }
+
+    func testKimiDesktopCredentialResolverRejectsMismatchedMissingAndExpiredCredentialsWithoutSecrets() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let codeToken = try syntheticJWT(subject: "kimi-user", expiration: now.timeIntervalSince1970 + 3_600)
+        let webToken = try syntheticJWT(subject: "other-user", expiration: now.timeIntervalSince1970 + 7_200)
+        let expiredToken = try syntheticJWT(subject: "kimi-user", expiration: now.timeIntervalSince1970 - 1)
+        let mismatched = try jsonData([
+            "credentials": ["kimiWeb": ["accessToken": webToken]]
+        ])
+        let expired = try jsonData([
+            "credentials": ["kimiWeb": ["accessToken": expiredToken]]
+        ])
+        let missing = try jsonData(["credentials": [:]])
+
+        for data in [mismatched, expired, missing] {
+            XCTAssertThrowsError(
+                try KimiDesktopCredentialResolver.parseAccessToken(data: data, codeAccessToken: codeToken, now: now)
+            ) { error in
+                let message = error.localizedDescription
+                XCTAssertFalse(message.contains(codeToken))
+                XCTAssertFalse(message.contains(webToken))
+                XCTAssertFalse(message.contains(expiredToken))
+            }
+        }
     }
 
     func testCodexUsageParsesDynamicGeneralAndAdditionalWindows() throws {
@@ -1663,6 +1814,19 @@ final class LiveUsageAdapterParsingTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
     }
 
+    private func syntheticJWT(subject: String, expiration: TimeInterval) throws -> String {
+        func base64URL(_ data: Data) -> String {
+            data.base64EncodedString()
+                .replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "="))
+        }
+
+        let header = try jsonData(["alg": "none", "typ": "JWT"])
+        let payload = try jsonData(["sub": subject, "exp": expiration])
+        return "\(base64URL(header)).\(base64URL(payload)).synthetic-signature"
+    }
+
     private func protoVarint(_ value: UInt64) -> Data {
         var rest = value
         var data = Data()
@@ -1710,6 +1874,390 @@ final class LiveUsageAdapterParsingTests: XCTestCase {
         data.append(UInt8(length & 0xFF))
         data.append(payload)
         return data
+    }
+}
+
+private struct KimiStubResponse {
+    let statusCode: Int
+    let data: Data
+}
+
+private final class KimiURLProtocol: URLProtocol {
+    private static let lock = NSLock()
+    private static var handler: ((URLRequest) -> KimiStubResponse)?
+    private static var recordedRequests: [URLRequest] = []
+
+    static func configure(handler: @escaping (URLRequest) -> KimiStubResponse) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.handler = handler
+        recordedRequests = []
+    }
+
+    static func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        handler = nil
+        recordedRequests = []
+    }
+
+    static func requests() -> [URLRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedRequests
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        var request = self.request
+        if request.httpBody == nil, let stream = request.httpBodyStream {
+            request.httpBody = Self.read(stream)
+        }
+        Self.lock.lock()
+        Self.recordedRequests.append(request)
+        let responseHandler = Self.handler
+        Self.lock.unlock()
+
+        guard let responseHandler else {
+            client?.urlProtocol(self, didFailWithError: NSError(domain: "KimiURLProtocol", code: 1))
+            return
+        }
+
+        let result = responseHandler(request)
+        guard let url = request.url,
+              let response = HTTPURLResponse(
+                  url: url,
+                  statusCode: result.statusCode,
+                  httpVersion: nil,
+                  headerFields: ["Content-Type": "application/json"]
+              ) else {
+            client?.urlProtocol(self, didFailWithError: NSError(domain: "KimiURLProtocol", code: 2))
+            return
+        }
+
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: result.data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    private static func read(_ stream: InputStream) -> Data? {
+        stream.open()
+        defer { stream.close() }
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 4_096)
+        defer { buffer.deallocate() }
+        var data = Data()
+        while stream.hasBytesAvailable {
+            let count = stream.read(buffer, maxLength: 4_096)
+            guard count > 0 else { break }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
+}
+
+private struct KimiCredentialFixture {
+    let root: URL
+    let codeCredentialPath: String
+    let desktopCredentialPath: String
+    let codeToken: String
+    let webToken: String
+}
+
+final class KimiUsageAdapterFetchTests: XCTestCase {
+    func testKimiFetchCombinesCodeAndPlanWideUsageWithCorrectEndpointTokens() async throws {
+        let fixture = try makeCredentialFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let codeData = try jsonData([
+            "usages": [
+                "limit_5h": ["used_ratio": 0.12, "reset_time": "2026-10-22T18:00:00Z"],
+                "limit_7d": ["used_ratio": 0.0001, "reset_time": "2026-10-29T00:00:00Z"]
+            ]
+        ])
+        let totalData = try jsonData([
+            "balances": [[
+                "feature": "FEATURE_OMNI",
+                "unit": "UNIT_CREDIT",
+                "type": "SUBSCRIPTION",
+                "amountUsedRatio": 0.0289,
+                "expireTime": "2026-11-07T15:51:00.685263Z"
+            ]]
+        ])
+        KimiURLProtocol.configure { request in
+            if request.url?.path == "/coding/v1/usages" {
+                return KimiStubResponse(statusCode: 200, data: codeData)
+            }
+            return KimiStubResponse(statusCode: 200, data: totalData)
+        }
+        defer { KimiURLProtocol.reset() }
+
+        let outcome = try await KimiUsageAdapter(
+            credentialPath: fixture.codeCredentialPath,
+            desktopCredentialPath: fixture.desktopCredentialPath,
+            session: makeSession()
+        ).fetchOutcome()
+
+        XCTAssertNil(outcome.notice)
+        XCTAssertEqual(outcome.buckets.map(\.quotaID), ["kimi-total", "kimi-300", "kimi-weekly"])
+        let total = try XCTUnwrap(outcome.buckets.first(where: { $0.quotaID == "kimi-total" }))
+        XCTAssertEqual(total.label, "Total")
+        XCTAssertEqual(total.resolvedPercentUsed ?? -1, 0.0289, accuracy: 0.000001)
+        XCTAssertEqual(total.resetsAt?.timeIntervalSince1970 ?? -1, 1_794_066_660.685263, accuracy: 0.001)
+
+        let requests = KimiURLProtocol.requests()
+        XCTAssertEqual(requests.count, 2)
+        let codeRequest = try XCTUnwrap(requests.first(where: { $0.url?.path == "/coding/v1/usages" }))
+        XCTAssertEqual(codeRequest.httpMethod, "GET")
+        XCTAssertEqual(codeRequest.value(forHTTPHeaderField: "Authorization"), "Bearer \(fixture.codeToken)")
+        let membershipRequest = try XCTUnwrap(requests.first(where: { $0.url?.path.contains("GetSubscription") == true }))
+        XCTAssertEqual(membershipRequest.httpMethod, "POST")
+        XCTAssertEqual(membershipRequest.value(forHTTPHeaderField: "Authorization"), "Bearer \(fixture.webToken)")
+        XCTAssertNotEqual(membershipRequest.value(forHTTPHeaderField: "Authorization"), "Bearer \(fixture.codeToken)")
+        XCTAssertEqual(membershipRequest.value(forHTTPHeaderField: "Connect-Protocol-Version"), "1")
+        XCTAssertEqual(membershipRequest.httpBody, Data("{}".utf8))
+    }
+
+    func testKimiFetchWithMismatchedDesktopCredentialSkipsMembershipAndReportsCodeOnly() async throws {
+        let fixture = try makeCredentialFixture(webSubject: "different-user")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let codeData = try jsonData([
+            "usages": ["limit_5h": ["used_ratio": 0.12]]
+        ])
+        KimiURLProtocol.configure { _ in KimiStubResponse(statusCode: 200, data: codeData) }
+        defer { KimiURLProtocol.reset() }
+
+        let outcome = try await KimiUsageAdapter(
+            credentialPath: fixture.codeCredentialPath,
+            desktopCredentialPath: fixture.desktopCredentialPath,
+            session: makeSession()
+        ).fetchOutcome()
+
+        XCTAssertEqual(outcome.notice, KimiUsageAdapter.totalUnavailableNotice)
+        XCTAssertFalse(outcome.buckets.contains { $0.quotaID == "kimi-total" })
+        XCTAssertEqual(KimiURLProtocol.requests().count, 1)
+    }
+
+    func testKimiFetchWithMembershipHTTPFailureReturnsCodeBucketsAndNotice() async throws {
+        let fixture = try makeCredentialFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let codeData = try jsonData([
+            "usages": ["limit_7d": ["used_ratio": 0.0001]]
+        ])
+        KimiURLProtocol.configure { request in
+            if request.url?.path == "/coding/v1/usages" {
+                return KimiStubResponse(statusCode: 200, data: codeData)
+            }
+            return KimiStubResponse(statusCode: 500, data: Data("{}".utf8))
+        }
+        defer { KimiURLProtocol.reset() }
+
+        let outcome = try await KimiUsageAdapter(
+            credentialPath: fixture.codeCredentialPath,
+            desktopCredentialPath: fixture.desktopCredentialPath,
+            session: makeSession()
+        ).fetchOutcome()
+
+        XCTAssertEqual(outcome.notice, KimiUsageAdapter.totalUnavailableNotice)
+        XCTAssertEqual(outcome.buckets.map(\.quotaID), ["kimi-weekly"])
+        XCTAssertEqual(KimiURLProtocol.requests().count, 2)
+    }
+
+    func testKimiFetchWithCodeHTTPFailureReturnsTotalBucketAndNotice() async throws {
+        let fixture = try makeCredentialFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let totalData = try jsonData([
+            "balances": [[
+                "feature": "FEATURE_OMNI",
+                "unit": "UNIT_CREDIT",
+                "type": "SUBSCRIPTION",
+                "amountUsedRatio": 0.029,
+                "expireTime": "2026-11-07T15:51:00.685263Z"
+            ]]
+        ])
+        KimiURLProtocol.configure { request in
+            if request.url?.path == "/coding/v1/usages" {
+                return KimiStubResponse(statusCode: 500, data: Data("{}".utf8))
+            }
+            return KimiStubResponse(statusCode: 200, data: totalData)
+        }
+        defer { KimiURLProtocol.reset() }
+
+        let outcome = try await KimiUsageAdapter(
+            credentialPath: fixture.codeCredentialPath,
+            desktopCredentialPath: fixture.desktopCredentialPath,
+            session: makeSession()
+        ).fetchOutcome()
+
+        XCTAssertEqual(outcome.notice, KimiUsageAdapter.codeUnavailableNotice)
+        XCTAssertEqual(outcome.buckets.map(\.quotaID), ["kimi-total"])
+        XCTAssertEqual(outcome.buckets.first?.resolvedPercentUsed ?? -1, 0.029, accuracy: 0.000001)
+        XCTAssertEqual(KimiURLProtocol.requests().count, 2)
+    }
+
+    func testKimiFetchThrowsWhenBothCodeAndMembershipFail() async throws {
+        let fixture = try makeCredentialFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        KimiURLProtocol.configure { _ in KimiStubResponse(statusCode: 500, data: Data("{}".utf8)) }
+        defer { KimiURLProtocol.reset() }
+
+        do {
+            _ = try await KimiUsageAdapter(
+                credentialPath: fixture.codeCredentialPath,
+                desktopCredentialPath: fixture.desktopCredentialPath,
+                session: makeSession()
+            ).fetchOutcome()
+            XCTFail("Expected both Kimi usage requests to fail")
+        } catch {
+            XCTAssertFalse(error.localizedDescription.contains(fixture.codeToken))
+            XCTAssertFalse(error.localizedDescription.contains(fixture.webToken))
+        }
+        XCTAssertEqual(KimiURLProtocol.requests().count, 2)
+    }
+
+    func testJapaneseLocalizationIncludesKimiTotalLabel() {
+        XCTAssertEqual(UsageDockLanguage.japanese.localized("Total"), "合計使用量")
+    }
+
+    private func makeSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [KimiURLProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
+    private func makeCredentialFixture(
+        codeSubject: String = "kimi-user",
+        webSubject: String = "kimi-user",
+        webExpiration: TimeInterval = 4_000_000_000
+    ) throws -> KimiCredentialFixture {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("UsageDock-KimiTests-\(UUID().uuidString)", isDirectory: true)
+        let home = root.appendingPathComponent(".kimi-code", isDirectory: true)
+        let credentials = home.appendingPathComponent("credentials", isDirectory: true)
+        let codeURL = credentials.appendingPathComponent("kimi-code-test.json")
+        let desktopURL = root.appendingPathComponent("kimi-desktop-config.json")
+        try FileManager.default.createDirectory(at: credentials, withIntermediateDirectories: true)
+        try """
+        [providers."managed:kimi-code"]
+        base_url = "https://api.kimi.com/coding/v1"
+        [providers."managed:kimi-code".oauth]
+        key = "kimi-code-test"
+        """.write(to: home.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
+
+        let codeToken = try syntheticJWT(subject: codeSubject, expiration: webExpiration, marker: "code")
+        let webToken = try syntheticJWT(subject: webSubject, expiration: webExpiration, marker: "web")
+        let codeObject: [String: Any] = [
+            "access_token": codeToken,
+            "expires_at": 4_000_000_000_000.0
+        ]
+        let desktopObject: [String: Any] = [
+            "credentials": [
+                "kimiWeb": ["accessToken": webToken]
+            ]
+        ]
+        try JSONSerialization.data(withJSONObject: codeObject, options: [.sortedKeys]).write(to: codeURL)
+        try JSONSerialization.data(withJSONObject: desktopObject, options: [.sortedKeys]).write(to: desktopURL)
+        return KimiCredentialFixture(
+            root: root,
+            codeCredentialPath: codeURL.path,
+            desktopCredentialPath: desktopURL.path,
+            codeToken: codeToken,
+            webToken: webToken
+        )
+    }
+
+    private func syntheticJWT(subject: String, expiration: TimeInterval, marker: String) throws -> String {
+        func base64URL(_ data: Data) -> String {
+            data.base64EncodedString()
+                .replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "="))
+        }
+
+        let header = try JSONSerialization.data(
+            withJSONObject: ["alg": "none", "typ": "JWT"],
+            options: [.sortedKeys]
+        )
+        let payload = try JSONSerialization.data(
+            withJSONObject: ["sub": subject, "exp": expiration, "jti": marker],
+            options: [.sortedKeys]
+        )
+        return "\(base64URL(header)).\(base64URL(payload)).synthetic-signature"
+    }
+
+    private func jsonData(_ value: Any) throws -> Data {
+        try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+    }
+
+}
+
+@MainActor
+final class KimiRailDefaultsTests: XCTestCase {
+    func testKimiAutomaticDefaultsPreferEnabledTotalAndPreserveExplicitSources() throws {
+        let suiteName = "UsageDockTests.KimiRailDefaults.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let total = UsageBucket(
+            quotaID: "kimi-total",
+            label: "Total",
+            kind: .custom,
+            percentUsed: 0.029,
+            resetsAt: Date(timeIntervalSince1970: 1_794_066_660.685263)
+        )
+        let fiveHour = UsageBucket(
+            quotaID: "kimi-300",
+            label: "5h Code",
+            kind: .fiveHour,
+            percentUsed: 0.12
+        )
+        let weekly = UsageBucket(
+            quotaID: "kimi-weekly",
+            label: "7d Code",
+            kind: .weekly,
+            percentUsed: 0.0001
+        )
+        var account = UsageAccount(
+            provider: .kimi,
+            name: "Kimi",
+            source: .currentSession,
+            buckets: [total, fiveHour, weekly]
+        )
+        let store = UsageStore(defaults: defaults)
+        store.accounts = [account]
+        let providerTarget = RailDisplayTarget.provider(.kimi)
+        XCTAssertEqual(store.railPercentSource(for: providerTarget), .bucket(quotaID: "kimi-total"))
+        XCTAssertEqual(store.railOuterRingSource(for: providerTarget), .bucket(quotaID: "kimi-total"))
+
+        account.railPercentSource = .fiveHour
+        account.railOuterRingSource = .weekly
+        store.accounts = [account]
+        let accountTarget = RailDisplayTarget.account(id: account.id, provider: .kimi)
+        XCTAssertEqual(store.railPercentSource(for: accountTarget), .fiveHour)
+        XCTAssertEqual(store.railOuterRingSource(for: accountTarget), .weekly)
+
+        account.railPercentSource = nil
+        account.railOuterRingSource = nil
+        store.accounts = [account]
+        store.railPercentSource = .fiveHour
+        store.railOuterRingSource = .weekly
+        XCTAssertEqual(store.railPercentSource(for: providerTarget), .fiveHour)
+        XCTAssertEqual(store.railOuterRingSource(for: providerTarget), .weekly)
+
+        var disabledTotal = account
+        disabledTotal.buckets[disabledTotal.buckets.firstIndex(where: { $0.quotaID == "kimi-total" })!].isEnabled = false
+        store.railPercentSource = .automatic
+        store.railOuterRingSource = .automatic
+        store.accounts = [disabledTotal]
+        XCTAssertEqual(store.railPercentSource(for: providerTarget), .automatic)
+        XCTAssertEqual(store.railOuterRingSource(for: providerTarget), .automatic)
     }
 }
 

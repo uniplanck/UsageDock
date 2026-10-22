@@ -1580,10 +1580,10 @@ struct QuotaNameLabel: View {
     let name: String
 
     var body: some View {
-        Text(verbatim: name)
+        Text(LocalizedStringKey(name))
             .lineLimit(nil)
             .fixedSize(horizontal: false, vertical: true)
-            .help(name)
+            .help(Text(LocalizedStringKey(name)))
     }
 }
 
@@ -1797,7 +1797,8 @@ struct AccountEditor: View {
         guard let bucket = account.buckets.first(where: { $0.quotaID == quotaID }) else {
             return Text("Unavailable quota: \(quotaID)")
         }
-        return bucket.isEnabled ? Text(bucket.label) : Text("\(bucket.label) (hidden)")
+        let label = Text(LocalizedStringKey(bucket.label))
+        return bucket.isEnabled ? label : Text("\(label) (hidden)")
     }
 
     private var multiplierControls: some View {

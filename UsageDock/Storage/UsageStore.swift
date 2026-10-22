@@ -728,11 +728,19 @@ final class UsageStore: ObservableObject {
     }
 
     func railPercentSource(for target: RailDisplayTarget) -> RailQuotaSource {
-        account(for: target)?.railPercentSource ?? railPercentSource
+        account(for: target)?.railPercentSource ?? defaultRailSource(for: target, global: railPercentSource)
     }
 
     func railOuterRingSource(for target: RailDisplayTarget) -> RailQuotaSource {
-        account(for: target)?.railOuterRingSource ?? railOuterRingSource
+        account(for: target)?.railOuterRingSource ?? defaultRailSource(for: target, global: railOuterRingSource)
+    }
+
+    private func defaultRailSource(for target: RailDisplayTarget, global: RailQuotaSource) -> RailQuotaSource {
+        if target.provider == .kimi, global == .automatic,
+           summary(for: target).aggregates.contains(where: { $0.quotaID == "kimi-total" }) {
+            return .bucket(quotaID: "kimi-total")
+        }
+        return global
     }
 
     func railInnerRingSource(for target: RailDisplayTarget) -> RailQuotaSource {
@@ -1264,13 +1272,11 @@ final class UsageStore: ObservableObject {
                     }
                     fetched = first
                 case .kimi:
-                    let fetchedAccounts = try await KimiUsageAdapter(
+                    let outcome = try await KimiUsageAdapter(
                         credentialPath: account.source == .currentSession ? nil : account.credentialPath
-                    ).fetchAccounts()
-                    guard let first = fetchedAccounts.first else {
-                        throw UsageAdapterError.invalidResponse("Kimi returned no account data.")
-                    }
-                    fetched = first
+                    ).fetchOutcome()
+                    webNotice = outcome.notice.map { appLanguage.localized($0) }
+                    fetched = UsageAccount(provider: .kimi, name: account.name, buckets: outcome.buckets)
                 case .grok:
                     let outcome = try await GrokUsageAdapter(
                         credentialPath: account.source == .currentSession ? nil : account.credentialPath,
