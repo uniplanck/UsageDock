@@ -46,7 +46,7 @@ Installed defaults are Claude → Claude.app, Codex → ChatGPT.app, Antigravity
 
 ## Per-account rail quotas
 
-In **Settings → Accounts → Rail display override**, choose the quota for **Percent**, **Outer**, **Inner**, and **Timer** independently. Antigravity offers each named bucket, including Gemini Models and Claude and GPT models for both 5h and 1w; other providers offer their own quota names. **Global**, **Auto**, **5h**, **1w**, and ring **None** keep their existing behavior, and defaults are unchanged. Choices persist per account across restarts and quota refreshes.
+In **Settings → Accounts → Rail display override**, choose the quota for **Percent**, **Outer**, **Inner**, and **Timer** independently. Antigravity offers each named bucket, including Gemini Models and Claude and GPT models for both 5h and 1w; other providers offer their own quota names. Kimi defaults to **Total** for Percent and Outer when the global source is Auto and the account has no override. Explicit quota choices persist per account across restarts and quota refreshes.
 
 Quota-row names wrap and show their full name in a tooltip. A hidden or temporarily unavailable selected quota shows no value until it is enabled and available again; it never silently switches to another model's quota.
 
@@ -59,6 +59,8 @@ UsageDock is **login-only**.
 - Accounts that are not backed by a supported authenticated login are excluded from the active account set.
 
 Grok has two logins. **Sign in on grok.com** opens an in-app window at `https://grok.com/?_s=usage`. That session stays in an isolated per-account web store and is the source for the weekly percentage and reset shown on grok.com Settings → Usage (`GetGrokCreditsConfig`). **Use Current Login** / **Login New Profile** still use `grok login`. If the web session is missing, expired, or the response cannot be decoded, UsageDock shows the CLI billing reading and says that the web login needs attention. It does not turn an undecodable web response into 0%. Cookies and tokens are not copied into UsageDock settings. Copy diagnostics copies decoded field paths only.
+
+Kimi shows **Total**, **5h Code**, and **7d Code**. Total includes Kimi chat and code usage and its plan reset date. It reads the existing Kimi desktop login at `~/Library/Application Support/kimi-desktop/daimon-share/daimon/config.json` only when its user matches the registered Kimi Code login. Keep Kimi signed in to that same account; UsageDock does not copy or refresh the desktop credentials. If either API is unavailable, the available quotas remain visible with a status notice. See [the verified API findings](docs/KIMI_USAGE.md).
 
 ## Requirements
 

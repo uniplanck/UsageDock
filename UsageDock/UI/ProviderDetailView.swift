@@ -144,7 +144,7 @@ struct ProviderDetailView: View {
         let displayed = usageStore.displayPercent(aggregate.percentUsed)
         return VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(aggregate.label)
+                Text(LocalizedStringKey(aggregate.label))
                     .font(.system(size: 12.5, weight: .semibold, design: .rounded))
                     .foregroundStyle(ProviderBrand.primaryText(theme: theme))
                     .lineLimit(1)
