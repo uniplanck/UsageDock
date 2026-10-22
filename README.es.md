@@ -44,6 +44,12 @@ En **Settings → Data → Provider Order, Colors & Click Targets**, elige **App
 
 Las apps predeterminadas, si están instaladas, son Claude.app, ChatGPT.app para Codex, Antigravity.app, Kimi Code.app, Cursor.app y Grok Bot.app para Grok. Si la app no existe o no se inicia, se abre la URL alternativa editable y aparece un estado en los ajustes y en la ayuda del clic. La URL de la cuenta tiene prioridad; las URL vacías o inválidas usan una URL válida del proveedor. **Use Default App / Use Default URL** restaura los valores originales. Elegir una app no cambia la política de cuentas con inicio de sesión.
 
+## Cuotas por cuenta en la barra
+
+En **Settings → Accounts → Rail display override**, elige por separado la cuota de **Percent**, **Outer**, **Inner** y **Timer**. Antigravity ofrece cada cuota de Gemini Models y Claude and GPT models para 5h y 1w; otros proveedores permiten elegir sus propias cuotas por nombre. **Global**, **Auto**, **5h**, **1w** y **None** para los anillos conservan su comportamiento y los valores predeterminados. La selección se guarda por cuenta y se mantiene tras reiniciar o actualizar las cuotas.
+
+Los nombres de las filas se ajustan en varias líneas y aparecen completos en la ayuda emergente. Si la cuota seleccionada está oculta o temporalmente no disponible, no se muestra ningún valor hasta que vuelva a estar habilitada y disponible; no se cambia automáticamente a la cuota de otro modelo.
+
 ## Política de cuentas
 
 UsageDock es **solo para cuentas autenticadas mediante inicio de sesión**.

@@ -44,6 +44,12 @@ UsageDock은 AI 서비스의 사용량과 리셋 시간을 한눈에 확인할 �
 
 설치된 기본 앱은 Claude.app, Codex의 ChatGPT.app, Antigravity.app, Kimi Code.app, Cursor.app, Grok의 Grok Bot.app입니다. 앱이 없거나 실행되지 않으면 편집 가능한 대체 URL을 열고 설정과 도구 설명에 상태를 표시합니다. 계정 URL이 우선하며, 비어 있거나 잘못된 URL은 유효한 제공자 URL로 대체됩니다. **Use Default App / Use Default URL**로 기본값을 복원합니다. 앱 선택은 로그인 전용 계정 정책에 영향을 주지 않습니다.
 
+## 계정별 레일 할당량
+
+**Settings → Accounts → Rail display override**에서 **Percent**, **Outer**, **Inner**, **Timer**의 할당량을 각각 선택합니다. Antigravity는 Gemini Models와 Claude and GPT models의 5h/1w를 각각 제공하며, 다른 제공자도 할당량 이름으로 선택할 수 있습니다. **Global**, **Auto**, **5h**, **1w**, 링의 **None**은 기존 동작과 기본값을 유지합니다. 선택은 계정별로 저장되어 재시작과 할당량 갱신 후에도 유지됩니다.
+
+할당량 행의 이름은 줄바꿈되며 도구 설명에 전체 이름이 표시됩니다. 선택한 할당량이 숨김 상태이거나 일시적으로 없으면 다시 활성화되고 사용 가능해질 때까지 값을 표시하지 않으며, 다른 모델의 할당량으로 자동 전환하지 않습니다.
+
 ## 계정 정책
 
 UsageDock은 **로그인 전용**입니다.

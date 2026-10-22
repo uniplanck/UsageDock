@@ -220,11 +220,64 @@ enum RailEdgeProfile: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-enum RailQuotaSource: String, Codable, CaseIterable, Identifiable {
+enum RailQuotaSource: RawRepresentable, Codable, CaseIterable, Hashable, Identifiable {
     case none
     case automatic
     case fiveHour
     case weekly
+    case bucket(quotaID: String)
+
+    // Global settings keep the original choices. Account settings also offer
+    // concrete quota IDs, which survive refreshes, renames, and bucket reordering.
+    static let allCases: [Self] = [.none, .automatic, .fiveHour, .weekly]
+
+    init?(rawValue: String) {
+        switch rawValue {
+        case "none": self = .none
+        case "automatic": self = .automatic
+        case "fiveHour": self = .fiveHour
+        case "weekly": self = .weekly
+        default:
+            guard rawValue.hasPrefix("bucket:"), rawValue.count > "bucket:".count else { return nil }
+            self = .bucket(quotaID: String(rawValue.dropFirst("bucket:".count)))
+        }
+    }
+
+    var rawValue: String {
+        switch self {
+        case .none: "none"
+        case .automatic: "automatic"
+        case .fiveHour: "fiveHour"
+        case .weekly: "weekly"
+        case .bucket(let quotaID): "bucket:\(quotaID)"
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let rawValue = try container.decode(String.self)
+        guard let source = Self(rawValue: rawValue) else {
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unknown rail quota source")
+        }
+        self = source
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+
+    static func options(buckets: [UsageBucket], selection: Self?, allowNone: Bool) -> [Self] {
+        var options = allCases.filter { allowNone || $0 != .none }
+        for bucket in buckets {
+            let source = Self.bucket(quotaID: bucket.quotaID)
+            if !options.contains(source) { options.append(source) }
+        }
+        // A temporarily missing quota must remain selected and recover when it
+        // returns, rather than silently switching to another model's quota.
+        if let selection, selection != .none, !options.contains(selection) { options.append(selection) }
+        return options
+    }
 
     var id: String { rawValue }
 
@@ -234,6 +287,7 @@ enum RailQuotaSource: String, Codable, CaseIterable, Identifiable {
         case .automatic: "Auto"
         case .fiveHour: "5h"
         case .weekly: "1w"
+        case .bucket(let quotaID): quotaID
         }
     }
 }

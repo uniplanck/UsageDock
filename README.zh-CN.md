@@ -44,6 +44,12 @@ UsageDock 是一款轻量级 macOS 屏幕边缘用量栏，可快速查看 AI �
 
 已安装时的默认应用为 Claude.app、Codex 对应的 ChatGPT.app、Antigravity.app、Kimi Code.app、Cursor.app 和 Grok 对应的 Grok Bot.app。应用缺失或启动失败时会打开可编辑的备用 URL，并在设置和工具提示中显示状态。账号 URL 优先；空白或无效的 URL 会回退到有效的服务商 URL。**Use Default App / Use Default URL** 可恢复默认值。应用选择不改变仅限登录账号的策略。
 
+## 按账号选择边缘栏配额
+
+在 **Settings → Accounts → Rail display override** 中，可分别为 **Percent、Outer、Inner、Timer** 选择配额。Antigravity 可单独选择 Gemini Models 和 Claude and GPT models 的 5h／1w 配额，其他服务商也可按配额名称选择。**Global、Auto、5h、1w** 和进度环的 **None** 保持原有行为，默认值不变。选择按账号保存，重启和刷新配额后仍然保留。
+
+配额行名称可换行显示，工具提示中也可查看完整名称。所选配额被隐藏或暂时不可用时，将不显示数值，直到它重新启用并恢复可用；不会自动切换到其他模型的配额。
+
 ## 账号策略
 
 UsageDock **仅支持登录账号**。

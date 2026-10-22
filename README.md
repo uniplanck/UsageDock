@@ -44,6 +44,12 @@ In **Settings → Data → Provider Order, Colors & Click Targets**, choose **Ap
 
 Installed defaults are Claude → Claude.app, Codex → ChatGPT.app, Antigravity → Antigravity.app, Kimi → Kimi Code.app, Cursor → Cursor.app, and Grok → Grok Bot.app. If an app is missing or cannot launch, UsageDock opens the editable fallback URL and shows a status in settings and the click tooltip. Existing account URL overrides still take priority; empty/invalid URLs fall back to a valid provider URL. **Use Default App** and **Use Default URL** restore defaults. Choosing an app does not change account/login eligibility.
 
+## Per-account rail quotas
+
+In **Settings → Accounts → Rail display override**, choose the quota for **Percent**, **Outer**, **Inner**, and **Timer** independently. Antigravity offers each named bucket, including Gemini Models and Claude and GPT models for both 5h and 1w; other providers offer their own quota names. **Global**, **Auto**, **5h**, **1w**, and ring **None** keep their existing behavior, and defaults are unchanged. Choices persist per account across restarts and quota refreshes.
+
+Quota-row names wrap and show their full name in a tooltip. A hidden or temporarily unavailable selected quota shows no value until it is enabled and available again; it never silently switches to another model's quota.
+
 ## Account policy
 
 UsageDock is **login-only**.

@@ -713,6 +713,8 @@ final class UsageStore: ObservableObject {
         switch source {
         case .none, .automatic:
             return nil
+        case .bucket(let quotaID):
+            return aggregates.first(where: { $0.quotaID == quotaID })
         case .fiveHour:
             return aggregates.first(where: { $0.kind == .fiveHour })
                 ?? aggregates.first(where: { $0.label.lowercased().contains("5h") })
