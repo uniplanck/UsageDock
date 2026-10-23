@@ -1307,7 +1307,7 @@ final class UsageStore: ObservableObject {
                    let index = accounts.firstIndex(where: { $0.id == accountID }) {
                     accounts[index].buckets = []
                 }
-                let message = error.localizedDescription
+                let message = appLanguage.localized(error.localizedDescription)
                 accountRefreshStates[accountID] = .failed(message)
                 failureMessages.append("\(account.name): \(message)")
             }

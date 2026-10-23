@@ -8,7 +8,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let usageStore: UsageStore
     private var cancellables = Set<AnyCancellable>()
 
-    init(usageStore: UsageStore, placement: PlacementStore) {
+    init(usageStore: UsageStore, placement: PlacementStore, contentView: NSView? = nil) {
         self.usageStore = usageStore
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: windowSize),
@@ -20,7 +20,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window.minSize = NSSize(width: 1000, height: 660)
         window.isReleasedWhenClosed = false
         window.center()
-        window.contentView = NSHostingView(
+        window.contentView = contentView ?? NSHostingView(
             rootView: SettingsView(usageStore: usageStore, placement: placement)
         )
 

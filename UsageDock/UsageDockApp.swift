@@ -6,11 +6,22 @@ import SwiftUI
 struct UsageDockApp: App {
     @StateObject private var usageStore: UsageStore
     @StateObject private var placement: PlacementStore
-    private let panelController: DockPanelController
-    private let settingsController: SettingsWindowController
-    private let menuBarController: MenuBarStatusController
+    private let panelController: DockPanelController?
+    private let settingsController: SettingsWindowController?
+    private let menuBarController: MenuBarStatusController?
 
     init() {
+        // Hosted unit tests exercise injected providers, not real logins or windows.
+        // Building the settings view here can also stall XCTest in SwiftUI startup.
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+            let defaults = UserDefaults(suiteName: "UsageDock.UnitTestHost")!
+            _usageStore = StateObject(wrappedValue: UsageStore(defaults: defaults))
+            _placement = StateObject(wrappedValue: PlacementStore(defaults: defaults))
+            panelController = nil
+            settingsController = nil
+            menuBarController = nil
+            return
+        }
         let usageStore = UsageStore()
         let placement = PlacementStore()
         let settingsController = SettingsWindowController(

@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import SwiftUI
 import XCTest
 @testable import UsageDock
@@ -22,6 +23,152 @@ final class UsageDockDistributionPolicyTests: XCTestCase {
 }
 
 final class ClaudeCredentialStoreTests: XCTestCase {
+    func testProviderReadUsesSecurityWithoutShellOrSecretArguments() throws {
+        let service = "Claude Code-credentials-profile with spaces;$(ignored)"
+        let payload = ProviderKeychainReader.payload(service: service) { executable, arguments in
+            XCTAssertEqual(executable.path, "/usr/bin/security")
+            XCTAssertEqual(arguments, ["find-generic-password", "-s", service, "-w"])
+            return (0, Data(" {\"fixture\":true}\n".utf8))
+        }
+        XCTAssertEqual(payload, Data(" {\"fixture\":true}".utf8))
+    }
+
+    func testProviderReadDiscardsFailureOutputAndEmptyPasswords() {
+        XCTAssertNil(ProviderKeychainReader.payload(service: "fixture") { _, _ in
+            (44, Data("sensitive failure output".utf8))
+        })
+        XCTAssertNil(ProviderKeychainReader.payload(service: "fixture") { _, _ in (0, Data([0x0A])) })
+        XCTAssertNil(ProviderKeychainReader.payload(service: "fixture") { _, _ in nil })
+    }
+
+    func testNativeQueriesOnlyTargetUsageDockAndDisableAuthenticationUI() {
+        let query = UsageDockClaudeKeychain.query(account: "keychain:Claude Code-credentials")
+        XCTAssertEqual(query[kSecAttrService] as? String, "com.uniplanck.UsageDock.ClaudeCredentials")
+        XCTAssertEqual(query[kSecAttrAccount] as? String, "keychain:Claude Code-credentials")
+        XCTAssertEqual(query[kSecUseAuthenticationUI] as? String, kSecUseAuthenticationUIFail as String)
+    }
+
+    func testCacheCoalescesReadsAndThrottlesForcedReloads() throws {
+        var now = Date(timeIntervalSince1970: 1_000)
+        var sourceReads = 0
+        var ownedReads = 0
+        let cache = ClaudeCredentialCache(now: { now }, readOwned: { _ in
+            ownedReads += 1
+            return nil
+        }, writeOwned: { _, _ in XCTFail("Read must not write credentials") })
+        func read(reload: Bool = false) -> ClaudeCredentialStore.CredentialRecord? {
+            cache.record(sourceID: "keychain:fixture", reload: reload) {
+                sourceReads += 1
+                return Data("provider-fixture".utf8)
+            }
+        }
+        let initial = try XCTUnwrap(read())
+        for _ in 0..<10 {
+            XCTAssertEqual(read()?.data, initial.data)
+            XCTAssertEqual(read(reload: true)?.data, initial.data)
+        }
+        XCTAssertEqual(sourceReads, 1)
+        XCTAssertEqual(ownedReads, 1)
+        now += 31
+        XCTAssertNotNil(read(reload: true))
+        XCTAssertEqual(sourceReads, 2)
+        XCTAssertEqual(ownedReads, 1)
+        now += 299
+        XCTAssertNotNil(read())
+        XCTAssertEqual(sourceReads, 2)
+        now += 1
+        XCTAssertNotNil(read())
+        XCTAssertEqual(sourceReads, 3)
+    }
+
+    func testCacheMissesAreThrottledAndRecoverAfterLogin() {
+        var now = Date(timeIntervalSince1970: 1_000)
+        var source: Data?
+        var reads = 0
+        let cache = ClaudeCredentialCache(now: { now }, readOwned: { _ in nil }, writeOwned: { _, _ in })
+        func read() -> ClaudeCredentialStore.CredentialRecord? {
+            cache.record(sourceID: "keychain:fixture") { reads += 1; return source }
+        }
+        XCTAssertNil(read())
+        source = Data("signed-in-fixture".utf8)
+        XCTAssertNil(read())
+        XCTAssertEqual(reads, 1)
+        now += 30
+        XCTAssertEqual(read()?.data, source)
+        XCTAssertEqual(reads, 2)
+    }
+
+    func testProviderRotationReloadIsBoundedEvenWithinCacheLifetime() throws {
+        var now = Date(timeIntervalSince1970: 1_000)
+        var source = Data("provider-login-A".utf8)
+        var reads = 0
+        let cache = ClaudeCredentialCache(now: { now }, readOwned: { _ in nil }, writeOwned: { _, _ in })
+        func read(reload: Bool) -> ClaudeCredentialStore.CredentialRecord? {
+            cache.record(sourceID: "keychain:fixture", reload: reload) { reads += 1; return source }
+        }
+        let original = try XCTUnwrap(read(reload: false))
+        try cache.persist(Data("refreshed-A".utf8), to: original.target)
+        source = Data("provider-login-B".utf8)
+        now += 29
+        XCTAssertEqual(read(reload: true)?.data, Data("refreshed-A".utf8))
+        XCTAssertEqual(reads, 1)
+        now += 1
+        XCTAssertEqual(read(reload: true)?.data, source)
+        XCTAssertEqual(reads, 2)
+    }
+
+    func testRefreshCacheSurvivesRestartAndYieldsToProviderRotation() throws {
+        var owned: [String: Data] = [:]
+        var source = Data("provider-login-A".utf8)
+        let cache = ClaudeCredentialCache(readOwned: { owned[$0] }, writeOwned: { owned[$1] = $0 })
+        let record = try XCTUnwrap(cache.record(sourceID: "keychain:Claude Code-credentials") { source })
+        let refreshed = Data("UsageDock-refreshed-A".utf8)
+        try cache.persist(refreshed, to: record.target)
+        XCTAssertEqual(cache.record(sourceID: record.target.account) { source }?.data, refreshed)
+        XCTAssertEqual(source, Data("provider-login-A".utf8))
+
+        let restarted = ClaudeCredentialCache(readOwned: { owned[$0] }, writeOwned: { owned[$1] = $0 })
+        XCTAssertEqual(restarted.record(sourceID: record.target.account) { source }?.data, refreshed)
+        source = Data("provider-login-B".utf8)
+        let afterRotation = ClaudeCredentialCache(readOwned: { owned[$0] }, writeOwned: { owned[$1] = $0 })
+        XCTAssertEqual(afterRotation.record(sourceID: record.target.account) { source }?.data, source)
+    }
+
+    func testRefreshDoesNotModifyFallbackFileOrAnotherProfile() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent(".credentials.json")
+        let original = Data("provider-file-fixture".utf8)
+        try original.write(to: file)
+        var owned: [String: Data] = [:]
+        let cache = ClaudeCredentialCache(readOwned: { owned[$0] }, writeOwned: { owned[$1] = $0 })
+        let fileRecord = try XCTUnwrap(cache.record(sourceID: "file:\(file.path)") { try? Data(contentsOf: file) })
+        let profileRecord = try XCTUnwrap(cache.record(sourceID: "keychain:other-profile") { original })
+        try cache.persist(Data("refreshed-fixture".utf8), to: fileRecord.target)
+        XCTAssertEqual(try Data(contentsOf: file), original)
+        XCTAssertEqual(owned.count, 1)
+        XCTAssertNil(owned[profileRecord.target.account])
+        XCTAssertEqual(cache.record(sourceID: profileRecord.target.account) { original }?.data, original)
+    }
+
+    func testFailedPersistenceRetainsRotatedCredentialsInMemory() throws {
+        let original = Data("provider-fixture".utf8)
+        let cache = ClaudeCredentialCache(readOwned: { _ in nil }, writeOwned: { _, _ in
+            throw UsageAdapterError.invalidResponse("fixture-write-failure")
+        })
+        let record = try XCTUnwrap(cache.record(sourceID: "keychain:fixture") { original })
+        let refreshed = Data("refreshed-fixture".utf8)
+        XCTAssertThrowsError(try cache.persist(refreshed, to: record.target))
+        XCTAssertEqual(cache.record(sourceID: record.target.account) { original }?.data, refreshed)
+    }
+
+    func testCacheFailureMessageHasJapaneseLocalization() {
+        let message = "UsageDock could not save its Claude token cache. Unlock the login keychain and try again."
+        XCTAssertTrue(UsageDockLanguage.japanese.localized(message).contains("ログインキーチェーン"))
+        XCTAssertEqual(UsageDockLanguage.english.localized(message), message)
+    }
+
     func testProfileKeychainServiceUsesNormalizedConfigDirectoryHashPrefix() {
         XCTAssertEqual(
             ClaudeCredentialStore.keychainServiceName(
@@ -92,6 +239,153 @@ final class ClaudeCredentialStoreTests: XCTestCase {
 
         XCTAssertEqual(oauth["refreshToken"] as? String, "keep-refresh")
         XCTAssertEqual(oauth["expiresAt"] as? Int, 2_060_000)
+    }
+}
+
+final class ClaudeCredentialResolverTests: XCTestCase {
+    private func credential(access: String = "expired-fixture", expiry: Double = 1) throws -> Data {
+        try JSONSerialization.data(withJSONObject: [
+            "claudeAiOauth": ["accessToken": access, "refreshToken": "refresh-fixture", "expiresAt": expiry]
+        ])
+    }
+
+    func testRefreshPersistsOnlyInOwnCacheAndReusesRotatedToken() async throws {
+        let source = try credential()
+        var sourceReads = 0
+        var saved: [Data] = []
+        let cache = ClaudeCredentialCache(readOwned: { _ in nil }, writeOwned: { data, account in
+            XCTAssertEqual(account, "keychain:Claude Code-credentials")
+            saved.append(data)
+        })
+        var requests = 0
+        let resolver = ClaudeCredentialResolver(records: { _, _ in
+            [cache.record(sourceID: "keychain:Claude Code-credentials") { sourceReads += 1; return source }!]
+        }, persist: cache.persist, send: { request in
+            requests += 1
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.httpBody!) as? [String: Any])
+            XCTAssertEqual(body["refresh_token"] as? String, "refresh-fixture")
+            return (
+                Data(#"{"access_token":"new-fixture","refresh_token":"rotated-fixture","expires_in":3600}"#.utf8),
+                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
+        })
+        let first = try await resolver.accessToken()
+        let second = try await resolver.accessToken()
+        XCTAssertEqual(first, "new-fixture")
+        XCTAssertEqual(second, first)
+        XCTAssertEqual(requests, 1)
+        XCTAssertEqual(sourceReads, 1)
+        XCTAssertEqual(saved.count, 2) // Own-cache preflight, then rotated credentials.
+        let record = try XCTUnwrap(cache.record(sourceID: "keychain:Claude Code-credentials") { source })
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: record.data) as? [String: Any])
+        XCTAssertEqual((root["claudeAiOauth"] as? [String: Any])?["refreshToken"] as? String, "rotated-fixture")
+    }
+
+    func testPersistenceFailureStopsBeforeConsumingRefreshToken() async throws {
+        let record = ClaudeCredentialStore.CredentialRecord(
+            data: try credential(),
+            target: .init(account: "fixture", sourceFingerprint: "fixture")
+        )
+        let resolver = ClaudeCredentialResolver(records: { _, _ in [record] }, persist: { _, _ in
+            throw UsageAdapterError.invalidResponse("fixture-write-failure")
+        }, send: { _ in
+            XCTFail("Must not consume a rotating refresh token when persistence is unavailable")
+            throw URLError(.badServerResponse)
+        })
+        do {
+            _ = try await resolver.accessToken()
+            XCTFail("Expected preflight failure")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "fixture-write-failure")
+        }
+    }
+
+    func testUnauthorizedReloadUsesNewProviderTokenWithoutRefreshingIt() async throws {
+        let record = ClaudeCredentialStore.CredentialRecord(
+            data: try credential(access: "new-provider-fixture", expiry: Date().timeIntervalSince1970 + 3600),
+            target: .init(account: "fixture", sourceFingerprint: "fixture")
+        )
+        let resolver = ClaudeCredentialResolver(records: { _, reload in
+            XCTAssertTrue(reload)
+            return [record]
+        }, persist: { _, _ in XCTFail("New provider token needs no refresh") }, send: { _ in
+            XCTFail("New provider token needs no refresh")
+            throw URLError(.badServerResponse)
+        })
+        let token = try await resolver.accessToken(forceRefresh: true, rejectedAccessToken: "rejected-fixture")
+        XCTAssertEqual(token, "new-provider-fixture")
+    }
+
+    func testPostRefreshSaveFailureRetainsUsableRotatedTokenWithoutAnotherRequest() async throws {
+        let source = try credential()
+        var writes = 0
+        var requests = 0
+        let cache = ClaudeCredentialCache(readOwned: { _ in nil }, writeOwned: { _, _ in
+            writes += 1
+            if writes > 1 { throw UsageAdapterError.invalidResponse("fixture-keychain-locked") }
+        })
+        let resolver = ClaudeCredentialResolver(records: { _, _ in
+            [cache.record(sourceID: "keychain:fixture") { source }!]
+        }, persist: cache.persist, send: { request in
+            requests += 1
+            return (
+                Data(#"{"access_token":"rotated-fixture","expires_in":3600}"#.utf8),
+                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
+        })
+        do {
+            _ = try await resolver.accessToken()
+            XCTFail("Expected cache-save failure")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "fixture-keychain-locked")
+        }
+        let token = try await resolver.accessToken()
+        XCTAssertEqual(token, "rotated-fixture")
+        XCTAssertEqual(writes, 2)
+        XCTAssertEqual(requests, 1)
+    }
+
+    func testUnauthorizedRetryJoiningNormalLookupNeverReusesRejectedToken() async throws {
+        let source = try credential(access: "rejected-fixture", expiry: Date().timeIntervalSince1970 + 3600)
+        let record = ClaudeCredentialStore.CredentialRecord(
+            data: source, target: .init(account: "fixture", sourceFingerprint: "fixture")
+        )
+        for _ in 0..<10 {
+            var requests = 0
+            let resolver = ClaudeCredentialResolver(records: { _, _ in [record] }, persist: { _, _ in }, send: { request in
+                requests += 1
+                return (
+                    Data(#"{"access_token":"new-fixture","expires_in":3600}"#.utf8),
+                    HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                )
+            })
+            async let normal = resolver.accessToken()
+            async let forced = resolver.accessToken(forceRefresh: true, rejectedAccessToken: "rejected-fixture")
+            let (_, retryToken) = try await (normal, forced)
+            XCTAssertEqual(retryToken, "new-fixture")
+            XCTAssertEqual(requests, 1)
+        }
+    }
+
+    func testConcurrentRequestsShareOneTokenRefresh() async throws {
+        let record = ClaudeCredentialStore.CredentialRecord(
+            data: try credential(),
+            target: .init(account: "fixture", sourceFingerprint: "fixture")
+        )
+        var requests = 0
+        let resolver = ClaudeCredentialResolver(records: { _, _ in [record] }, persist: { _, _ in }, send: { request in
+            requests += 1
+            try await Task.sleep(for: .milliseconds(30))
+            return (
+                Data(#"{"access_token":"new-fixture","expires_in":3600}"#.utf8),
+                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
+        })
+        async let first = resolver.accessToken()
+        async let second = resolver.accessToken()
+        let tokens = try await [first, second]
+        XCTAssertEqual(tokens, ["new-fixture", "new-fixture"])
+        XCTAssertEqual(requests, 1)
     }
 }
 
@@ -606,7 +900,8 @@ final class PersistenceTests: XCTestCase {
 
         let controller = SettingsWindowController(
             usageStore: UsageStore(defaults: defaults),
-            placement: PlacementStore(defaults: defaults)
+            placement: PlacementStore(defaults: defaults),
+            contentView: NSView() // Window visibility is independent of settings rendering.
         )
         controller.show()
         XCTAssertTrue(controller.window?.isVisible == true)
@@ -648,7 +943,8 @@ final class PersistenceTests: XCTestCase {
         store.settingsBubblePreviewRequested = true
         let controller = SettingsWindowController(
             usageStore: store,
-            placement: PlacementStore(defaults: defaults)
+            placement: PlacementStore(defaults: defaults),
+            contentView: NSView() // This test exercises the close event, without rendering SwiftUI.
         )
 
         controller.windowWillClose(Notification(name: NSWindow.willCloseNotification))

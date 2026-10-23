@@ -1,4 +1,5 @@
 "UsageDock Settings" = "UsageDock 設定";
+"UsageDock could not save its Claude token cache. Unlock the login keychain and try again." = "UsageDock の Claude トークンキャッシュを保存できませんでした。ログインキーチェーンのロックを解除して、もう一度お試しください。";
 "Accounts, display, appearance, and live quota sources" = "アカウント、表示、外観、利用枠データ";
 "Refreshing…" = "更新中…";
 "Refresh Now" = "今すぐ更新";

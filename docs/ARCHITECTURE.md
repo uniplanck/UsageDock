@@ -143,6 +143,10 @@ All acquisition conforms to `UsageProviderAdapter` and returns domain `UsageAcco
 
 The Claude adapter resolves the official local Claude OAuth credential, queries the usage endpoint, and parses both legacy named windows and newer `limits` rows. Supported result shapes include 5h, weekly, model-scoped/Fable, and future dynamically identified windows.
 
+Claude Code's current-session and profile Keychain items are read only through `/usr/bin/security find-generic-password -s <service> -w`, with password output captured privately and errors discarded. UsageDock never modifies these items or the fallback credential files. Refreshed credentials are saved in UsageDock's own `com.uniplanck.UsageDock.ClaudeCredentials` Keychain service, with a separate account per source. A fingerprint ties each cached payload to its original provider credential, so Claude Code token rotation or re-login supersedes the saved cache.
+
+The shared in-memory cache rechecks provider credentials after five minutes; missing credentials and forced reloads after HTTP 401 are limited to one read per source per 30 seconds. Requests for the same profile share one token refresh. UsageDock checks that its own cache can be saved before consuming a rotating refresh token, and its native Keychain operations disallow authentication UI. Secrets are never placed in subprocess arguments, logs, account metadata, or UserDefaults. Hosted unit tests skip window creation and automatic live refresh and use injected credential stores and HTTP responses.
+
 ### Codex / OpenAI
 
 The Codex adapter resolves the official ChatGPT/Codex auth state and queries the Codex usage endpoint. Primary/secondary/additional model rate-limit windows are converted dynamically into domain buckets rather than assuming every account has one fixed 5h + 1w pair.
