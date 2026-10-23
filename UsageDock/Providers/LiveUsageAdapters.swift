@@ -12,7 +12,7 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
     }
 
     func fetchAccounts() async throws -> [UsageAccount] {
-        let resolver = ClaudeCredentialResolver()
+        let resolver = ClaudeCredentialResolver.shared
 
         func requestUsage(accessToken: String) async throws -> (Data, URLResponse) {
             var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
@@ -27,7 +27,11 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
         var (data, response) = try await requestUsage(accessToken: token)
 
         if let http = response as? HTTPURLResponse, http.statusCode == 401 {
-            token = try await resolver.accessToken(credentialPath: credentialPath, forceRefresh: true)
+            token = try await resolver.accessToken(
+                credentialPath: credentialPath,
+                forceRefresh: true,
+                rejectedAccessToken: token
+            )
             (data, response) = try await requestUsage(accessToken: token)
         }
 
@@ -1306,10 +1310,169 @@ enum UsageAdapterError: LocalizedError {
     }
 }
 
+/// Provider-owned items are read by the stable Apple-signed tool that created them.
+/// Password bytes stay in a pipe; neither output nor errors are logged.
+enum ProviderKeychainReader {
+    static func payload(
+        service: String,
+        run: (URL, [String]) -> (status: Int32, data: Data)? = runSecurity
+    ) -> Data? {
+        guard let result = run(
+            URL(fileURLWithPath: "/usr/bin/security"),
+            ["find-generic-password", "-s", service, "-w"]
+        ), result.status == 0 else { return nil }
+        var data = result.data
+        // security appends a newline to the password. Preserve the password itself.
+        if data.last == 0x0A { data.removeLast() }
+        return data.isEmpty ? nil : data
+    }
+
+    private static func runSecurity(_ executable: URL, _ arguments: [String]) -> (status: Int32, data: Data)? {
+        let process = Process()
+        let stdout = Pipe()
+        process.executableURL = executable
+        process.arguments = arguments
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = stdout
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        // A locked keychain must not leave a background read waiting indefinitely.
+        let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 5, execute: timeout)
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        timeout.cancel()
+        return (process.terminationStatus, data)
+    }
+}
+
+/// Only this namespace may be modified by UsageDock. Never accept a provider service
+/// name as a write target, even when credentials originated in a provider file.
+enum UsageDockClaudeKeychain {
+    static let service = "com.uniplanck.UsageDock.ClaudeCredentials"
+
+    static func query(account: String) -> [CFString: Any] {
+        [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: account,
+            kSecUseAuthenticationUI: kSecUseAuthenticationUIFail
+        ]
+    }
+
+    static func read(account: String) -> Data? {
+        var query = query(account: account)
+        query[kSecReturnData] = true
+        query[kSecMatchLimit] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
+        return result as? Data
+    }
+
+    static func write(_ data: Data, account: String) throws {
+        let query = query(account: account)
+        let attributes: [CFString: Any] = [kSecValueData: data]
+        var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = query
+            item[kSecValueData] = data
+            status = SecItemAdd(item as CFDictionary, nil)
+        }
+        guard status == errSecSuccess else {
+            throw UsageAdapterError.invalidResponse(
+                "UsageDock could not save its Claude token cache. Unlock the login keychain and try again."
+            )
+        }
+    }
+}
+
+final class ClaudeCredentialCache {
+    private struct Envelope: Codable {
+        let sourceFingerprint: String
+        let data: Data
+    }
+
+    private struct Entry {
+        let loadedAt: Date
+        var record: ClaudeCredentialStore.CredentialRecord?
+    }
+
+    private let lock = NSLock()
+    private var entries: [String: Entry] = [:]
+    private let now: () -> Date
+    private let readOwned: (String) -> Data?
+    private let writeOwned: (Data, String) throws -> Void
+
+    init(
+        now: @escaping () -> Date = Date.init,
+        readOwned: @escaping (String) -> Data? = UsageDockClaudeKeychain.read,
+        writeOwned: @escaping (Data, String) throws -> Void = UsageDockClaudeKeychain.write
+    ) {
+        self.now = now
+        self.readOwned = readOwned
+        self.writeOwned = writeOwned
+    }
+
+    func record(
+        sourceID: String,
+        reload: Bool = false,
+        readSource: () -> Data?
+    ) -> ClaudeCredentialStore.CredentialRecord? {
+        lock.lock()
+        defer { lock.unlock() }
+        let date = now()
+        if let entry = entries[sourceID] {
+            // Cache misses too. Repeated UI checks / HTTP 401s cannot hammer Keychain.
+            let interval: TimeInterval = reload || entry.record == nil ? 30 : 300
+            if date.timeIntervalSince(entry.loadedAt) < interval { return entry.record }
+        }
+        guard let sourceData = readSource() else {
+            entries[sourceID] = Entry(loadedAt: date, record: nil)
+            return nil
+        }
+        let target = ClaudeCredentialStore.PersistenceTarget(
+            account: sourceID,
+            sourceFingerprint: SHA256.hash(data: sourceData).map { String(format: "%02x", $0) }.joined()
+        )
+        let data: Data
+        if let previous = entries[sourceID]?.record, previous.target == target {
+            data = previous.data
+        } else if let saved = readOwned(sourceID),
+                  let envelope = try? JSONDecoder().decode(Envelope.self, from: saved),
+                  envelope.sourceFingerprint == target.sourceFingerprint {
+            data = envelope.data
+        } else {
+            // A Claude Code token rotation / re-login takes precedence over our cache.
+            data = sourceData
+        }
+        let record = ClaudeCredentialStore.CredentialRecord(data: data, target: target)
+        entries[sourceID] = Entry(loadedAt: date, record: record)
+        return record
+    }
+
+    func persist(_ data: Data, to target: ClaudeCredentialStore.PersistenceTarget) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        // A rotation has already consumed the old refresh token. Keep the new bytes
+        // usable in this process even if the keychain becomes locked after preflight.
+        defer {
+            if entries[target.account]?.record?.target == target {
+                entries[target.account]?.record = ClaudeCredentialStore.CredentialRecord(data: data, target: target)
+            }
+        }
+        let envelope = Envelope(sourceFingerprint: target.sourceFingerprint, data: data)
+        try writeOwned(JSONEncoder().encode(envelope), target.account)
+    }
+}
+
 enum ClaudeCredentialStore {
-    enum PersistenceTarget {
-        case keychain(service: String)
-        case file(URL)
+    struct PersistenceTarget: Equatable {
+        let account: String
+        let sourceFingerprint: String
     }
 
     struct CredentialRecord {
@@ -1317,21 +1480,23 @@ enum ClaudeCredentialStore {
         let target: PersistenceTarget
     }
 
-    static func credentialRecords(credentialPath: String? = nil) -> [CredentialRecord] {
+    private static let cache = ClaudeCredentialCache()
+
+    static func credentialRecords(credentialPath: String? = nil, reload: Bool = false) -> [CredentialRecord] {
         if let credentialPath {
             let credentialURL = URL(fileURLWithPath: credentialPath)
             let configDirectory = credentialURL.deletingLastPathComponent().path
             return [
-                keychainRecord(service: keychainServiceName(configDirectory: configDirectory)),
-                fileRecord(url: credentialURL)
+                keychainRecord(service: keychainServiceName(configDirectory: configDirectory), reload: reload),
+                fileRecord(url: credentialURL, reload: reload)
             ].compactMap { $0 }
         }
 
         let fileURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/.credentials.json")
         return [
-            keychainRecord(service: "Claude Code-credentials"),
-            fileRecord(url: fileURL)
+            keychainRecord(service: "Claude Code-credentials", reload: reload),
+            fileRecord(url: fileURL, reload: reload)
         ].compactMap { $0 }
     }
 
@@ -1351,25 +1516,7 @@ enum ClaudeCredentialStore {
     }
 
     static func persist(_ data: Data, to target: PersistenceTarget) throws {
-        switch target {
-        case .keychain(let service):
-            let query: [CFString: Any] = [
-                kSecClass: kSecClassGenericPassword,
-                kSecAttrService: service
-            ]
-            let attributes: [CFString: Any] = [
-                kSecValueData: data
-            ]
-            let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-            guard status == errSecSuccess else {
-                throw UsageAdapterError.invalidResponse(
-                    "Claude refreshed credentials could not be saved to Keychain (OSStatus \(status))."
-                )
-            }
-
-        case .file(let url):
-            try data.write(to: url, options: .atomic)
-        }
+        try cache.persist(data, to: target)
     }
 
     static func mergedCredentialData(
@@ -1410,26 +1557,16 @@ enum ClaudeCredentialStore {
         return (encoded, accessToken)
     }
 
-    private static func keychainRecord(service: String) -> CredentialRecord? {
-        guard let data = keychainPayload(service: service) else { return nil }
-        return CredentialRecord(data: data, target: .keychain(service: service))
+    private static func keychainRecord(service: String, reload: Bool) -> CredentialRecord? {
+        cache.record(sourceID: "keychain:\(service)", reload: reload) {
+            ProviderKeychainReader.payload(service: service)
+        }
     }
 
-    private static func fileRecord(url: URL) -> CredentialRecord? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return CredentialRecord(data: data, target: .file(url))
-    }
-
-    private static func keychainPayload(service: String) -> Data? {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecReturnData: true,
-            kSecMatchLimit: kSecMatchLimitOne
-        ]
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
-        return result as? Data
+    private static func fileRecord(url: URL, reload: Bool) -> CredentialRecord? {
+        cache.record(sourceID: "file:\(url.standardizedFileURL.path)", reload: reload) {
+            try? Data(contentsOf: url)
+        }
     }
 
     private static func numeric(_ value: Any?) -> Double? {
@@ -1441,15 +1578,71 @@ enum ClaudeCredentialStore {
     }
 }
 
-private struct ClaudeCredentialResolver {
+actor ClaudeCredentialResolver {
+    static let shared = ClaudeCredentialResolver()
     private let tokenURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
     private let clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+    private struct Pending {
+        let id: UUID
+        let forceRefresh: Bool
+        let task: Task<String, Error>
+    }
+    private var pending: [String: Pending] = [:]
+    private let records: (String?, Bool) -> [ClaudeCredentialStore.CredentialRecord]
+    private let persist: (Data, ClaudeCredentialStore.PersistenceTarget) throws -> Void
+    private let send: (URLRequest) async throws -> (Data, URLResponse)
+
+    init(
+        records: @escaping (String?, Bool) -> [ClaudeCredentialStore.CredentialRecord] = ClaudeCredentialStore.credentialRecords,
+        persist: @escaping (Data, ClaudeCredentialStore.PersistenceTarget) throws -> Void = ClaudeCredentialStore.persist,
+        send: @escaping (URLRequest) async throws -> (Data, URLResponse) = { try await URLSession.shared.data(for: $0) }
+    ) {
+        self.records = records
+        self.persist = persist
+        self.send = send
+    }
 
     func accessToken(
         credentialPath: String? = nil,
-        forceRefresh: Bool = false
+        forceRefresh: Bool = false,
+        rejectedAccessToken: String? = nil
     ) async throws -> String {
-        let records = ClaudeCredentialStore.credentialRecords(credentialPath: credentialPath)
+        let key = credentialPath.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? "current-session"
+        // Plan checks and overlapping usage requests share cache reads. Token refreshes
+        // for one profile must also share a single rotation / persistence operation.
+        if let current = pending[key] {
+            let token = try await current.task.value
+            if current.forceRefresh || !forceRefresh || (rejectedAccessToken != nil && token != rejectedAccessToken) {
+                return token
+            }
+            // A normal lookup may have just returned the same token rejected by HTTP
+            // 401. Join only a useful result; otherwise start the required refresh.
+            if pending[key]?.id == current.id { pending[key] = nil }
+            return try await accessToken(
+                credentialPath: credentialPath,
+                forceRefresh: forceRefresh,
+                rejectedAccessToken: rejectedAccessToken
+            )
+        }
+        let id = UUID()
+        let task = Task {
+            try await resolve(
+                credentialPath: credentialPath,
+                forceRefresh: forceRefresh,
+                rejectedAccessToken: rejectedAccessToken
+            )
+        }
+        pending[key] = Pending(id: id, forceRefresh: forceRefresh, task: task)
+        defer { if pending[key]?.id == id { pending[key] = nil } }
+        return try await task.value
+    }
+
+    private func resolve(
+        credentialPath: String?,
+        forceRefresh: Bool,
+        rejectedAccessToken: String?
+    ) async throws -> String {
+        let records = records(credentialPath, forceRefresh)
         if credentialPath != nil, records.isEmpty {
             throw UsageAdapterError.credentialsUnavailable(
                 "Claude profile credentials could not be read. Re-authenticate this UsageDock profile."
@@ -1468,7 +1661,7 @@ private struct ClaudeCredentialResolver {
             else { continue }
 
             let expired = Self.isExpired(oauth["expiresAt"])
-            if !forceRefresh && !expired {
+            if !expired && (!forceRefresh || (rejectedAccessToken != nil && token != rejectedAccessToken)) {
                 return token
             }
             sawExpired = sawExpired || expired
@@ -1479,7 +1672,7 @@ private struct ClaudeCredentialResolver {
 
             do {
                 // Refresh tokens may rotate. Prove we can persist before consuming one.
-                try ClaudeCredentialStore.persist(record.data, to: record.target)
+                try persist(record.data, record.target)
                 return try await refresh(
                     record: record,
                     oauth: oauth,
@@ -1522,7 +1715,7 @@ private struct ClaudeCredentialResolver {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await send(request)
         guard let http = response as? HTTPURLResponse else {
             throw UsageAdapterError.invalidResponse("Claude token refresh returned a non-HTTP response.")
         }
@@ -1544,7 +1737,7 @@ private struct ClaudeCredentialResolver {
             originalData: record.data,
             refreshData: data
         )
-        try ClaudeCredentialStore.persist(merged.data, to: record.target)
+        try persist(merged.data, record.target)
         return merged.accessToken
     }
 
