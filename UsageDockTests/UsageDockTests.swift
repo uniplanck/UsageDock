@@ -22,6 +22,380 @@ final class UsageDockDistributionPolicyTests: XCTestCase {
     }
 }
 
+@MainActor
+final class UsageStoreRefreshPolicyTests: XCTestCase {
+    @MainActor
+    private final class Harness {
+        let suite = "UsageDockTests.RefreshPolicy.\(UUID().uuidString)"
+        let defaults: UserDefaults
+        var date = Date(timeIntervalSince1970: 1_000_000)
+        var calls: [UUID: Int] = [:]
+        var error: Error?
+        lazy var store = UsageStore(defaults: defaults, now: { [unowned self] in date }, usageFetcher: { [unowned self] account in
+            calls[account.id, default: 0] += 1
+            if let error { throw error }
+            return account
+        })
+
+        init(providers: [ProviderID] = [.claude]) {
+            defaults = UserDefaults(suiteName: suite)!
+            store.accounts = providers.map { provider in
+                UsageAccount(provider: provider, name: provider.displayName, source: .profile, buckets: [
+                    UsageBucket(quotaID: "weekly", label: "1w", kind: .weekly, percentUsed: 0.4,
+                                resetsAt: date.addingTimeInterval(86_400), isEnabled: false)
+                ])
+            }
+        }
+
+        deinit { defaults.removePersistentDomain(forName: suite) }
+
+        var account: UsageAccount { store.accounts[0] }
+        var count: Int { calls[account.id, default: 0] }
+        var state: AccountRefreshState { store.accountRefreshState(for: account.id) }
+        var target: RailDisplayTarget { .account(id: account.id, provider: account.provider) }
+        func advance(_ seconds: TimeInterval) { date.addTimeInterval(seconds) }
+        func refresh(manual: Bool = false) async { await store.refreshProvider(account.provider, manual: manual) }
+        func limit(retryAfter: TimeInterval? = nil) { error = UsageAdapterError.rateLimited(provider: .claude, retryAfter: retryAfter) }
+    }
+
+    func testClaudeAutomaticFetchesAreFiveMinutesApartAndSkippedPollKeepsTimestamp() async {
+        let h = Harness()
+        let start = h.date
+        await h.refresh()
+        for _ in 1...4 {
+            h.advance(60)
+            await h.refresh()
+            XCTAssertEqual(h.count, 1)
+            XCTAssertEqual(h.state, .live(start))
+            XCTAssertEqual(h.store.refreshState(for: .claude), .live(start, accountCount: 1))
+        }
+        h.advance(59.999)
+        await h.refresh()
+        XCTAssertEqual(h.count, 1)
+        h.advance(0.001)
+        await h.refresh()
+        XCTAssertEqual(h.count, 2)
+        XCTAssertEqual(h.state, .live(h.date))
+    }
+
+    func testManualClaudeRefreshRequiresMoreThanSixtySecondsAndResetsAutomaticInterval() async {
+        let h = Harness()
+        await h.refresh()
+        await h.refresh(manual: true)
+        h.advance(60)
+        await h.refresh(manual: true)
+        XCTAssertEqual(h.count, 1)
+        h.advance(0.001)
+        await h.refresh(manual: true)
+        XCTAssertEqual(h.count, 2)
+        h.advance(299.999)
+        await h.refresh()
+        XCTAssertEqual(h.count, 2)
+        h.advance(0.001)
+        await h.refresh()
+        XCTAssertEqual(h.count, 3)
+    }
+
+    func testOtherProvidersKeepSixtySecondInterval() async {
+        let h = Harness(providers: [.codex, .antigravity, .kimi, .grok])
+        for provider in [.codex, .antigravity, .kimi, .grok] as [ProviderID] {
+            await h.store.refreshProvider(provider)
+        }
+        h.advance(59)
+        for account in h.store.accounts {
+            await h.store.refreshProvider(account.provider)
+            XCTAssertEqual(h.calls[account.id], 1)
+        }
+        h.advance(1)
+        for account in h.store.accounts {
+            await h.store.refreshProvider(account.provider)
+            XCTAssertEqual(h.calls[account.id], 2)
+        }
+    }
+
+    func testIntervalsAndBackoffArePerAccount() async {
+        let h = Harness()
+        await h.refresh()
+        let firstID = h.account.id
+        h.advance(100)
+        var second = h.account
+        second.id = UUID()
+        h.store.accounts.append(second)
+        h.limit()
+        await h.refresh()
+        XCTAssertEqual(h.calls[firstID], 1)
+        XCTAssertEqual(h.calls[second.id], 1)
+        h.advance(200)
+        h.error = nil
+        await h.refresh()
+        XCTAssertEqual(h.calls[firstID], 2)
+        XCTAssertEqual(h.calls[second.id], 1)
+    }
+
+    func test429BackoffDoublesAndCapsAtThirtyMinutesAndManualCannotBypass() async {
+        let h = Harness()
+        h.limit()
+        for (index, delay) in [300.0, 600, 1200, 1800, 1800].enumerated() {
+            let attempt = h.date
+            await h.refresh()
+            XCTAssertEqual(h.count, index + 1)
+            XCTAssertEqual(h.store.accountRefreshStates[h.account.id], .rateLimited(lastSuccess: nil, retryAt: attempt.addingTimeInterval(delay)))
+            h.advance(delay - 0.001)
+            await h.refresh()
+            await h.refresh(manual: true)
+            XCTAssertEqual(h.count, index + 1)
+            h.advance(0.001)
+        }
+        await h.refresh()
+        XCTAssertEqual(h.count, 6)
+    }
+
+    func testSuccessResetsExponentialBackoff() async {
+        let h = Harness()
+        h.limit()
+        await h.refresh()
+        h.advance(300)
+        await h.refresh()
+        h.advance(600)
+        h.error = nil
+        await h.refresh()
+        XCTAssertEqual(h.state, .live(h.date))
+        h.advance(300)
+        let lastSuccess = h.date.addingTimeInterval(-300)
+        h.limit()
+        await h.refresh()
+        XCTAssertEqual(h.state, .rateLimited(lastSuccess: lastSuccess, retryAt: h.date.addingTimeInterval(300)))
+        XCTAssertEqual(h.count, 4)
+    }
+
+    func testRetryAfterOverridesFallbackWithoutThirtyMinuteCap() async {
+        let h = Harness()
+        h.limit(retryAfter: 3600)
+        await h.refresh()
+        XCTAssertEqual(h.state, .rateLimited(lastSuccess: nil, retryAt: h.date.addingTimeInterval(3600)))
+        h.advance(3599)
+        await h.refresh(manual: true)
+        XCTAssertEqual(h.count, 1)
+        h.advance(1)
+        h.error = nil
+        await h.refresh(manual: true)
+        XCTAssertEqual(h.count, 2)
+        XCTAssertEqual(h.state, .live(h.date))
+    }
+
+    func testShortRetryAfterIsUsedInsteadOfFiveMinuteFallback() async {
+        let h = Harness()
+        h.limit(retryAfter: 90)
+        await h.refresh()
+        h.advance(89)
+        await h.refresh()
+        XCTAssertEqual(h.count, 1)
+        h.advance(1)
+        await h.refresh()
+        XCTAssertEqual(h.count, 2)
+    }
+
+    func test429KeepsBucketsPersistenceAndAllFailureBadgesClear() async throws {
+        let h = Harness()
+        h.store.appLanguage = .japanese
+        await h.refresh()
+        let lastSuccess = h.date
+        let accounts = h.store.accounts
+        let saved = try XCTUnwrap(h.defaults.data(forKey: "UsageDock.accounts.v3"))
+        h.store.menuBarUsageEnabled = true
+        h.store.setMenuBarAccountSelected(h.account.id, enabled: true)
+        h.advance(300)
+        h.limit()
+        await h.refresh()
+        XCTAssertEqual(h.state, .rateLimited(lastSuccess: lastSuccess, retryAt: h.date.addingTimeInterval(300)))
+        XCTAssertEqual(h.store.accounts, accounts)
+        XCTAssertEqual(h.defaults.data(forKey: "UsageDock.accounts.v3"), saved)
+        XCTAssertFalse(h.state.isStale)
+        XCTAssertNil(h.state.failureLabel)
+        XCTAssertNil(h.store.refreshFailureLabel(for: h.target))
+        XCTAssertNil(h.store.refreshFailureLabel(for: .provider(.claude)))
+        XCTAssertEqual(h.store.displayAuthenticationState(for: h.account), .valid)
+        XCTAssertEqual(h.store.accountStatusText(for: h.account), "レート制限中・前回値を表示")
+        XCTAssertEqual(h.store.refreshState(for: .claude), .live(lastSuccess, accountCount: 1))
+        let menuItem = try XCTUnwrap(h.store.menuBarUsageItems(now: h.date).first)
+        XCTAssertFalse(menuItem.isStale)
+        XCTAssertNil(menuItem.failureLabel)
+        XCTAssertEqual(menuItem.authenticationState, .valid)
+    }
+
+    func testFirst429WithoutSuccessfulFetchHasNoFailureBadge() async {
+        let h = Harness()
+        h.limit()
+        await h.refresh()
+        XCTAssertFalse(h.state.isStale)
+        XCTAssertNil(h.store.refreshFailureLabel(for: h.target))
+        XCTAssertEqual(h.store.displayAuthenticationState(for: h.account), .valid)
+        if case .failed = h.store.refreshState(for: .claude) { XCTFail("429 must not fail the provider") }
+    }
+
+    func test429OnlyBadgesOnceDataIsOlderThanThirtyMinutesEvenWhileBackedOff() async {
+        let h = Harness()
+        await h.refresh()
+        h.advance(300)
+        h.limit(retryAfter: 3600)
+        await h.refresh()
+        h.advance(1500)
+        XCTAssertFalse(h.state.isStale)
+        h.advance(0.001)
+        await h.refresh(manual: true)
+        XCTAssertEqual(h.count, 2)
+        XCTAssertTrue(h.state.isStale)
+        XCTAssertEqual(h.state.failureLabel, "Refresh failed")
+        h.store.appLanguage = .english
+        XCTAssertEqual(h.store.refreshFailureLabel(for: h.target), "Refresh failed")
+        if case .failed = h.store.refreshState(for: .claude) {} else { XCTFail("Stale failing data should fail the provider") }
+    }
+
+    func testFirstTimeoutKeepsDataAndSecondConsecutiveNetworkFailureBadges() async {
+        let h = Harness()
+        await h.refresh()
+        let accounts = h.store.accounts
+        h.advance(300)
+        h.error = URLError(.timedOut)
+        await h.refresh()
+        XCTAssertFalse(h.state.isStale)
+        XCTAssertNil(h.store.refreshFailureLabel(for: h.target))
+        await h.refresh(manual: true)
+        XCTAssertEqual(h.count, 2)
+        h.advance(60)
+        h.error = URLError(.networkConnectionLost)
+        await h.refresh()
+        XCTAssertTrue(h.state.isStale)
+        XCTAssertEqual(h.state.failureLabel, "Refresh failed")
+        XCTAssertEqual(h.store.accounts, accounts)
+    }
+
+    func testSingleFailureBadgesIfLastSuccessIsOlderThanThirtyMinutes() async {
+        let h = Harness()
+        await h.refresh()
+        h.advance(1800.001)
+        h.error = URLError(.timedOut)
+        await h.refresh()
+        XCTAssertTrue(h.state.isStale)
+        XCTAssertEqual(h.state.failureLabel, "Refresh failed")
+    }
+
+    func testOldSuccessfulDataAloneDoesNotBadgeWithoutFailure() async {
+        let h = Harness()
+        await h.refresh()
+        h.advance(3600)
+        XCTAssertFalse(h.state.isStale)
+        XCTAssertNil(h.store.refreshFailureLabel(for: h.target))
+    }
+
+    func testSuccessResetsConsecutiveTransientFailureCountAndClearsBadge() async {
+        let h = Harness()
+        await h.refresh()
+        h.advance(300)
+        h.error = URLError(.timedOut)
+        await h.refresh()
+        h.advance(60)
+        await h.refresh()
+        XCTAssertTrue(h.state.isStale)
+        h.advance(60)
+        h.error = nil
+        await h.refresh()
+        XCTAssertFalse(h.state.isStale)
+        h.advance(300)
+        h.error = URLError(.cannotConnectToHost)
+        await h.refresh()
+        XCTAssertFalse(h.state.isStale)
+    }
+
+    func test429DoesNotCountTowardConsecutiveTransientFailures() async {
+        let h = Harness()
+        h.error = URLError(.timedOut)
+        await h.refresh()
+        h.advance(60)
+        h.limit()
+        await h.refresh()
+        h.advance(300)
+        h.error = URLError(.timedOut)
+        await h.refresh()
+        XCTAssertFalse(h.state.isStale)
+    }
+
+    func testAuthenticationErrorsBadgeImmediatelyAndKeepBuckets() async {
+        for error in [UsageAdapterError.authenticationExpired("expired"), .credentialsUnavailable("missing")] {
+            let h = Harness()
+            let accounts = h.store.accounts
+            h.error = error
+            await h.refresh()
+            XCTAssertTrue(h.state.isStale)
+            XCTAssertEqual(h.state.failureLabel, "Refresh failed – sign in again")
+            XCTAssertEqual(h.store.displayAuthenticationState(for: h.account), .required)
+            XCTAssertEqual(h.store.accounts, accounts)
+        }
+    }
+}
+
+final class HTTPUsageResponseValidatorTests: XCTestCase {
+    private let now = Date(timeIntervalSince1970: 1_000_000)
+
+    private func response(_ status: Int, retryAfter: String? = nil) -> HTTPURLResponse {
+        HTTPURLResponse(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!, statusCode: status,
+                        httpVersion: nil, headerFields: retryAfter.map { ["Retry-After": $0] })!
+    }
+
+    private func rateLimit(_ header: String? = nil) throws -> TimeInterval? {
+        do {
+            try HTTPUsageResponseValidator.validate(response: response(429, retryAfter: header),
+                data: Data(#"{"type":"rate_limit_error"}"#.utf8), provider: .claude, now: now)
+            XCTFail("429 must throw a rate-limited error")
+        } catch UsageAdapterError.rateLimited(let provider, let retryAfter) {
+            XCTAssertEqual(provider, .claude)
+            return retryAfter
+        }
+        return nil
+    }
+
+    func test429WithoutHeaderUsesDedicatedErrorWithNoRetryAfter() throws {
+        XCTAssertNil(try rateLimit())
+    }
+
+    func testNumericRetryAfter() throws {
+        XCTAssertEqual(try rateLimit(" 900 "), 900)
+        XCTAssertEqual(try rateLimit("0"), 0)
+    }
+
+    func testHTTPDateRetryAfterUsesInjectedClock() throws {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss 'GMT'"
+        XCTAssertEqual(try rateLimit(formatter.string(from: now.addingTimeInterval(900))), 900)
+        XCTAssertEqual(try rateLimit(formatter.string(from: now.addingTimeInterval(-60))), 0)
+    }
+
+    func testInvalidRetryAfterFallsBackToExponentialPolicy() throws {
+        for header in ["invalid", "", "-1", "NaN", "inf"] {
+            XCTAssertNil(try rateLimit(header))
+        }
+    }
+
+    func testAuthenticationStatusCodesStillRequireSignIn() {
+        for status in [401, 403] {
+            XCTAssertThrowsError(try HTTPUsageResponseValidator.validate(response: response(status), data: Data(), provider: .claude)) { error in
+                XCTAssertEqual(AccountRefreshState.failure(error).failureLabel, "Refresh failed – sign in again")
+            }
+        }
+    }
+
+    func testSuccessfulAndOtherHTTPResponsesKeepExistingBehavior() throws {
+        try HTTPUsageResponseValidator.validate(response: response(200), data: Data(), provider: .claude)
+        XCTAssertThrowsError(try HTTPUsageResponseValidator.validate(response: response(503), data: Data(), provider: .claude)) { error in
+            guard case UsageAdapterError.httpFailure(let provider, let status, _) = error else { return XCTFail("Expected HTTP failure") }
+            XCTAssertEqual(provider, .claude)
+            XCTAssertEqual(status, 503)
+        }
+    }
+}
+
 final class ClaudeCredentialStoreTests: XCTestCase {
     func testProviderReadUsesSecurityWithoutShellOrSecretArguments() throws {
         let service = "Claude Code-credentials-profile with spaces;$(ignored)"
@@ -926,6 +1300,7 @@ final class AccountRefreshStateDisplayTests: XCTestCase {
             .idle,
             .refreshing,
             .live(now),
+            .rateLimited(lastSuccess: now, retryAt: now.addingTimeInterval(300)),
             .degraded(now, "fixture")
         ]
 
@@ -1131,6 +1506,8 @@ final class UsageStoreRefreshDisplayTests: XCTestCase {
         store.recordRefreshFailure(UsageAdapterError.authenticationExpired("disabled"), for: disabledID)
         XCTAssertNil(store.refreshFailureLabel(for: target))
 
+        store.recordRefreshFailure(UsageAdapterError.invalidResponse("fixture"), for: genericID)
+        XCTAssertNil(store.refreshFailureLabel(for: target))
         store.recordRefreshFailure(UsageAdapterError.invalidResponse("fixture"), for: genericID)
         XCTAssertEqual(store.refreshFailureLabel(for: target), "Refresh failed")
 

@@ -156,3 +156,4 @@
 "Kimi Code quotas could not be refreshed. Showing total usage only." = "Kimiコードの使用量を更新できません。合計使用量のみ表示しています。";
 "Refresh failed – sign in again" = "更新失敗・再ログインが必要";
 "Refresh failed" = "更新失敗";
+"Rate limited · showing last known usage" = "レート制限中・前回値を表示";
