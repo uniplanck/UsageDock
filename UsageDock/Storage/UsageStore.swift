@@ -368,6 +368,7 @@ final class UsageStore: ObservableObject {
     @Published private(set) var accountRefreshStates: [UUID: AccountRefreshState] = [:]
     @Published private(set) var multiplierDetectionStates: [UUID: MultiplierDetectionState] = [:]
     @Published private(set) var isRefreshing = false
+    @Published private(set) var hasClaudeLocalLogin = false
     @Published var settingsBubblePreviewRequested = false
 
     private let defaults: UserDefaults
@@ -1074,6 +1075,9 @@ final class UsageStore: ObservableObject {
 
     private func hasLocalLogin(for provider: ProviderID) -> Bool {
         guard provider.supportsLiveUsage else { return false }
+        if provider == .claude {
+            return hasClaudeLocalLogin || ProviderPlanMultiplierDetector.hasCurrentSession(for: provider)
+        }
         if provider == .antigravity {
             return AntigravityUsageAdapter.executableURL() != nil
         }
@@ -1088,9 +1092,17 @@ final class UsageStore: ObservableObject {
     }
 
     func detectPlanMultiplier(accountID: UUID) {
+        Task { await updatePlanMultiplier(accountID: accountID) }
+    }
+
+    private func updatePlanMultiplier(accountID: UUID) async {
         guard let index = accounts.firstIndex(where: { $0.id == accountID }) else { return }
         let account = accounts[index]
-        let result = ProviderPlanMultiplierDetector.detect(for: account)
+        let result = await Task.detached(priority: .utility) {
+            ProviderPlanMultiplierDetector.detect(for: account)
+        }.value
+        guard let index = accounts.firstIndex(where: { $0.id == accountID }),
+              accounts[index] == account else { return }
         if let multiplier = result.multiplier {
             accounts[index].planMultiplier = multiplier
             accounts[index].multiplierMode = .automatic
@@ -1157,6 +1169,12 @@ final class UsageStore: ObservableObject {
         guard !isRefreshing else { return }
         isRefreshing = true
         defer { isRefreshing = false }
+
+        // Discover Keychain-only logins outside view evaluation, even before the
+        // first account is registered. Publishing the result enables the UI check.
+        hasClaudeLocalLogin = await Task.detached(priority: .utility) {
+            !ClaudeCredentialStore.credentialRecords().isEmpty
+        }.value
 
         await refreshProvider(.claude)
         await refreshProvider(.codex)
@@ -1237,7 +1255,7 @@ final class UsageStore: ObservableObject {
         for accountID in accountIDs {
             if let autoAccount = accounts.first(where: { $0.id == accountID }),
                autoAccount.multiplierMode == .automatic {
-                detectPlanMultiplier(accountID: accountID)
+                await updatePlanMultiplier(accountID: accountID)
             }
 
             guard let account = accounts.first(where: { $0.id == accountID }) else { continue }

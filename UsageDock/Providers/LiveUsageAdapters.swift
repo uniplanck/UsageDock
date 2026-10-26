@@ -1,5 +1,6 @@
 import CryptoKit
 import CoreFoundation
+import Darwin
 import Foundation
 import Security
 
@@ -1315,7 +1316,7 @@ enum UsageAdapterError: LocalizedError {
 enum ProviderKeychainReader {
     static func payload(
         service: String,
-        run: (URL, [String]) -> (status: Int32, data: Data)? = runSecurity
+        run: (URL, [String]) -> (status: Int32, data: Data)? = { runSecurity($0, $1) }
     ) -> Data? {
         guard let result = run(
             URL(fileURLWithPath: "/usr/bin/security"),
@@ -1327,9 +1328,17 @@ enum ProviderKeychainReader {
         return data.isEmpty ? nil : data
     }
 
-    private static func runSecurity(_ executable: URL, _ arguments: [String]) -> (status: Int32, data: Data)? {
+    static func runSecurity(
+        _ executable: URL,
+        _ arguments: [String],
+        timeout: TimeInterval = 10
+    ) -> (status: Int32, data: Data)? {
+        // Even an accidental UI caller must never launch a Keychain prompt or wait.
+        guard !Thread.isMainThread else { return nil }
         let process = Process()
         let stdout = Pipe()
+        let terminated = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in terminated.signal() }
         process.executableURL = executable
         process.arguments = arguments
         process.standardInput = FileHandle.nullDevice
@@ -1340,13 +1349,59 @@ enum ProviderKeychainReader {
         } catch {
             return nil
         }
-        // A locked keychain must not leave a background read waiting indefinitely.
-        let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 5, execute: timeout)
-        let data = stdout.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        timeout.cancel()
+        let deadline = DispatchTime.now() + timeout
+        let output = OutputBuffer()
+        let drained = DispatchSemaphore(value: 0)
+        let queue = DispatchQueue(label: "UsageDock.security-output", qos: .utility)
+        // DispatchIO drains while the child runs, so output larger than a pipe's
+        // capacity cannot block termination. A timed-out read can also be cancelled.
+        let descriptor = dup(stdout.fileHandleForReading.fileDescriptor)
+        guard descriptor >= 0 else {
+            stop(process)
+            return nil
+        }
+        let channel = DispatchIO(type: .stream, fileDescriptor: descriptor, queue: queue) { _ in
+            close(descriptor)
+        }
+        defer { channel.close(flags: .stop) }
+        channel.read(offset: 0, length: Int.max, queue: queue) { done, data, error in
+            output.append(data, error: error)
+            if done { drained.signal() }
+        }
+        guard terminated.wait(timeout: deadline) == .success else {
+            stop(process)
+            return nil
+        }
+        guard drained.wait(timeout: deadline) == .success, let data = output.data else { return nil }
         return (process.terminationStatus, data)
+    }
+
+    private static func stop(_ process: Process) {
+        guard process.isRunning else { return }
+        process.terminate()
+        // A stuck dialog (or a child ignoring SIGTERM) must not remain after cancellation.
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1) {
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        }
+    }
+
+    private final class OutputBuffer {
+        private let lock = NSLock()
+        private var bytes = Data()
+        private var failed = false
+
+        func append(_ data: DispatchData?, error: Int32) {
+            lock.lock()
+            defer { lock.unlock() }
+            if let data { bytes.append(contentsOf: data) }
+            failed = failed || error != 0
+        }
+
+        var data: Data? {
+            lock.lock()
+            defer { lock.unlock() }
+            return failed ? nil : bytes
+        }
     }
 }
 
@@ -1365,6 +1420,7 @@ enum UsageDockClaudeKeychain {
     }
 
     static func read(account: String) -> Data? {
+        guard !Thread.isMainThread else { return nil }
         var query = query(account: account)
         query[kSecReturnData] = true
         query[kSecMatchLimit] = kSecMatchLimitOne
@@ -1390,7 +1446,8 @@ enum UsageDockClaudeKeychain {
     }
 }
 
-final class ClaudeCredentialCache {
+// Cache state is locked. Injected I/O callbacks must support concurrent sources.
+final class ClaudeCredentialCache: @unchecked Sendable {
     private struct Envelope: Codable {
         let sourceFingerprint: String
         let data: Data
@@ -1399,10 +1456,20 @@ final class ClaudeCredentialCache {
     private struct Entry {
         let loadedAt: Date
         var record: ClaudeCredentialStore.CredentialRecord?
+        let sourceReadFailed: Bool
+        var generation = UUID()
+    }
+
+    private final class PendingRead {
+        let owner = Thread.current
+        let finished = DispatchGroup()
+
+        init() { finished.enter() }
     }
 
     private let lock = NSLock()
     private var entries: [String: Entry] = [:]
+    private var pending: [String: PendingRead] = [:]
     private let now: () -> Date
     private let readOwned: (String) -> Data?
     private let writeOwned: (Data, String) throws -> Void
@@ -1422,24 +1489,74 @@ final class ClaudeCredentialCache {
         reload: Bool = false,
         readSource: () -> Data?
     ) -> ClaudeCredentialStore.CredentialRecord? {
+        let date = now()
+        lock.lock()
+        if let entry = entries[sourceID] {
+            let interval: TimeInterval
+            if sourceID.hasPrefix("keychain:") {
+                // A failed/denied/timed-out read must not reopen a password dialog,
+                // even on repeated 401s. Only successful reads allow a 30s reload.
+                interval = entry.sourceReadFailed ? 600 : (reload ? 30 : 1_800)
+            } else {
+                interval = reload || entry.record == nil ? 30 : 300
+            }
+            if date.timeIntervalSince(entry.loadedAt) < interval {
+                lock.unlock()
+                return entry.record
+            }
+        }
+        if let flight = pending[sourceID] {
+            let previous = entries[sourceID]?.record
+            lock.unlock()
+            // Reentrant reads cannot wait on themselves; UI reads never wait at all.
+            guard !Thread.isMainThread, flight.owner !== Thread.current else { return previous }
+            _ = flight.finished.wait(timeout: .now() + 10)
+            return cachedRecord(sourceID: sourceID)
+        }
+        let flight = PendingRead()
+        pending[sourceID] = flight
+        let previous = entries[sourceID]
+        lock.unlock()
+
+        // No caller-supplied or Keychain work runs while holding the cache lock.
+        let record = readSource().map { sourceData in
+            makeRecord(sourceData: sourceData, sourceID: sourceID, previous: previous?.record)
+        }
+        let loadedAt = now()
+        lock.lock()
+        // A concurrent token refresh may have replaced the data while we read.
+        let current = entries[sourceID]
+        let result: ClaudeCredentialStore.CredentialRecord?
+        if let refreshed = current?.record,
+           refreshed.target == record?.target || (record == nil && current?.generation != previous?.generation) {
+            result = refreshed
+        } else {
+            result = record
+        }
+        entries[sourceID] = Entry(loadedAt: loadedAt, record: result, sourceReadFailed: record == nil)
+        pending[sourceID] = nil
+        lock.unlock()
+        flight.finished.leave()
+        return result
+    }
+
+    func cachedRecord(sourceID: String) -> ClaudeCredentialStore.CredentialRecord? {
         lock.lock()
         defer { lock.unlock() }
-        let date = now()
-        if let entry = entries[sourceID] {
-            // Cache misses too. Repeated UI checks / HTTP 401s cannot hammer Keychain.
-            let interval: TimeInterval = reload || entry.record == nil ? 30 : 300
-            if date.timeIntervalSince(entry.loadedAt) < interval { return entry.record }
-        }
-        guard let sourceData = readSource() else {
-            entries[sourceID] = Entry(loadedAt: date, record: nil)
-            return nil
-        }
+        return entries[sourceID]?.record
+    }
+
+    private func makeRecord(
+        sourceData: Data,
+        sourceID: String,
+        previous: ClaudeCredentialStore.CredentialRecord?
+    ) -> ClaudeCredentialStore.CredentialRecord {
         let target = ClaudeCredentialStore.PersistenceTarget(
             account: sourceID,
             sourceFingerprint: SHA256.hash(data: sourceData).map { String(format: "%02x", $0) }.joined()
         )
         let data: Data
-        if let previous = entries[sourceID]?.record, previous.target == target {
+        if let previous, previous.target == target {
             data = previous.data
         } else if let saved = readOwned(sourceID),
                   let envelope = try? JSONDecoder().decode(Envelope.self, from: saved),
@@ -1449,21 +1566,18 @@ final class ClaudeCredentialCache {
             // A Claude Code token rotation / re-login takes precedence over our cache.
             data = sourceData
         }
-        let record = ClaudeCredentialStore.CredentialRecord(data: data, target: target)
-        entries[sourceID] = Entry(loadedAt: date, record: record)
-        return record
+        return ClaudeCredentialStore.CredentialRecord(data: data, target: target)
     }
 
     func persist(_ data: Data, to target: ClaudeCredentialStore.PersistenceTarget) throws {
         lock.lock()
-        defer { lock.unlock() }
         // A rotation has already consumed the old refresh token. Keep the new bytes
         // usable in this process even if the keychain becomes locked after preflight.
-        defer {
-            if entries[target.account]?.record?.target == target {
-                entries[target.account]?.record = ClaudeCredentialStore.CredentialRecord(data: data, target: target)
-            }
+        if entries[target.account]?.record?.target == target {
+            entries[target.account]?.record = ClaudeCredentialStore.CredentialRecord(data: data, target: target)
+            entries[target.account]?.generation = UUID()
         }
+        lock.unlock()
         let envelope = Envelope(sourceFingerprint: target.sourceFingerprint, data: data)
         try writeOwned(JSONEncoder().encode(envelope), target.account)
     }
@@ -1483,21 +1597,54 @@ enum ClaudeCredentialStore {
     private static let cache = ClaudeCredentialCache()
 
     static func credentialRecords(credentialPath: String? = nil, reload: Bool = false) -> [CredentialRecord] {
-        if let credentialPath {
-            let credentialURL = URL(fileURLWithPath: credentialPath)
-            let configDirectory = credentialURL.deletingLastPathComponent().path
-            return [
-                keychainRecord(service: keychainServiceName(configDirectory: configDirectory), reload: reload),
-                fileRecord(url: credentialURL, reload: reload)
-            ].compactMap { $0 }
-        }
+        let source = sourceLocation(credentialPath: credentialPath)
+        return credentialRecords(fileURL: source.fileURL, service: source.service, cache: cache, reload: reload)
+    }
 
-        let fileURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/.credentials.json")
-        return [
-            keychainRecord(service: "Claude Code-credentials", reload: reload),
-            fileRecord(url: fileURL, reload: reload)
-        ].compactMap { $0 }
+    static func credentialRecords(
+        fileURL: URL,
+        service: String,
+        cache: ClaudeCredentialCache,
+        reload: Bool = false,
+        readKeychain: (String) -> Data? = { ProviderKeychainReader.payload(service: $0) }
+    ) -> [CredentialRecord] {
+        let fileID = "file:\(fileURL.standardizedFileURL.path)"
+        let keychainID = "keychain:\(service)"
+        // Defensive boundary for synchronous consumers, including plan metadata.
+        // Body evaluation may observe cached data but must never read either Keychain.
+        if Thread.isMainThread {
+            return [cache.cachedRecord(sourceID: fileID) ?? cache.cachedRecord(sourceID: keychainID)].compactMap { $0 }
+        }
+        // Do not eagerly evaluate a Keychain fallback when a credentials file exists.
+        if let file = cache.record(sourceID: fileID, reload: reload, readSource: { try? Data(contentsOf: fileURL) }),
+           let object = try? JSONSerialization.jsonObject(with: file.data) as? [String: Any],
+           let oauth = object["claudeAiOauth"] as? [String: Any],
+           let token = oauth["accessToken"] as? String, !token.isEmpty {
+            return [file]
+        }
+        return [cache.record(sourceID: keychainID, reload: reload) { readKeychain(service) }].compactMap { $0 }
+    }
+
+    static func hasCurrentSession() -> Bool {
+        let source = sourceLocation(credentialPath: nil)
+        return hasCurrentSession(fileURL: source.fileURL, service: source.service, cache: cache)
+    }
+
+    static func hasCurrentSession(fileURL: URL, service: String, cache: ClaudeCredentialCache) -> Bool {
+        cache.cachedRecord(sourceID: "file:\(fileURL.standardizedFileURL.path)") != nil ||
+            cache.cachedRecord(sourceID: "keychain:\(service)") != nil ||
+            FileManager.default.fileExists(atPath: fileURL.path)
+    }
+
+    private static func sourceLocation(credentialPath: String?) -> (fileURL: URL, service: String) {
+        if let credentialPath {
+            let fileURL = URL(fileURLWithPath: credentialPath)
+            return (fileURL, keychainServiceName(configDirectory: fileURL.deletingLastPathComponent().path))
+        }
+        return (
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/.credentials.json"),
+            "Claude Code-credentials"
+        )
     }
 
     static func credentialCandidates(credentialPath: String? = nil) -> [Data] {
@@ -1555,18 +1702,6 @@ enum ClaudeCredentialStore {
         object["claudeAiOauth"] = oauth
         let encoded = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
         return (encoded, accessToken)
-    }
-
-    private static func keychainRecord(service: String, reload: Bool) -> CredentialRecord? {
-        cache.record(sourceID: "keychain:\(service)", reload: reload) {
-            ProviderKeychainReader.payload(service: service)
-        }
-    }
-
-    private static func fileRecord(url: URL, reload: Bool) -> CredentialRecord? {
-        cache.record(sourceID: "file:\(url.standardizedFileURL.path)", reload: reload) {
-            try? Data(contentsOf: url)
-        }
     }
 
     private static func numeric(_ value: Any?) -> Double? {
