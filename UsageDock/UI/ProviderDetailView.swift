@@ -48,10 +48,12 @@ struct ProviderDetailView: View {
                 }
                 .shadow(color: .black.opacity(theme == .light ? 0.18 : 0.38), radius: 20, y: 7)
 
-            content
-                .padding(.leading, edge == .left ? CGFloat(usageStore.bubblePointerDepth) + 14 : 16)
-                .padding(.trailing, edge == .right ? CGFloat(usageStore.bubblePointerDepth) + 14 : 16)
-                .padding(.vertical, 16)
+            TimelineView(.periodic(from: .now, by: 30)) { _ in
+                content
+            }
+            .padding(.leading, edge == .left ? CGFloat(usageStore.bubblePointerDepth) + 14 : 16)
+            .padding(.trailing, edge == .right ? CGFloat(usageStore.bubblePointerDepth) + 14 : 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -77,6 +79,7 @@ struct ProviderDetailView: View {
                         quotaRow(aggregate)
                     }
                 }
+                .opacity(usageStore.refreshFailureLabel(for: target) == nil ? 1 : 0.55)
             }
 
             footer
@@ -123,6 +126,7 @@ struct ProviderDetailView: View {
                     .foregroundStyle(ProviderBrand.tertiaryText(theme: theme))
                     .textCase(.uppercase)
             }
+            .opacity(usageStore.refreshFailureLabel(for: target) == nil ? 1 : 0.55)
         }
     }
 
@@ -157,14 +161,12 @@ struct ProviderDetailView: View {
 
                 Spacer()
 
-                if let reset = aggregate.resetsAt {
-                    Text(resetText(reset))
-                        .font(.system(size: 9.2, weight: .medium, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(ProviderBrand.secondaryText(theme: theme))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.72)
-                }
+                Text(aggregate.resetsAt.map(resetText) ?? "—")
+                    .font(.system(size: 9.2, weight: .medium, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(ProviderBrand.secondaryText(theme: theme))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
 
                 Text(percentText(displayed))
                     .font(.system(size: 12.5, weight: .semibold, design: .rounded))
@@ -186,7 +188,11 @@ struct ProviderDetailView: View {
                 .fill(statusColor)
                 .frame(width: 5, height: 5)
 
-            if let account {
+            if let failureLabel = usageStore.refreshFailureLabel(for: target) {
+                Text(failureLabel)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let account {
                 Text(usageStore.accountStatusText(for: account))
             } else {
                 Text("\(scopedAccounts.count) account\(scopedAccounts.count == 1 ? "" : "s")")
@@ -202,7 +208,7 @@ struct ProviderDetailView: View {
         }
         .font(.system(size: 9.5, weight: .medium, design: .rounded))
         .foregroundStyle(ProviderBrand.secondaryText(theme: theme))
-        .lineLimit(1)
+        .lineLimit(2)
     }
 
     private var pressureText: String {

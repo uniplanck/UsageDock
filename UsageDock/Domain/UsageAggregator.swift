@@ -3,14 +3,15 @@ import Foundation
 enum UsageAggregator {
     static func aggregates(
         for provider: ProviderID,
-        accounts: [UsageAccount]
+        accounts: [UsageAccount],
+        now: Date = Date()
     ) -> [UsageAggregate] {
         let activeBuckets = accounts
             .filter { $0.provider == provider && $0.isEnabled }
             .flatMap { account in
                 account.buckets
                     .filter(\.isEnabled)
-                    .map { (accountID: account.id, bucket: $0) }
+                    .map { (accountID: account.id, bucket: $0.forDisplay(at: now)) }
             }
 
         let grouped = Dictionary(grouping: activeBuckets, by: { $0.bucket.quotaID })
@@ -27,15 +28,16 @@ enum UsageAggregator {
 
     static func summary(
         for provider: ProviderID,
-        accounts: [UsageAccount]
+        accounts: [UsageAccount],
+        now: Date = Date()
     ) -> ProviderUsageSummary {
-        let rows = aggregates(for: provider, accounts: accounts)
+        let rows = aggregates(for: provider, accounts: accounts, now: now)
         let pressure = rows.compactMap(\.percentUsed).max()
         return ProviderUsageSummary(provider: provider, aggregates: rows, pressurePercent: pressure)
     }
 
-    static func summaries(accounts: [UsageAccount]) -> [ProviderUsageSummary] {
-        ProviderID.allCases.map { summary(for: $0, accounts: accounts) }
+    static func summaries(accounts: [UsageAccount], now: Date = Date()) -> [ProviderUsageSummary] {
+        ProviderID.allCases.map { summary(for: $0, accounts: accounts, now: now) }
     }
 
     private static func makeAggregate(

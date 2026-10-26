@@ -627,82 +627,85 @@ struct RailView: View {
                 .contentShape(Rectangle())
                 .gesture(backgroundDragGesture)
 
-            VStack(
-                spacing: RailMetrics.spacing(scale: usageStore.railScale, itemSpacing: usageStore.railItemSpacing)
-                    * contentDeformation.spacingScale
-            ) {
-                ForEach(targets) { target in
-                    let summary = usageStore.summary(for: target)
-                    let accentHex = usageStore.accentHex(for: target)
-                    let percentSource = usageStore.railPercentSource(for: target)
-                    let outerRingSource = usageStore.railOuterRingSource(for: target)
-                    let innerRingSource = usageStore.railInnerRingSource(for: target)
-                    let timeSource = usageStore.railTimeSource(for: target)
-                    ProviderUsageTile(
-                        target: target,
-                        summary: summary,
-                        displayName: usageStore.displayName(for: target),
-                        displayPercent: usageStore.railDisplayPercent(for: target, source: percentSource),
-                        outerRingPercent: usageStore.railDisplayPercent(for: target, source: outerRingSource),
-                        innerRingPercent: usageStore.railDisplayPercent(for: target, source: innerRingSource),
-                        remainingResetDate: usageStore.railResetDate(for: target, source: timeSource),
-                        presentationMode: usageStore.presentationMode,
-                        multiplier: usageStore.displayMultiplier(for: target),
-                        accentHex: accentHex,
-                        isHovered: usageStore.railHoverEnabled && !usageStore.railVisualOnlyMode && hoveredTarget == target,
-                        showPercent: usageStore.railShowPercent,
-                        showRing: usageStore.railShowRing,
-                        showOuterRing: outerRingSource != .none,
-                        showInnerRing: innerRingSource != .none,
-                        showRemainingTime: usageStore.railShowRemainingTime,
-                        dayDigits: usageStore.railDayDigits,
-                        hourDigits: usageStore.railHourDigits,
-                        minuteDigits: usageStore.railMinuteDigits,
-                        showHours: usageStore.railShowHours,
-                        showMinutes: usageStore.railShowMinutes,
-                        autoHideZeroDays: usageStore.railAutoHideZeroDays,
-                        autoHideZeroHours: usageStore.railAutoHideZeroHours,
-                        showMultiplier: usageStore.railShowMultiplier,
-                        backplateEnabled: usageStore.railBackplateEnabled,
-                        autoContrast: usageStore.railAutoContrast,
-                        theme: usageStore.theme,
-                        iconSize: CGFloat(usageStore.railIconSize),
-                        percentFontSize: CGFloat(usageStore.railPercentFontSize),
-                        accountLabelFontSize: CGFloat(usageStore.railAccountLabelFontSize),
-                        remainingTimeFontSize: CGFloat(usageStore.railRemainingTimeFontSize),
-                        showTitle: usageStore.railShowTitle,
-                        titleWidth: CGFloat(usageStore.railTitleWidth),
-                        timeWidth: CGFloat(usageStore.railTimeWidth),
-                        scale: scale
-                    )
-                    .frame(height: RailMetrics.rowHeight(
-                        scale: usageStore.railScale,
-                        showRing: usageStore.railShowRing,
-                        showPercent: usageStore.railShowPercent,
-                        showRemainingTime: usageStore.railShowRemainingTime,
-                        remainingTimeFontSize: usageStore.railRemainingTimeFontSize,
-                        iconSize: usageStore.railIconSize,
-                        percentFontSize: usageStore.railPercentFontSize,
-                        showTitle: usageStore.railShowTitle,
-                        titleFontSize: usageStore.railAccountLabelFontSize
-                    ))
-                    .contentShape(Rectangle())
-                    .simultaneousGesture(backgroundDragGesture)
-                    .onTapGesture {
-                        Task { await usageStore.openTarget(for: target) }
-                    }
-                    .onHover { inside in
-                        guard usageStore.railHoverEnabled else {
-                            hoveredTarget = nil
-                            onTargetHover(target, false)
-                            return
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                VStack(
+                    spacing: RailMetrics.spacing(scale: usageStore.railScale, itemSpacing: usageStore.railItemSpacing)
+                        * contentDeformation.spacingScale
+                ) {
+                    ForEach(targets) { target in
+                        let summary = usageStore.summary(for: target, now: context.date)
+                        let accentHex = usageStore.accentHex(for: target)
+                        let percentSource = usageStore.railPercentSource(for: target)
+                        let outerRingSource = usageStore.railOuterRingSource(for: target)
+                        let innerRingSource = usageStore.railInnerRingSource(for: target)
+                        let timeSource = usageStore.railTimeSource(for: target)
+                        ProviderUsageTile(
+                            target: target,
+                            summary: summary,
+                            displayName: usageStore.displayName(for: target),
+                            displayPercent: usageStore.railDisplayPercent(for: target, source: percentSource, now: context.date),
+                            outerRingPercent: usageStore.railDisplayPercent(for: target, source: outerRingSource, now: context.date),
+                            innerRingPercent: usageStore.railDisplayPercent(for: target, source: innerRingSource, now: context.date),
+                            remainingResetDate: usageStore.railResetDate(for: target, source: timeSource, now: context.date),
+                            failureLabel: usageStore.refreshFailureLabel(for: target),
+                            presentationMode: usageStore.presentationMode,
+                            multiplier: usageStore.displayMultiplier(for: target),
+                            accentHex: accentHex,
+                            isHovered: usageStore.railHoverEnabled && !usageStore.railVisualOnlyMode && hoveredTarget == target,
+                            showPercent: usageStore.railShowPercent,
+                            showRing: usageStore.railShowRing,
+                            showOuterRing: outerRingSource != .none,
+                            showInnerRing: innerRingSource != .none,
+                            showRemainingTime: usageStore.railShowRemainingTime,
+                            dayDigits: usageStore.railDayDigits,
+                            hourDigits: usageStore.railHourDigits,
+                            minuteDigits: usageStore.railMinuteDigits,
+                            showHours: usageStore.railShowHours,
+                            showMinutes: usageStore.railShowMinutes,
+                            autoHideZeroDays: usageStore.railAutoHideZeroDays,
+                            autoHideZeroHours: usageStore.railAutoHideZeroHours,
+                            showMultiplier: usageStore.railShowMultiplier,
+                            backplateEnabled: usageStore.railBackplateEnabled,
+                            autoContrast: usageStore.railAutoContrast,
+                            theme: usageStore.theme,
+                            iconSize: CGFloat(usageStore.railIconSize),
+                            percentFontSize: CGFloat(usageStore.railPercentFontSize),
+                            accountLabelFontSize: CGFloat(usageStore.railAccountLabelFontSize),
+                            remainingTimeFontSize: CGFloat(usageStore.railRemainingTimeFontSize),
+                            showTitle: usageStore.railShowTitle,
+                            titleWidth: CGFloat(usageStore.railTitleWidth),
+                            timeWidth: CGFloat(usageStore.railTimeWidth),
+                            scale: scale
+                        )
+                        .frame(height: RailMetrics.rowHeight(
+                            scale: usageStore.railScale,
+                            showRing: usageStore.railShowRing,
+                            showPercent: usageStore.railShowPercent,
+                            showRemainingTime: usageStore.railShowRemainingTime,
+                            remainingTimeFontSize: usageStore.railRemainingTimeFontSize,
+                            iconSize: usageStore.railIconSize,
+                            percentFontSize: usageStore.railPercentFontSize,
+                            showTitle: usageStore.railShowTitle,
+                            titleFontSize: usageStore.railAccountLabelFontSize
+                        ))
+                        .contentShape(Rectangle())
+                        .simultaneousGesture(backgroundDragGesture)
+                        .onTapGesture {
+                            Task { await usageStore.openTarget(for: target) }
                         }
-                        withAnimation(.easeOut(duration: 0.13)) {
-                            hoveredTarget = inside ? target : (hoveredTarget == target ? nil : hoveredTarget)
+                        .onHover { inside in
+                            guard usageStore.railHoverEnabled else {
+                                hoveredTarget = nil
+                                onTargetHover(target, false)
+                                return
+                            }
+                            withAnimation(.easeOut(duration: 0.13)) {
+                                hoveredTarget = inside ? target : (hoveredTarget == target ? nil : hoveredTarget)
+                            }
+                            onTargetHover(target, inside)
                         }
-                        onTargetHover(target, inside)
+                        .help([usageStore.refreshFailureLabel(for: target), usageStore.openTargetHelp(for: target)].compactMap { $0 }.joined(separator: "\n"))
                     }
-                    .help(usageStore.openTargetHelp(for: target))
                 }
             }
             .padding(.vertical, RailMetrics.edgePadding(scale: usageStore.railScale, amount: usageStore.railInnerPaddingY))
@@ -2665,6 +2668,7 @@ private struct ProviderUsageTile: View {
     let outerRingPercent: Double?
     let innerRingPercent: Double?
     let remainingResetDate: Date?
+    let failureLabel: String?
     let presentationMode: UsagePresentationMode
     let multiplier: Int?
     let accentHex: String?
@@ -2756,6 +2760,7 @@ private struct ProviderUsageTile: View {
             // Keep each tile internally rigid. F17.21 applies all liquid deformation to
             // the outer provider cluster so icons do not independently distort in the neck.
             .frame(width: iconFrameSize, height: iconFrameSize)
+            .opacity(failureLabel == nil ? 1 : 0.55)
             .overlay(alignment: .bottomTrailing) {
                 if showMultiplier, let multiplier {
                     Text("×\(multiplier)")
@@ -2769,6 +2774,15 @@ private struct ProviderUsageTile: View {
                         .offset(x: 4 * scale, y: 3 * scale)
                 }
             }
+            .overlay(alignment: .topTrailing) {
+                if let failureLabel {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11 * scale, weight: .semibold))
+                        .foregroundStyle(.orange)
+                        .help(failureLabel)
+                        .accessibilityLabel(failureLabel)
+                }
+            }
             .frame(width: iconFrameSize, height: iconFrameSize)
 
             if showPercent {
@@ -2776,15 +2790,17 @@ private struct ProviderUsageTile: View {
                     .font(.system(size: percentFontSize * scale, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(displayPercent == nil ? ProviderBrand.tertiaryText(theme: theme) : ProviderBrand.primaryText(theme: theme))
+                    .opacity(failureLabel == nil ? 1 : 0.55)
                     .shadow(color: ProviderBrand.contrastShadow(theme: theme, enabled: autoContrast), radius: autoContrast ? 1.3 : 0)
             }
 
             if showRemainingTime {
                 TimelineView(.periodic(from: .now, by: 30)) { context in
-                    Text(remainingTimeText(now: context.date) ?? "--")
+                    Text(remainingTimeText(now: context.date) ?? "—")
                         .font(.system(size: remainingTimeFontSize * scale, weight: .medium, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle(remainingResetDate == nil ? ProviderBrand.tertiaryText(theme: theme) : ProviderBrand.secondaryText(theme: theme))
+                        .opacity(failureLabel == nil ? 1 : 0.55)
                         .lineLimit(1)
                         .frame(width: timeWidth * scale)
                         .shadow(color: ProviderBrand.contrastShadow(theme: theme, enabled: autoContrast), radius: autoContrast ? 1.0 : 0)
@@ -2812,11 +2828,11 @@ private struct ProviderUsageTile: View {
         .animation(.easeOut(duration: 0.13), value: isHovered)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(isAccount ? "\(summary.provider.displayName), \(displayName)" : summary.provider.displayName)
-        .accessibilityValue("\(presentationMode.label) \(percentText)")
+        .accessibilityValue(["\(presentationMode.label) \(percentText)", failureLabel].compactMap { $0 }.joined(separator: ", "))
     }
 
     private func remainingTimeText(now: Date) -> String? {
-        guard let remainingResetDate else { return nil }
+        guard let remainingResetDate, remainingResetDate > now else { return nil }
         let totalMinutes = max(Int(remainingResetDate.timeIntervalSince(now) / 60), 0)
         let days = totalMinutes / 1_440
         let hours = (totalMinutes % 1_440) / 60

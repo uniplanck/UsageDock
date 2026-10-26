@@ -115,6 +115,16 @@ struct UsageBucket: Identifiable, Codable, Hashable {
         return nil
     }
 
+    /// A display-only copy. Keep cached quota data and visibility intact for refreshes.
+    func forDisplay(at now: Date = Date()) -> Self {
+        guard let resetsAt, resetsAt <= now else { return self }
+        var display = self
+        if used != nil { display.used = 0 }
+        display.percentUsed = 0
+        display.resetsAt = nil
+        return display
+    }
+
     private static func clamp(_ value: Double) -> Double {
         min(max(value, 0), 1)
     }
