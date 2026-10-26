@@ -159,8 +159,9 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
         case let string as String: raw = Double(string)
         default: raw = nil
         }
-        guard let raw, raw >= 0 else { return nil }
-        return min(raw > 1 ? raw / 100 : raw, 1)
+        guard let raw, !raw.isNaN else { return nil }
+        // Claude's percent and utilization fields both use a 0...100 scale.
+        return min(max(raw / 100, 0), 1)
     }
 
     private static func displayName(from raw: String) -> String {
