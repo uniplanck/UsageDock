@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A1F180000000000000000001 /* ResetCountdownFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F180000000000000000002 /* ResetCountdownFormatter.swift */; };
+		A1F180000000000000000003 /* ResetCountdownFormatterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F180000000000000000004 /* ResetCountdownFormatterTests.swift */; };
 		2946E77204F8EAFAD62A3AA4 /* SettingsWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E45B33B556BF9E1CDA647B25 /* SettingsWindowController.swift */; };
 		3FBC18EE7D6B0BFA440209E9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2BD4EC3A7A8A388C1C56CD25 /* Assets.xcassets */; };
 		47E928EEB906014B8A0B13C7 /* UsageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7C66B45F92CA22A9B2E851E /* UsageStore.swift */; };
@@ -44,6 +46,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		A1F180000000000000000002 /* ResetCountdownFormatter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResetCountdownFormatter.swift; sourceTree = "<group>"; };
+		A1F180000000000000000004 /* ResetCountdownFormatterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResetCountdownFormatterTests.swift; sourceTree = "<group>"; };
 		0C7D4A83F9D54646B9A3FA3D /* RailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RailView.swift; sourceTree = "<group>"; };
 		2BD4EC3A7A8A388C1C56CD25 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		4AC342FD7BBE92CE7A1B4611 /* UsageModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageModels.swift; sourceTree = "<group>"; };
@@ -87,6 +91,7 @@
 		1F7AE6CA04FCB03393604692 /* Domain */ = {
 			isa = PBXGroup;
 			children = (
+				A1F180000000000000000002 /* ResetCountdownFormatter.swift */,
 				208068B450CFEC9A46BE1DDB /* ProviderOpenTarget.swift */,
 				5DC95DD2D94D1838392914C9 /* UsageAggregator.swift */,
 				4AC342FD7BBE92CE7A1B4611 /* UsageModels.swift */,
@@ -108,6 +113,7 @@
 		45F36EB0F1D171BBD695AD79 /* UsageDockTests */ = {
 			isa = PBXGroup;
 			children = (
+				A1F180000000000000000004 /* ResetCountdownFormatterTests.swift */,
 				45987E59A5D44BD7D0841930 /* ProviderOpenTargetTests.swift */,
 				E6B7F6D8CE9C258C20073993 /* UsageDockTests.swift */,
 			);
@@ -271,6 +277,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1F180000000000000000003 /* ResetCountdownFormatterTests.swift in Sources */,
 				783F082854674C7BEF87792B /* UsageDockTests.swift in Sources */,
 				B82FE277B084AE83B84EA3E1 /* ProviderOpenTargetTests.swift in Sources */,
 			);
@@ -280,6 +287,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1F180000000000000000001 /* ResetCountdownFormatter.swift in Sources */,
 				D51083D41F225E0C1EECA76E /* DockPanelController.swift in Sources */,
 				BE88A31695D8174E11896425 /* HoverDetailPanelController.swift in Sources */,
 				A3CE2F3F159C711AF0DEEFA7 /* LiveUsageAdapters.swift in Sources */,

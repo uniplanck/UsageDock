@@ -24,6 +24,7 @@
 "Appearance & Shape" = "外観と形状";
 "Theme" = "テーマ";
 "Reset time detail" = "リセット時刻表示";
+"Hide minutes when days are shown" = "日数があるときは分を表示しない";
 "Background opacity" = "背景の不透明度";
 "Surface helpers" = "表示補助";
 "Backplate" = "背景プレート";

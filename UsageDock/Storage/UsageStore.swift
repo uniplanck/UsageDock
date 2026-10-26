@@ -27,6 +27,7 @@ final class UsageStore: ObservableObject {
     private static let themeKey = "UsageDock.theme.v1"
     private static let languageKey = "UsageDock.language.v1"
     private static let resetTimeModeKey = "UsageDock.resetTimeMode.v1"
+    private static let hideMinutesWhenDaysKey = "UsageDock.hideMinutesWhenDays.v1"
     private static let railBackgroundOpacityKey = "UsageDock.railBackgroundOpacity.v1"
     private static let railBackplateEnabledKey = "UsageDock.railBackplateEnabled.v1"
     private static let railAutoContrastKey = "UsageDock.railAutoContrast.v1"
@@ -144,6 +145,7 @@ final class UsageStore: ObservableObject {
     @Published var theme: UsageDockTheme { didSet { defaults.set(theme.rawValue, forKey: Self.themeKey) } }
     @Published var appLanguage: UsageDockLanguage { didSet { defaults.set(appLanguage.rawValue, forKey: Self.languageKey) } }
     @Published var resetTimeDisplayMode: ResetTimeDisplayMode { didSet { defaults.set(resetTimeDisplayMode.rawValue, forKey: Self.resetTimeModeKey) } }
+    @Published var hideMinutesWhenDays: Bool { didSet { defaults.set(hideMinutesWhenDays, forKey: Self.hideMinutesWhenDaysKey) } }
     @Published var railBackgroundOpacity: Double {
         didSet {
             let clamped = min(max(railBackgroundOpacity, 0), 1)
@@ -429,6 +431,7 @@ final class UsageStore: ObservableObject {
         theme = UsageDockTheme(rawValue: defaults.string(forKey: Self.themeKey) ?? "dark") ?? .dark
         appLanguage = UsageDockLanguage(rawValue: defaults.string(forKey: Self.languageKey) ?? "system") ?? .system
         resetTimeDisplayMode = ResetTimeDisplayMode(rawValue: defaults.string(forKey: Self.resetTimeModeKey) ?? "both") ?? .both
+        hideMinutesWhenDays = defaults.object(forKey: Self.hideMinutesWhenDaysKey) == nil ? true : defaults.bool(forKey: Self.hideMinutesWhenDaysKey)
         railBackgroundOpacity = defaults.object(forKey: Self.railBackgroundOpacityKey) == nil ? 0.95 : min(max(defaults.double(forKey: Self.railBackgroundOpacityKey), 0), 1)
         railBackplateEnabled = defaults.object(forKey: Self.railBackplateEnabledKey) == nil ? true : defaults.bool(forKey: Self.railBackplateEnabledKey)
         railAutoContrast = defaults.object(forKey: Self.railAutoContrastKey) == nil ? true : defaults.bool(forKey: Self.railAutoContrastKey)
@@ -784,30 +787,29 @@ final class UsageStore: ObservableObject {
     }
 
     func railRemainingTimeText(until resetDate: Date?, now: Date = Date()) -> String? {
-        guard let resetDate, resetDate > now else { return nil }
-        let totalMinutes = max(Int(resetDate.timeIntervalSince(now) / 60), 0)
-        let days = totalMinutes / 1_440
-        let hours = (totalMinutes % 1_440) / 60
-        let minutes = totalMinutes % 60
-        var parts: [String] = []
-
-        if !(railAutoHideZeroDays && days == 0) {
-            parts.append("\(formatTimerValue(days, width: railDayDigits))d")
-        }
-        if railShowHours && !(railAutoHideZeroHours && hours == 0) {
-            parts.append("\(formatTimerValue(hours, width: railHourDigits))h")
-        }
-        if railShowMinutes || (days == 0 && hours == 0) {
-            parts.append("\(formatTimerValue(minutes, width: railMinuteDigits))m")
-        }
-        if parts.isEmpty {
-            parts.append("\(formatTimerValue(minutes, width: railMinuteDigits))m")
-        }
-        return parts.joined(separator: " ")
+        ResetCountdownFormatter.string(
+            until: resetDate,
+            now: now,
+            hideMinutesWhenDays: hideMinutesWhenDays,
+            style: .rail(.init(
+                dayDigits: railDayDigits,
+                hourDigits: railHourDigits,
+                minuteDigits: railMinuteDigits,
+                showHours: railShowHours,
+                showMinutes: railShowMinutes,
+                autoHideZeroDays: railAutoHideZeroDays,
+                autoHideZeroHours: railAutoHideZeroHours
+            ))
+        )
     }
 
-    private func formatTimerValue(_ value: Int, width: RailDigitWidth) -> String {
-        width == .two ? String(format: "%02d", value) : "\(value)"
+    func remainingResetTimeText(until resetDate: Date?, now: Date = Date()) -> String? {
+        ResetCountdownFormatter.string(
+            until: resetDate,
+            now: now,
+            hideMinutesWhenDays: hideMinutesWhenDays,
+            style: .detail
+        )
     }
 
     func displayName(for target: RailDisplayTarget) -> String {

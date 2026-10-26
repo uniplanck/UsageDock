@@ -669,6 +669,7 @@ struct SettingsView: View {
                     }
                     .labelsHidden()
                 }
+                hideMinutesWhenDaysToggle
                 if usageStore.railMaterialMode == .bar3D {
                     Text("3D Bar uses material-native highlights and shadows; Border controls are intentionally disabled.")
                         .font(.caption)
@@ -794,6 +795,12 @@ struct SettingsView: View {
             }
             providerOrderSection
         }
+    }
+
+    private var hideMinutesWhenDaysToggle: some View {
+        Toggle("Hide minutes when days are shown", isOn: $usageStore.hideMinutesWhenDays)
+            .toggleStyle(.switch)
+            .controlSize(.small)
     }
 
     private var displaySection: some View {
@@ -965,6 +972,7 @@ struct SettingsView: View {
                             }
                             .labelsHidden()
                         }
+                        hideMinutesWhenDaysToggle
 
                         sliderRow(
                             "Background opacity",
