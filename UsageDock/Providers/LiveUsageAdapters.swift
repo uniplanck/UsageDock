@@ -1298,6 +1298,7 @@ private struct GrokCredentialResolver {
 enum UsageAdapterError: LocalizedError {
     case credentialsUnavailable(String)
     case authenticationExpired(String)
+    case rateLimited(provider: ProviderID, retryAfter: TimeInterval?)
     case httpFailure(provider: ProviderID, statusCode: Int, message: String?)
     case invalidResponse(String)
 
@@ -1305,6 +1306,8 @@ enum UsageAdapterError: LocalizedError {
         switch self {
         case .credentialsUnavailable(let message): message
         case .authenticationExpired(let message): message
+        case .rateLimited(let provider, _):
+            "\(provider.displayName) usage is rate limited. Showing last known usage."
         case .httpFailure(let provider, let statusCode, let message):
             "\(provider.displayName) usage request failed (HTTP \(statusCode))\(message.map { ": \($0)" } ?? "")."
         case .invalidResponse(let message): message
@@ -2178,20 +2181,42 @@ private struct KimiCredentialResolver {
     }
 }
 
-private enum HTTPUsageResponseValidator {
-    static func validate(response: URLResponse, data: Data, provider: ProviderID) throws {
+enum HTTPUsageResponseValidator {
+    static func validate(response: URLResponse, data: Data, provider: ProviderID, now: Date = Date()) throws {
         guard let http = response as? HTTPURLResponse else {
             throw UsageAdapterError.invalidResponse("\(provider.displayName) returned a non-HTTP response.")
         }
         guard (200...299).contains(http.statusCode) else {
             let message = errorMessage(data)
-            if http.statusCode == 401 {
+            if http.statusCode == 429 {
+                throw UsageAdapterError.rateLimited(
+                    provider: provider,
+                    retryAfter: retryAfter(http.value(forHTTPHeaderField: "Retry-After"), now: now)
+                )
+            }
+            if http.statusCode == 401 || http.statusCode == 403 {
                 throw UsageAdapterError.authenticationExpired(
                     "\(provider.displayName) login has expired. Re-authenticate in the official client, then refresh UsageDock."
                 )
             }
             throw UsageAdapterError.httpFailure(provider: provider, statusCode: http.statusCode, message: message)
         }
+    }
+
+    private static func retryAfter(_ value: String?, now: Date) -> TimeInterval? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        if let seconds = TimeInterval(value), seconds.isFinite, seconds >= 0 { return seconds }
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        for format in ["EEE, dd MMM yyyy HH:mm:ss zzz", "EEEE, dd-MMM-yy HH:mm:ss zzz", "EEE MMM d HH:mm:ss yyyy"] {
+            formatter.dateFormat = format
+            if let date = formatter.date(from: value) {
+                return max(0, date.timeIntervalSince(now))
+            }
+        }
+        return nil
     }
 
     private static func errorMessage(_ data: Data) -> String? {

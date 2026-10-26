@@ -376,18 +376,36 @@ final class UsageStore: ObservableObject {
     private let defaults: UserDefaults
     private let appLocator: any ProviderAppLocating
     private let targetOpener: any ProviderTargetOpening
+    private let now: () -> Date
+    private let usageFetcher: ((UsageAccount) async throws -> UsageAccount)?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var autoRefreshTask: Task<Void, Never>?
+    private var refreshHistory: [UUID: AccountRefreshHistory] = [:]
+    private var refreshingProviders: Set<ProviderID> = []
+
+    private struct AccountRefreshHistory {
+        var firstAttemptAt: Date
+        var lastAttemptAt: Date?
+        var lastSuccessAt: Date?
+        var retryAt: Date?
+        var backoff: TimeInterval = 0
+        var consecutiveFailures = 0
+        var lastError: Error?
+    }
 
     init(
         defaults: UserDefaults = .standard,
         appLocator: (any ProviderAppLocating)? = nil,
-        targetOpener: (any ProviderTargetOpening)? = nil
+        targetOpener: (any ProviderTargetOpening)? = nil,
+        now: @escaping () -> Date = Date.init,
+        usageFetcher: ((UsageAccount) async throws -> UsageAccount)? = nil
     ) {
         self.defaults = defaults
         self.appLocator = appLocator ?? WorkspaceProviderAppLocator()
         self.targetOpener = targetOpener ?? WorkspaceProviderTargetOpener()
+        self.now = now
+        self.usageFetcher = usageFetcher
         let savedPreferences = defaults.data(forKey: Self.providerOpenPreferencesKey)
             .flatMap { try? JSONDecoder().decode([String: ProviderOpenPreference].self, from: $0) } ?? [:]
         providerOpenPreferences = Dictionary(uniqueKeysWithValues: savedPreferences.compactMap { key, value in
@@ -1166,7 +1184,7 @@ final class UsageStore: ObservableObject {
         autoRefreshTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                await self.refreshLiveUsage()
+                await self.refreshLiveUsage(manual: false)
                 do {
                     try await Task.sleep(nanoseconds: intervalSeconds * 1_000_000_000)
                 } catch {
@@ -1181,7 +1199,7 @@ final class UsageStore: ObservableObject {
         autoRefreshTask = nil
     }
 
-    func refreshLiveUsage() async {
+    func refreshLiveUsage(manual: Bool = true) async {
         guard !isRefreshing else { return }
         isRefreshing = true
         defer { isRefreshing = false }
@@ -1192,11 +1210,11 @@ final class UsageStore: ObservableObject {
             !ClaudeCredentialStore.credentialRecords().isEmpty
         }.value
 
-        await refreshProvider(.claude)
-        await refreshProvider(.codex)
-        await refreshProvider(.antigravity)
-        await refreshProvider(.kimi)
-        await refreshProvider(.grok)
+        await refreshProvider(.claude, manual: manual)
+        await refreshProvider(.codex, manual: manual)
+        await refreshProvider(.antigravity, manual: manual)
+        await refreshProvider(.kimi, manual: manual)
+        await refreshProvider(.grok, manual: manual)
     }
 
     func refreshState(for provider: ProviderID) -> ProviderRefreshState {
@@ -1204,7 +1222,14 @@ final class UsageStore: ObservableObject {
     }
 
     func accountRefreshState(for accountID: UUID) -> AccountRefreshState {
-        accountRefreshStates[accountID] ?? .idle
+        let state = accountRefreshStates[accountID] ?? .idle
+        // A long backoff can cross the stale threshold without another request.
+        if state != .refreshing,
+           let history = refreshHistory[accountID], let error = history.lastError,
+           now().timeIntervalSince(history.lastSuccessAt ?? history.firstAttemptAt) > 30 * 60 {
+            return .failure(error)
+        }
+        return state
     }
 
     func statusText(for provider: ProviderID) -> String {
@@ -1241,6 +1266,8 @@ final class UsageStore: ObservableObject {
             return "Refreshing…"
         case .live(let date):
             return "Live · \(Self.timeFormatter.string(from: date))"
+        case .rateLimited:
+            return appLanguage.localized("Rate limited · showing last known usage")
         case .degraded(let date, let message):
             return "\(message) · \(Self.timeFormatter.string(from: date))"
         case .failed:
@@ -1248,7 +1275,9 @@ final class UsageStore: ObservableObject {
         }
     }
 
-    private func refreshProvider(_ provider: ProviderID) async {
+    func refreshProvider(_ provider: ProviderID, manual: Bool = false) async {
+        guard refreshingProviders.insert(provider).inserted else { return }
+        defer { refreshingProviders.remove(provider) }
         let accountIDs = accounts
             .filter {
                 $0.provider == provider &&
@@ -1269,6 +1298,12 @@ final class UsageStore: ObservableObject {
         var lastSuccessAt: Date?
 
         for accountID in accountIDs {
+            guard shouldFetchUsage(for: accountID, provider: provider, manual: manual) else { continue }
+            let startedAt = now()
+            var history = refreshHistory[accountID] ?? AccountRefreshHistory(firstAttemptAt: startedAt)
+            history.lastAttemptAt = startedAt
+            refreshHistory[accountID] = history
+
             if let autoAccount = accounts.first(where: { $0.id == accountID }),
                autoAccount.multiplierMode == .automatic {
                 await updatePlanMultiplier(accountID: accountID)
@@ -1280,46 +1315,50 @@ final class UsageStore: ObservableObject {
             do {
                 let fetched: UsageAccount
                 var webNotice: String?
-                switch provider {
-                case .claude:
-                    let fetchedAccounts = try await ClaudeUsageAdapter(
-                        credentialPath: account.source == .currentSession ? nil : account.credentialPath
-                    ).fetchAccounts()
-                    guard let first = fetchedAccounts.first else {
-                        throw UsageAdapterError.invalidResponse("Claude returned no account data.")
+                if let usageFetcher {
+                    fetched = try await usageFetcher(account)
+                } else {
+                    switch provider {
+                    case .claude:
+                        let fetchedAccounts = try await ClaudeUsageAdapter(
+                            credentialPath: account.source == .currentSession ? nil : account.credentialPath
+                        ).fetchAccounts()
+                        guard let first = fetchedAccounts.first else {
+                            throw UsageAdapterError.invalidResponse("Claude returned no account data.")
+                        }
+                        fetched = first
+                    case .codex:
+                        let fetchedAccounts = try await CodexUsageAdapter(
+                            credentialPath: account.source == .currentSession ? nil : account.credentialPath
+                        ).fetchAccounts()
+                        guard let first = fetchedAccounts.first else {
+                            throw UsageAdapterError.invalidResponse("Codex returned no account data.")
+                        }
+                        fetched = first
+                    case .antigravity:
+                        let fetchedAccounts = try await AntigravityUsageAdapter(
+                            profileHomePath: account.source == .currentSession ? nil : account.profileHomePath
+                        ).fetchAccounts()
+                        guard let first = fetchedAccounts.first else {
+                            throw UsageAdapterError.invalidResponse("Antigravity returned no account data.")
+                        }
+                        fetched = first
+                    case .kimi:
+                        let outcome = try await KimiUsageAdapter(
+                            credentialPath: account.source == .currentSession ? nil : account.credentialPath
+                        ).fetchOutcome()
+                        webNotice = outcome.notice.map { appLanguage.localized($0) }
+                        fetched = UsageAccount(provider: .kimi, name: account.name, buckets: outcome.buckets)
+                    case .grok:
+                        let outcome = try await GrokUsageAdapter(
+                            credentialPath: account.source == .currentSession ? nil : account.credentialPath,
+                            webSessionID: account.grokWebSessionID
+                        ).fetchOutcome()
+                        webNotice = outcome.notice
+                        fetched = UsageAccount(provider: .grok, name: account.name, buckets: outcome.buckets)
+                    case .cursor:
+                        throw UsageAdapterError.credentialsUnavailable("\(provider.displayName) login and live quota integration is not available yet.")
                     }
-                    fetched = first
-                case .codex:
-                    let fetchedAccounts = try await CodexUsageAdapter(
-                        credentialPath: account.source == .currentSession ? nil : account.credentialPath
-                    ).fetchAccounts()
-                    guard let first = fetchedAccounts.first else {
-                        throw UsageAdapterError.invalidResponse("Codex returned no account data.")
-                    }
-                    fetched = first
-                case .antigravity:
-                    let fetchedAccounts = try await AntigravityUsageAdapter(
-                        profileHomePath: account.source == .currentSession ? nil : account.profileHomePath
-                    ).fetchAccounts()
-                    guard let first = fetchedAccounts.first else {
-                        throw UsageAdapterError.invalidResponse("Antigravity returned no account data.")
-                    }
-                    fetched = first
-                case .kimi:
-                    let outcome = try await KimiUsageAdapter(
-                        credentialPath: account.source == .currentSession ? nil : account.credentialPath
-                    ).fetchOutcome()
-                    webNotice = outcome.notice.map { appLanguage.localized($0) }
-                    fetched = UsageAccount(provider: .kimi, name: account.name, buckets: outcome.buckets)
-                case .grok:
-                    let outcome = try await GrokUsageAdapter(
-                        credentialPath: account.source == .currentSession ? nil : account.credentialPath,
-                        webSessionID: account.grokWebSessionID
-                    ).fetchOutcome()
-                    webNotice = outcome.notice
-                    fetched = UsageAccount(provider: .grok, name: account.name, buckets: outcome.buckets)
-                case .cursor:
-                    throw UsageAdapterError.credentialsUnavailable("\(provider.displayName) login and live quota integration is not available yet.")
                 }
 
                 guard let index = accounts.firstIndex(where: { $0.id == accountID }) else { continue }
@@ -1327,19 +1366,41 @@ final class UsageStore: ObservableObject {
                     existing: accounts[index].buckets,
                     fetched: fetched.buckets
                 )
-                let now = Date()
+                let now = now()
+                // Only a successful usage fetch resets retry and failure history.
+                refreshHistory[accountID] = AccountRefreshHistory(
+                    firstAttemptAt: startedAt, lastAttemptAt: startedAt, lastSuccessAt: now
+                )
                 if let webNotice {
                     accountRefreshStates[accountID] = .degraded(now, webNotice)
-                    notices.append(webNotice)
                 } else {
                     accountRefreshStates[accountID] = .live(now)
                 }
-                lastSuccessAt = now
-                successes += 1
             } catch {
                 recordRefreshFailure(error, for: accountID)
-                let message = appLanguage.localized(error.localizedDescription)
-                failureMessages.append("\(account.name): \(message)")
+            }
+        }
+
+        // Cached and rate-limited accounts retain their last successful timestamp;
+        // a skipped poll must not become a provider-level refresh failure.
+        for accountID in accountIDs {
+            guard let account = accounts.first(where: { $0.id == accountID }) else { continue }
+            switch accountRefreshState(for: accountID) {
+            case .live(let date), .degraded(let date, _):
+                successes += 1
+                lastSuccessAt = max(lastSuccessAt ?? date, date)
+                if case .degraded(_, let notice) = accountRefreshState(for: accountID) { notices.append(notice) }
+            case .rateLimited(let lastSuccess, _):
+                successes += 1
+                if let lastSuccess {
+                    lastSuccessAt = max(lastSuccessAt ?? lastSuccess, lastSuccess)
+                } else {
+                    notices.append(appLanguage.localized("Rate limited · showing last known usage"))
+                }
+            case .failed(let message, _):
+                failureMessages.append("\(account.name): \(appLanguage.localized(message))")
+            case .idle, .refreshing:
+                break
             }
         }
 
@@ -1347,7 +1408,7 @@ final class UsageStore: ObservableObject {
             refreshStates[provider] = .live(lastSuccessAt, accountCount: successes)
         } else if successes > 0 {
             refreshStates[provider] = .partial(
-                lastSuccessAt ?? Date(),
+                lastSuccessAt ?? now(),
                 success: successes,
                 total: accountIDs.count,
                 message: notices.first ?? failureMessages.first ?? "Some accounts failed"
@@ -1357,20 +1418,51 @@ final class UsageStore: ObservableObject {
         }
     }
 
-    func recordRefreshFailure(_ error: Error, for accountID: UUID) {
-        if shouldClearBuckets(for: error),
-           let index = accounts.firstIndex(where: { $0.id == accountID }) {
-            accounts[index].buckets = []
+    private func shouldFetchUsage(for accountID: UUID, provider: ProviderID, manual: Bool) -> Bool {
+        guard let history = refreshHistory[accountID] else { return true }
+        let date = now()
+        if let retryAt = history.retryAt, date < retryAt { return false }
+        // Bound repeated manual failures as well as successful requests.
+        if let lastAttempt = history.lastAttemptAt {
+            let elapsed = date.timeIntervalSince(lastAttempt)
+            if elapsed < 60 || (provider == .claude && manual && elapsed <= 60) { return false }
         }
-        accountRefreshStates[accountID] = .failure(error)
+        if let lastSuccess = history.lastSuccessAt {
+            let elapsed = date.timeIntervalSince(lastSuccess)
+            let interval: TimeInterval = provider == .claude && !manual ? 5 * 60 : 60
+            if elapsed < interval || (provider == .claude && manual && elapsed <= 60) { return false }
+        }
+        return true
     }
 
-    private func shouldClearBuckets(for error: Error) -> Bool {
+    func recordRefreshFailure(_ error: Error, for accountID: UUID) {
         // F17: keep the last known quota rows on refresh failures so persisted per-quota
         // visibility (for example a disabled Spark 5h row) cannot be erased and later
         // silently re-created as enabled by a successful refresh.
-        _ = error
-        return false
+        let date = now()
+        var history = refreshHistory[accountID] ?? AccountRefreshHistory(firstAttemptAt: date)
+        history.lastError = error
+        if case UsageAdapterError.rateLimited(_, let retryAfter) = error {
+            history.backoff = history.backoff == 0 ? 5 * 60 : min(history.backoff * 2, 30 * 60)
+            let delay = retryAfter.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil } ?? history.backoff
+            let retryAt = date.addingTimeInterval(delay)
+            history.retryAt = retryAt
+            history.consecutiveFailures = 0
+            accountRefreshStates[accountID] = .rateLimited(lastSuccess: history.lastSuccessAt, retryAt: retryAt)
+        } else {
+            history.consecutiveFailures += 1
+            let failure = AccountRefreshState.failure(error)
+            if case .failed(_, requiresSignIn: true) = failure {
+                accountRefreshStates[accountID] = failure
+            } else if history.consecutiveFailures >= 2 || date.timeIntervalSince(history.lastSuccessAt ?? history.firstAttemptAt) > 30 * 60 {
+                accountRefreshStates[accountID] = failure
+            } else {
+                accountRefreshStates[accountID] = .degraded(
+                    history.lastSuccessAt ?? history.firstAttemptAt, error.localizedDescription
+                )
+            }
+        }
+        refreshHistory[accountID] = history
     }
 
     static func mergeRefreshedBuckets(existing: [UsageBucket], fetched: [UsageBucket]) -> [UsageBucket] {
@@ -1485,6 +1577,7 @@ enum AccountRefreshState: Equatable {
     case idle
     case refreshing
     case live(Date)
+    case rateLimited(lastSuccess: Date?, retryAt: Date)
     case degraded(Date, String)
     case failed(String, requiresSignIn: Bool = false)
 
@@ -1530,7 +1623,7 @@ enum DisplayAccountPolicy {
         }
 
         switch refreshState {
-        case .live, .degraded:
+        case .live, .degraded, .rateLimited:
             return .valid
         case .refreshing:
             return account.buckets.isEmpty ? .checking : .valid
