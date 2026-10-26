@@ -587,18 +587,20 @@ final class UsageStore: ObservableObject {
         normalizeMenuBarAccountSelection()
     }
 
-    func menuBarUsageItems() -> [MenuBarUsageItem] {
+    func menuBarUsageItems(now: Date = Date()) -> [MenuBarUsageItem] {
         menuBarAccounts().map { account in
             let authState = displayAuthenticationState(for: account)
-            let summary = UsageAggregator.summary(for: account.provider, accounts: [account])
-            let percent = authState == .valid ? displayPercent(summary.pressurePercent) : nil
+            let state = accountRefreshState(for: account.id)
+            let summary = UsageAggregator.summary(for: account.provider, accounts: [account], now: now)
+            let percent = authState == .valid || state.isStale ? displayPercent(summary.pressurePercent) : nil
             return MenuBarUsageItem(
                 id: account.id,
                 provider: account.provider,
                 accountName: account.name,
                 percent: percent,
                 accentHex: account.accentHex ?? providerAccentHex[account.provider],
-                authenticationState: authState
+                authenticationState: authState,
+                failureLabel: state.failureLabel.map { appLanguage.localized($0) }
             )
         }
     }
@@ -658,21 +660,21 @@ final class UsageStore: ObservableObject {
         UsageDockDistributionPolicy.isAccountVisible(account)
     }
 
-    func summaries() -> [ProviderUsageSummary] {
-        UsageAggregator.summaries(accounts: runtimeAccounts)
+    func summaries(now: Date = Date()) -> [ProviderUsageSummary] {
+        UsageAggregator.summaries(accounts: runtimeAccounts, now: now)
     }
 
-    func summary(for provider: ProviderID) -> ProviderUsageSummary {
-        UsageAggregator.summary(for: provider, accounts: runtimeAccounts)
+    func summary(for provider: ProviderID, now: Date = Date()) -> ProviderUsageSummary {
+        UsageAggregator.summary(for: provider, accounts: runtimeAccounts, now: now)
     }
 
-    func summary(for target: RailDisplayTarget) -> ProviderUsageSummary {
+    func summary(for target: RailDisplayTarget, now: Date = Date()) -> ProviderUsageSummary {
         switch target {
         case .provider(let provider):
-            return summary(for: provider)
+            return summary(for: provider, now: now)
         case .account(let id, let provider):
             let scoped = runtimeAccounts.filter { $0.id == id && $0.isEnabled }
-            return UsageAggregator.summary(for: provider, accounts: scoped)
+            return UsageAggregator.summary(for: provider, accounts: scoped, now: now)
         }
     }
 
@@ -680,7 +682,7 @@ final class UsageStore: ObservableObject {
         if let activeDisplayAccountID {
             guard displayAccountIDs.contains(activeDisplayAccountID),
                   let account = runtimeAccounts.first(where: { $0.id == activeDisplayAccountID && $0.isEnabled }),
-                  isDisplayAccountAuthenticated(account) else { return [] }
+                  isDisplayAccountAuthenticated(account) || accountRefreshState(for: account.id).isStale else { return [] }
             return [.account(id: account.id, provider: account.provider)]
         }
 
@@ -699,6 +701,18 @@ final class UsageStore: ObservableObject {
         return runtimeAccounts.first { $0.id == id }
     }
 
+    /// Fusion values are stale if any contributing account failed to refresh.
+    func refreshFailureLabel(for target: RailDisplayTarget) -> String? {
+        let contributors = runtimeAccounts.filter { account in
+            guard account.isEnabled, account.provider == target.provider else { return false }
+            if case .account(let id, _) = target { return account.id == id }
+            return true
+        }
+        let labels = contributors.compactMap { accountRefreshState(for: $0.id).failureLabel }
+        let key = labels.first(where: { $0 == "Refresh failed – sign in again" }) ?? labels.first
+        return key.map { appLanguage.localized($0) }
+    }
+
     func displayPercent(_ percentUsed: Double?) -> Double? {
         guard let percentUsed else { return nil }
         let clamped = min(max(percentUsed, 0), 1)
@@ -709,8 +723,8 @@ final class UsageStore: ObservableObject {
         displayPercent(summary(for: target).pressurePercent)
     }
 
-    func railAggregate(for target: RailDisplayTarget, source: RailQuotaSource) -> UsageAggregate? {
-        let aggregates = summary(for: target).aggregates
+    func railAggregate(for target: RailDisplayTarget, source: RailQuotaSource, now: Date = Date()) -> UsageAggregate? {
+        let aggregates = summary(for: target, now: now).aggregates
         switch source {
         case .none, .automatic:
             return nil
@@ -752,25 +766,25 @@ final class UsageStore: ObservableObject {
         account(for: target)?.railTimeSource ?? railTimeSource
     }
 
-    func railDisplayPercent(for target: RailDisplayTarget, source: RailQuotaSource) -> Double? {
+    func railDisplayPercent(for target: RailDisplayTarget, source: RailQuotaSource, now: Date = Date()) -> Double? {
         if source == .none { return nil }
-        if source == .automatic { return displayPercent(summary(for: target).pressurePercent) }
-        return displayPercent(railAggregate(for: target, source: source)?.percentUsed)
+        if source == .automatic { return displayPercent(summary(for: target, now: now).pressurePercent) }
+        return displayPercent(railAggregate(for: target, source: source, now: now)?.percentUsed)
     }
 
-    func railResetDate(for target: RailDisplayTarget, source: RailQuotaSource) -> Date? {
+    func railResetDate(for target: RailDisplayTarget, source: RailQuotaSource, now: Date = Date()) -> Date? {
         if source == .none { return nil }
         if source == .automatic {
-            return summary(for: target).aggregates
+            return summary(for: target, now: now).aggregates
                 .filter { $0.resetsAt != nil }
                 .max(by: { ($0.percentUsed ?? -1) < ($1.percentUsed ?? -1) })?
                 .resetsAt
         }
-        return railAggregate(for: target, source: source)?.resetsAt
+        return railAggregate(for: target, source: source, now: now)?.resetsAt
     }
 
     func railRemainingTimeText(until resetDate: Date?, now: Date = Date()) -> String? {
-        guard let resetDate else { return nil }
+        guard let resetDate, resetDate > now else { return nil }
         let totalMinutes = max(Int(resetDate.timeIntervalSince(now) / 60), 0)
         let days = totalMinutes / 1_440
         let hours = (totalMinutes % 1_440) / 60
@@ -1227,8 +1241,8 @@ final class UsageStore: ObservableObject {
             return "Live · \(Self.timeFormatter.string(from: date))"
         case .degraded(let date, let message):
             return "\(message) · \(Self.timeFormatter.string(from: date))"
-        case .failed(let message):
-            return message
+        case .failed:
+            return appLanguage.localized(accountRefreshState(for: account.id).failureLabel ?? "Refresh failed")
         }
     }
 
@@ -1321,12 +1335,8 @@ final class UsageStore: ObservableObject {
                 lastSuccessAt = now
                 successes += 1
             } catch {
-                if shouldClearBuckets(for: error),
-                   let index = accounts.firstIndex(where: { $0.id == accountID }) {
-                    accounts[index].buckets = []
-                }
+                recordRefreshFailure(error, for: accountID)
                 let message = appLanguage.localized(error.localizedDescription)
-                accountRefreshStates[accountID] = .failed(message)
                 failureMessages.append("\(account.name): \(message)")
             }
         }
@@ -1343,6 +1353,14 @@ final class UsageStore: ObservableObject {
         } else {
             refreshStates[provider] = .failed(failureMessages.first ?? "No registered account returned live usage.")
         }
+    }
+
+    func recordRefreshFailure(_ error: Error, for accountID: UUID) {
+        if shouldClearBuckets(for: error),
+           let index = accounts.firstIndex(where: { $0.id == accountID }) {
+            accounts[index].buckets = []
+        }
+        accountRefreshStates[accountID] = .failure(error)
     }
 
     private func shouldClearBuckets(for error: Error) -> Bool {
@@ -1448,6 +1466,9 @@ struct MenuBarUsageItem: Identifiable, Equatable {
     let percent: Double?
     let accentHex: String?
     let authenticationState: DisplayAccountAuthState
+    let failureLabel: String?
+
+    var isStale: Bool { failureLabel != nil }
 }
 
 enum ProviderRefreshState: Equatable {
@@ -1463,7 +1484,28 @@ enum AccountRefreshState: Equatable {
     case refreshing
     case live(Date)
     case degraded(Date, String)
-    case failed(String)
+    case failed(String, requiresSignIn: Bool = false)
+
+    static func failure(_ error: Error) -> Self {
+        let requiresSignIn: Bool
+        switch error {
+        case UsageAdapterError.authenticationExpired, UsageAdapterError.credentialsUnavailable:
+            requiresSignIn = true
+        default:
+            requiresSignIn = false
+        }
+        return .failed(error.localizedDescription, requiresSignIn: requiresSignIn)
+    }
+
+    var isStale: Bool {
+        if case .failed = self { return true }
+        return false
+    }
+
+    var failureLabel: String? {
+        guard case .failed(_, let requiresSignIn) = self else { return nil }
+        return requiresSignIn ? "Refresh failed – sign in again" : "Refresh failed"
+    }
 }
 
 enum DisplayAccountAuthState: Equatable {

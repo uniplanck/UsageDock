@@ -697,6 +697,624 @@ final class UsageAggregatorTests: XCTestCase {
     }
 }
 
+final class UsageDisplayRegressionTests: XCTestCase {
+    private let now = Date(timeIntervalSince1970: 1_000_000)
+
+    func testPastResetDisplaysZeroWithoutMutatingBucketMetadataOrInput() throws {
+        let id = UUID()
+        let original = UsageBucket(
+            id: id,
+            quotaID: "claude-five-hour",
+            label: "5h",
+            kind: .fiveHour,
+            model: "claude-sonnet",
+            used: 80,
+            limit: 100,
+            unit: "requests",
+            percentUsed: 0.8,
+            resetsAt: now.addingTimeInterval(-1),
+            isEnabled: false
+        )
+        let inputSnapshot = original
+
+        let displayed = original.forDisplay(at: now)
+
+        XCTAssertEqual(displayed.id, id)
+        XCTAssertEqual(displayed.quotaID, original.quotaID)
+        XCTAssertEqual(displayed.label, original.label)
+        XCTAssertEqual(displayed.kind, original.kind)
+        XCTAssertEqual(displayed.model, original.model)
+        XCTAssertEqual(displayed.used ?? -1, 0, accuracy: 0.0001)
+        XCTAssertEqual(displayed.limit ?? -1, original.limit ?? -2, accuracy: 0.0001)
+        XCTAssertEqual(displayed.unit, original.unit)
+        XCTAssertEqual(displayed.percentUsed ?? -1, 0, accuracy: 0.0001)
+        XCTAssertNil(displayed.resetsAt)
+        XCTAssertEqual(displayed.isEnabled, original.isEnabled)
+        XCTAssertEqual(original, inputSnapshot)
+    }
+
+    func testPastResetWithUnavailableUsageStillDisplaysZero() {
+        let original = UsageBucket(
+            quotaID: "claude-unavailable",
+            label: "Unavailable",
+            kind: .custom,
+            resetsAt: now.addingTimeInterval(-1)
+        )
+
+        let displayed = original.forDisplay(at: now)
+
+        XCTAssertNil(displayed.used)
+        XCTAssertEqual(displayed.percentUsed ?? -1, 0, accuracy: 0.0001)
+        XCTAssertNil(displayed.resetsAt)
+        XCTAssertEqual(original.resetsAt, now.addingTimeInterval(-1))
+    }
+
+    func testResetAtBoundaryIsConsideredExpired() {
+        let original = UsageBucket(
+            quotaID: "boundary",
+            label: "Boundary",
+            kind: .weekly,
+            used: 3,
+            limit: 10,
+            percentUsed: 0.3,
+            resetsAt: now
+        )
+
+        let displayed = original.forDisplay(at: now)
+
+        XCTAssertEqual(displayed.used ?? -1, 0, accuracy: 0.0001)
+        XCTAssertEqual(displayed.percentUsed ?? -1, 0, accuracy: 0.0001)
+        XCTAssertNil(displayed.resetsAt)
+        XCTAssertEqual(original.resetsAt, now)
+    }
+
+    func testFutureAndNilResetBucketsRemainUnchanged() {
+        let future = UsageBucket(
+            quotaID: "future",
+            label: "Future",
+            kind: .weekly,
+            used: 3,
+            limit: 10,
+            percentUsed: 0.3,
+            resetsAt: now.addingTimeInterval(60)
+        )
+        let noReset = UsageBucket(
+            quotaID: "no-reset",
+            label: "No reset",
+            kind: .custom,
+            used: 3,
+            limit: 10,
+            percentUsed: 0.3
+        )
+
+        XCTAssertEqual(future.forDisplay(at: now), future)
+        XCTAssertEqual(noReset.forDisplay(at: now), noReset)
+    }
+
+    func testExactAggregationDisplaysExpiredCapacityAsZeroBeforeWeighting() throws {
+        let expired = UsageBucket(
+            quotaID: "five-hour",
+            label: "5h",
+            kind: .fiveHour,
+            used: 80,
+            limit: 100,
+            unit: "requests",
+            percentUsed: 0.8,
+            resetsAt: now.addingTimeInterval(-1)
+        )
+        let futureReset = now.addingTimeInterval(3_600)
+        let future = UsageBucket(
+            quotaID: "five-hour",
+            label: "5h",
+            kind: .fiveHour,
+            used: 100,
+            limit: 500,
+            unit: "requests",
+            percentUsed: 0.2,
+            resetsAt: futureReset
+        )
+        let accounts = [account(name: "Expired", bucket: expired), account(name: "Future", bucket: future)]
+        let inputSnapshot = accounts
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let persistedSnapshot = try encoder.encode(accounts)
+
+        let aggregate = try XCTUnwrap(
+            UsageAggregator.aggregates(for: .claude, accounts: accounts, now: now).first
+        )
+
+        XCTAssertEqual(aggregate.quality, .exact)
+        XCTAssertEqual(aggregate.percentUsed ?? -1, 100.0 / 600.0, accuracy: 0.0001)
+        XCTAssertEqual(aggregate.resetsAt, futureReset)
+        XCTAssertEqual(accounts, inputSnapshot)
+        XCTAssertEqual(try encoder.encode(accounts), persistedSnapshot)
+    }
+
+    func testPercentageAggregationDisplaysExpiredBucketAsZero() throws {
+        let expired = UsageBucket(
+            quotaID: "weekly",
+            label: "1w",
+            kind: .weekly,
+            percentUsed: 0.8,
+            resetsAt: now.addingTimeInterval(-1)
+        )
+        let futureReset = now.addingTimeInterval(3_600)
+        let future = UsageBucket(
+            quotaID: "weekly",
+            label: "1w",
+            kind: .weekly,
+            percentUsed: 0.2,
+            resetsAt: futureReset
+        )
+        let accounts = [account(name: "Expired", bucket: expired), account(name: "Future", bucket: future)]
+
+        let aggregate = try XCTUnwrap(
+            UsageAggregator.aggregates(for: .claude, accounts: accounts, now: now).first
+        )
+
+        XCTAssertEqual(aggregate.quality, .unweightedAverage)
+        XCTAssertEqual(aggregate.percentUsed ?? -1, 0.1, accuracy: 0.0001)
+        XCTAssertEqual(aggregate.resetsAt, futureReset)
+    }
+
+    func testSummaryAndSummariesReturnZeroPressureAndNoPastResetWhenAllBucketsExpired() throws {
+        let expiredReset = now.addingTimeInterval(-1)
+        let accounts = [
+            account(
+                name: "Unavailable",
+                bucket: UsageBucket(
+                    quotaID: "expired-unavailable",
+                    label: "Unavailable",
+                    kind: .custom,
+                    resetsAt: expiredReset
+                )
+            ),
+            account(
+                name: "Exact",
+                bucket: UsageBucket(
+                    quotaID: "expired-exact",
+                    label: "Expired",
+                    kind: .weekly,
+                    used: 50,
+                    limit: 100,
+                    unit: "requests",
+                    resetsAt: expiredReset
+                )
+            )
+        ]
+
+        let summary = UsageAggregator.summary(for: .claude, accounts: accounts, now: now)
+        let claudeSummary = try XCTUnwrap(
+            UsageAggregator.summaries(accounts: accounts, now: now).first(where: { $0.provider == .claude })
+        )
+
+        XCTAssertEqual(summary.pressurePercent ?? -1, 0, accuracy: 0.0001)
+        XCTAssertTrue(summary.aggregates.allSatisfy { ($0.percentUsed ?? -1) == 0 })
+        XCTAssertTrue(summary.aggregates.allSatisfy { $0.resetsAt == nil })
+        XCTAssertEqual(claudeSummary, summary)
+    }
+
+    private func account(name: String, bucket: UsageBucket) -> UsageAccount {
+        UsageAccount(provider: .claude, name: name, buckets: [bucket])
+    }
+}
+
+final class AccountRefreshStateDisplayTests: XCTestCase {
+    func testAuthenticationFailuresAreMarkedStaleAndRequireSignIn() {
+        let errors: [Error] = [
+            UsageAdapterError.authenticationExpired("expired"),
+            UsageAdapterError.credentialsUnavailable("missing")
+        ]
+
+        for error in errors {
+            let state = AccountRefreshState.failure(error)
+            XCTAssertTrue(state.isStale)
+            XCTAssertEqual(state.failureLabel, "Refresh failed – sign in again")
+        }
+    }
+
+    func testGenericFailuresUseGenericLabel() {
+        let state = AccountRefreshState.failure(UsageAdapterError.invalidResponse("fixture"))
+
+        XCTAssertTrue(state.isStale)
+        XCTAssertEqual(state.failureLabel, "Refresh failed")
+    }
+
+    func testNonFailedRefreshStatesAreNotStaleAndHaveNoFailureLabel() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let states: [AccountRefreshState] = [
+            .idle,
+            .refreshing,
+            .live(now),
+            .degraded(now, "fixture")
+        ]
+
+        for state in states {
+            XCTAssertFalse(state.isStale)
+            XCTAssertNil(state.failureLabel)
+        }
+    }
+}
+
+@MainActor
+final class UsageStoreRefreshDisplayTests: XCTestCase {
+    private let now = Date(timeIntervalSince1970: 1_000_000)
+
+    func testRefreshFailureRetainsF17BucketsAndPersistedAccountBytes() throws {
+        let suiteName = "UsageDockTests.RefreshFailureRetention.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let account = UsageAccount(
+            provider: .claude,
+            name: "Claude Profile",
+            source: .profile,
+            buckets: [
+                UsageBucket(
+                    id: UUID(),
+                    quotaID: "claude-five-hour",
+                    label: "5h",
+                    kind: .fiveHour,
+                    percentUsed: 0.8,
+                    resetsAt: now.addingTimeInterval(-1),
+                    isEnabled: false
+                ),
+                UsageBucket(
+                    id: UUID(),
+                    quotaID: "claude-weekly",
+                    label: "1w",
+                    kind: .weekly,
+                    percentUsed: 0.4,
+                    resetsAt: now.addingTimeInterval(3_600),
+                    isEnabled: true
+                )
+            ]
+        )
+        let store = UsageStore(defaults: defaults)
+        store.accounts = [account]
+        let accountsBeforeFailure = store.accounts
+        let persistedBeforeFailure = try XCTUnwrap(defaults.data(forKey: "UsageDock.accounts.v3"))
+
+        store.recordRefreshFailure(
+            UsageAdapterError.authenticationExpired("expired"),
+            for: account.id
+        )
+
+        XCTAssertEqual(store.accounts, accountsBeforeFailure)
+        XCTAssertEqual(store.accounts.first?.buckets.map(\.id), account.buckets.map(\.id))
+        XCTAssertEqual(store.accounts.first?.buckets.map(\.isEnabled), account.buckets.map(\.isEnabled))
+        XCTAssertEqual(defaults.data(forKey: "UsageDock.accounts.v3"), persistedBeforeFailure)
+        XCTAssertTrue(store.accountRefreshState(for: account.id).isStale)
+    }
+
+    func testFailedActiveAccountKeepsRailVisibleAndExpiredSourcesReset() throws {
+        let suiteName = "UsageDockTests.RefreshFailureRail.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let account = UsageAccount(
+            provider: .claude,
+            name: "Claude Profile",
+            source: .profile,
+            buckets: [
+                UsageBucket(
+                    quotaID: "claude-five-hour",
+                    label: "5h",
+                    kind: .fiveHour,
+                    percentUsed: 0.8,
+                    resetsAt: now.addingTimeInterval(-1)
+                ),
+                UsageBucket(
+                    quotaID: "claude-weekly",
+                    label: "1w",
+                    kind: .weekly,
+                    percentUsed: 0.4,
+                    resetsAt: now.addingTimeInterval(-1)
+                )
+            ]
+        )
+        defaults.set(try JSONEncoder().encode([account]), forKey: "UsageDock.accounts.v3")
+        defaults.set([account.id.uuidString], forKey: "UsageDock.displayAccountIDs.v1")
+        defaults.set(account.id.uuidString, forKey: "UsageDock.activeDisplayAccountID.v1")
+
+        let store = UsageStore(defaults: defaults)
+        store.recordRefreshFailure(UsageAdapterError.authenticationExpired("expired"), for: account.id)
+        let target = RailDisplayTarget.account(id: account.id, provider: .claude)
+        let sources: [RailQuotaSource] = [
+            .automatic,
+            .fiveHour,
+            .weekly,
+            .bucket(quotaID: "claude-five-hour"),
+            .bucket(quotaID: "claude-weekly")
+        ]
+
+        XCTAssertEqual(store.railTargets(), [target])
+        for source in sources {
+            XCTAssertEqual(store.railDisplayPercent(for: target, source: source, now: now) ?? -1, 0, accuracy: 0.0001)
+            XCTAssertNil(store.railResetDate(for: target, source: source, now: now))
+            if source != .automatic {
+                let aggregate = try XCTUnwrap(store.railAggregate(for: target, source: source, now: now))
+                XCTAssertEqual(aggregate.percentUsed ?? -1, 0, accuracy: 0.0001)
+                XCTAssertNil(aggregate.resetsAt)
+            }
+        }
+
+        store.presentationMode = .remaining
+        for source in sources {
+            XCTAssertEqual(store.railDisplayPercent(for: target, source: source, now: now) ?? -1, 1, accuracy: 0.0001)
+        }
+    }
+
+    func testFailedMenuBarAccountKeepsItsPercentageAndIsMarkedStale() throws {
+        let suiteName = "UsageDockTests.RefreshFailureMenuBar.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let account = UsageAccount(
+            provider: .claude,
+            name: "Claude Profile",
+            source: .profile,
+            buckets: [
+                UsageBucket(
+                    quotaID: "claude-weekly",
+                    label: "1w",
+                    kind: .weekly,
+                    percentUsed: 0.44,
+                    resetsAt: now.addingTimeInterval(3_600)
+                )
+            ]
+        )
+        defaults.set(try JSONEncoder().encode([account]), forKey: "UsageDock.accounts.v3")
+        defaults.set([account.id.uuidString], forKey: "UsageDock.menuBarAccountIDs.v1")
+
+        let store = UsageStore(defaults: defaults)
+        store.appLanguage = .english
+        store.recordRefreshFailure(UsageAdapterError.authenticationExpired("expired"), for: account.id)
+
+        let item = try XCTUnwrap(store.menuBarUsageItems(now: now).first)
+        XCTAssertEqual(item.id, account.id)
+        XCTAssertEqual(item.percent ?? -1, 0.44, accuracy: 0.0001)
+        XCTAssertTrue(item.isStale)
+        XCTAssertEqual(item.failureLabel, "Refresh failed – sign in again")
+        XCTAssertEqual(item.authenticationState, .required)
+    }
+
+    func testRailRemainingTimeHidesPastAndBoundaryResetsButKeepsFutureText() {
+        let suiteName = "UsageDockTests.RefreshFailureTimer.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let store = UsageStore(defaults: defaults)
+        XCTAssertNil(store.railRemainingTimeText(until: now.addingTimeInterval(-1), now: now))
+        XCTAssertNil(store.railRemainingTimeText(until: now, now: now))
+        XCTAssertEqual(store.railRemainingTimeText(until: now.addingTimeInterval(3_600), now: now), "1h 00m")
+    }
+
+    func testFusionFailureLabelLocalizesAndIgnoresDisabledFailedAccounts() throws {
+        let suiteName = "UsageDockTests.RefreshFailureFusion.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let disabledID = UUID()
+        let genericID = UUID()
+        let authID = UUID()
+        let accounts = [
+            UsageAccount(
+                id: disabledID,
+                provider: .claude,
+                name: "Disabled Claude",
+                isEnabled: false,
+                source: .profile,
+                buckets: [UsageBucket(quotaID: "claude-weekly", label: "1w", kind: .weekly, percentUsed: 0.2)]
+            ),
+            UsageAccount(
+                id: genericID,
+                provider: .claude,
+                name: "Generic Claude",
+                source: .profile,
+                buckets: [UsageBucket(quotaID: "claude-weekly", label: "1w", kind: .weekly, percentUsed: 0.3)]
+            ),
+            UsageAccount(
+                id: authID,
+                provider: .claude,
+                name: "Auth Claude",
+                source: .profile,
+                buckets: [UsageBucket(quotaID: "claude-weekly", label: "1w", kind: .weekly, percentUsed: 0.4)]
+            )
+        ]
+        defaults.set(try JSONEncoder().encode(accounts), forKey: "UsageDock.accounts.v3")
+
+        let store = UsageStore(defaults: defaults)
+        store.setFusionEnabled(true, for: .claude)
+        let target = RailDisplayTarget.provider(.claude)
+        store.appLanguage = .english
+        store.recordRefreshFailure(UsageAdapterError.authenticationExpired("disabled"), for: disabledID)
+        XCTAssertNil(store.refreshFailureLabel(for: target))
+
+        store.recordRefreshFailure(UsageAdapterError.invalidResponse("fixture"), for: genericID)
+        XCTAssertEqual(store.refreshFailureLabel(for: target), "Refresh failed")
+
+        store.recordRefreshFailure(UsageAdapterError.credentialsUnavailable("missing"), for: authID)
+        XCTAssertEqual(store.refreshFailureLabel(for: target), "Refresh failed – sign in again")
+        XCTAssertEqual(store.summary(for: .claude, now: now).aggregates.first?.accountCount, 2)
+
+        store.appLanguage = .japanese
+        XCTAssertEqual(store.refreshFailureLabel(for: target), "更新失敗・再ログインが必要")
+    }
+
+    func testFailedRailAndMenuBarRenderAtNativeSizes() throws {
+        let suiteName = "UsageDockTests.RefreshFailureCompactRendering.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let account = UsageAccount(provider: .claude, name: "Claude Profile", source: .profile, buckets: [
+            UsageBucket(quotaID: "five-hour", label: "5h", kind: .fiveHour, percentUsed: 0.8, resetsAt: .distantPast),
+            UsageBucket(quotaID: "weekly", label: "1w", kind: .weekly, percentUsed: 0.2, resetsAt: .distantFuture)
+        ])
+        defaults.set(try JSONEncoder().encode([account]), forKey: "UsageDock.accounts.v3")
+        defaults.set([account.id.uuidString], forKey: "UsageDock.menuBarAccountIDs.v1")
+        let store = UsageStore(defaults: defaults)
+        let placement = PlacementStore(defaults: defaults)
+        store.recordRefreshFailure(UsageAdapterError.authenticationExpired("fixture"), for: account.id)
+        store.railPercentSource = .fiveHour
+        store.railOuterRingSource = .weekly
+        store.railInnerRingSource = .fiveHour
+        store.railTimeSource = .fiveHour
+
+        func capture<V: View>(_ content: V, name: String) throws {
+            let view = NSHostingView(rootView: content
+                .environment(\.locale, store.appLanguage.locale)
+                .environment(\.colorScheme, .light)
+                .padding(16)
+                .background(Color(nsColor: .windowBackgroundColor)))
+            view.appearance = NSAppearance(named: .aqua)
+            let size = view.fittingSize
+            XCTAssertGreaterThan(size.width, 32)
+            XCTAssertGreaterThan(size.height, 32)
+            view.frame = NSRect(origin: .zero, size: size)
+            view.layoutSubtreeIfNeeded()
+            let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+            let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+            attachment.name = name
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+
+        let width = RailMetrics.width(
+            scale: store.railScale, showRing: store.railShowRing, showMultiplier: store.railShowMultiplier,
+            screenInnerPadding: store.railScreenInnerPadding, windowInnerPadding: store.railWindowInnerPadding,
+            iconSize: store.railIconSize, titleWidth: store.railTitleWidth, timeWidth: store.railTimeWidth
+        )
+        let height = RailMetrics.contentHeight(
+            entryCount: 1, scale: store.railScale, itemSpacing: store.railItemSpacing,
+            innerPaddingY: store.railInnerPaddingY, showRing: store.railShowRing,
+            showPercent: store.railShowPercent, showRemainingTime: store.railShowRemainingTime,
+            remainingTimeFontSize: store.railRemainingTimeFontSize, iconSize: store.railIconSize,
+            percentFontSize: store.railPercentFontSize, showTitle: store.railShowTitle,
+            titleFontSize: store.railAccountLabelFontSize
+        )
+        for language in [UsageDockLanguage.english, .japanese] {
+            store.appLanguage = language
+            try capture(RailView(
+                usageStore: store, placement: placement, onTargetHover: { _, _ in },
+                onDragCanvasWidthChange: { _, _ in }, onDragVerticalPositionChange: { _ in },
+                onOpenSettings: {}
+            ).frame(width: width, height: height), name: "Rail-failed-\(language.rawValue)")
+            try capture(MenuBarStatusLabel(items: store.menuBarUsageItems(), showRing: true, showPercentage: true),
+                        name: "MenuBar-failed-\(language.rawValue)")
+            try capture(MenuBarPopoverContent(usageStore: store, placement: placement, onOpenSettings: {}),
+                        name: "MenuPopover-failed-\(language.rawValue)")
+        }
+    }
+
+    func testFailedClaudeDetailAndAccountEditorRenderAtNativeWidths() throws {
+        let suiteName = "UsageDockTests.RefreshFailureRendering.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let account = UsageAccount(
+            provider: .claude,
+            name: "Claude Profile",
+            source: .profile,
+            buckets: [
+                UsageBucket(
+                    quotaID: "claude-five-hour",
+                    label: "5h",
+                    kind: .fiveHour,
+                    percentUsed: 0.8,
+                    resetsAt: Date().addingTimeInterval(-3_600)
+                ),
+                UsageBucket(
+                    quotaID: "claude-weekly",
+                    label: "1w",
+                    kind: .weekly,
+                    percentUsed: 0.2,
+                    resetsAt: Date().addingTimeInterval(3_600)
+                )
+            ]
+        )
+        defaults.set(try JSONEncoder().encode([account]), forKey: "UsageDock.accounts.v3")
+        defaults.set([account.id.uuidString], forKey: "UsageDock.displayAccountIDs.v1")
+        defaults.set(account.id.uuidString, forKey: "UsageDock.activeDisplayAccountID.v1")
+
+        let store = UsageStore(defaults: defaults)
+        store.recordRefreshFailure(UsageAdapterError.authenticationExpired("expired"), for: account.id)
+        let target = RailDisplayTarget.account(id: account.id, provider: .claude)
+        let expectedLabels = [
+            (language: "en", appLanguage: UsageDockLanguage.english, label: "Refresh failed – sign in again"),
+            (language: "ja", appLanguage: UsageDockLanguage.japanese, label: "更新失敗・再ログインが必要")
+        ]
+
+        for item in expectedLabels {
+            store.appLanguage = item.appLanguage
+            XCTAssertEqual(store.refreshFailureLabel(for: target), item.label)
+
+            store.resetTimeDisplayMode = .relative
+            let detailWidth: CGFloat = 346
+            let detailHeight: CGFloat = 230
+            let detail = NSHostingView(
+                rootView: ProviderDetailView(target: target, edge: .right, usageStore: store)
+                    .environment(\.locale, Locale(identifier: item.language))
+                    .environment(\.colorScheme, .light)
+                    .frame(width: detailWidth, height: detailHeight)
+                    .padding(16)
+                    .background(Color(nsColor: .windowBackgroundColor))
+            )
+            let detailSize = detail.fittingSize
+            XCTAssertEqual(detailSize.width, detailWidth + 32, accuracy: 1)
+            XCTAssertGreaterThan(detailSize.height, 180)
+            detail.appearance = NSAppearance(named: .aqua)
+            detail.frame = NSRect(origin: .zero, size: detailSize)
+            detail.layoutSubtreeIfNeeded()
+            let detailBitmap = try XCTUnwrap(detail.bitmapImageRepForCachingDisplay(in: detail.bounds))
+            detail.cacheDisplay(in: detail.bounds, to: detailBitmap)
+            let detailPNG = try XCTUnwrap(detailBitmap.representation(using: .png, properties: [:]))
+            let detailAttachment = XCTAttachment(data: detailPNG, uniformTypeIdentifier: "public.png")
+            detailAttachment.name = "ProviderDetail-\(item.language)-detail"
+            detailAttachment.lifetime = .keepAlways
+            add(detailAttachment)
+
+            for width in [630.0, 670.0] {
+                let editor = NSHostingView(
+                    rootView: AccountEditor(
+                        account: .constant(account),
+                        statusText: item.label,
+                        presentationMode: .used,
+                        canMoveUp: false,
+                        canMoveDown: false,
+                        supportsMultiplier: false,
+                        multiplierDetectionText: nil,
+                        onMoveUp: {},
+                        onMoveDown: {},
+                        onAutoDetectMultiplier: {},
+                        onDelete: {},
+                        isStale: true
+                    )
+                        .environment(\.locale, Locale(identifier: item.language))
+                        .environment(\.colorScheme, .light)
+                        .frame(width: width)
+                        .padding(16)
+                        .background(Color(nsColor: .windowBackgroundColor))
+                )
+                let editorSize = editor.fittingSize
+                XCTAssertEqual(editorSize.width, width + 32, accuracy: 1)
+                XCTAssertGreaterThan(editorSize.height, 300)
+                editor.appearance = NSAppearance(named: .aqua)
+                editor.frame = NSRect(origin: .zero, size: editorSize)
+                editor.layoutSubtreeIfNeeded()
+                let editorBitmap = try XCTUnwrap(editor.bitmapImageRepForCachingDisplay(in: editor.bounds))
+                editor.cacheDisplay(in: editor.bounds, to: editorBitmap)
+                let editorPNG = try XCTUnwrap(editorBitmap.representation(using: .png, properties: [:]))
+                let editorAttachment = XCTAttachment(data: editorPNG, uniformTypeIdentifier: "public.png")
+                editorAttachment.name = "AccountEditor-\(item.language)-\(Int(width))"
+                editorAttachment.lifetime = .keepAlways
+                add(editorAttachment)
+            }
+        }
+    }
+}
+
 @MainActor
 final class AntigravityRailQuotaTests: XCTestCase {
     private let fixtureText = """
@@ -712,6 +1330,10 @@ final class AntigravityRailQuotaTests: XCTestCase {
 
     private func date(_ value: String) -> Date {
         ISO8601DateFormatter().date(from: value)!
+    }
+
+    private var fixtureNow: Date {
+        date("2026-10-21T00:00:00Z")
     }
 
     private func bucket(_ quotaID: String, in buckets: [UsageBucket]) throws -> UsageBucket {
@@ -762,13 +1384,13 @@ final class AntigravityRailQuotaTests: XCTestCase {
 
         for item in expected {
             let source = RailQuotaSource.bucket(quotaID: item.id)
-            let aggregate = try XCTUnwrap(store.railAggregate(for: target, source: source))
+            let aggregate = try XCTUnwrap(store.railAggregate(for: target, source: source, now: fixtureNow))
             XCTAssertEqual(aggregate.quotaID, item.id)
             XCTAssertEqual(aggregate.percentUsed ?? -1, item.percent, accuracy: 0.0001)
-            XCTAssertEqual(store.railDisplayPercent(for: target, source: source) ?? -1, item.percent, accuracy: 0.0001)
-            XCTAssertEqual(store.railResetDate(for: target, source: source), date(item.reset))
+            XCTAssertEqual(store.railDisplayPercent(for: target, source: source, now: fixtureNow) ?? -1, item.percent, accuracy: 0.0001)
+            XCTAssertEqual(store.railResetDate(for: target, source: source, now: fixtureNow), date(item.reset))
             store.presentationMode = .remaining
-            XCTAssertEqual(store.railDisplayPercent(for: target, source: source) ?? -1, 1 - item.percent, accuracy: 0.0001)
+            XCTAssertEqual(store.railDisplayPercent(for: target, source: source, now: fixtureNow) ?? -1, 1 - item.percent, accuracy: 0.0001)
             store.presentationMode = .used
         }
     }
@@ -787,10 +1409,10 @@ final class AntigravityRailQuotaTests: XCTestCase {
         XCTAssertEqual(store.railOuterRingSource(for: target), .automatic)
         XCTAssertEqual(store.railInnerRingSource(for: target), .none)
         XCTAssertEqual(store.railTimeSource(for: target), .weekly)
-        XCTAssertEqual(store.railAggregate(for: target, source: .fiveHour)?.quotaID, buckets[0].quotaID)
-        XCTAssertEqual(store.railAggregate(for: target, source: .weekly)?.quotaID, buckets[1].quotaID)
-        XCTAssertEqual(store.railDisplayPercent(for: target, source: .automatic) ?? -1, 0.75, accuracy: 0.0001)
-        XCTAssertEqual(store.railResetDate(for: target, source: .automatic), buckets[3].resetsAt)
+        XCTAssertEqual(store.railAggregate(for: target, source: .fiveHour, now: fixtureNow)?.quotaID, buckets[0].quotaID)
+        XCTAssertEqual(store.railAggregate(for: target, source: .weekly, now: fixtureNow)?.quotaID, buckets[1].quotaID)
+        XCTAssertEqual(store.railDisplayPercent(for: target, source: .automatic, now: fixtureNow) ?? -1, 0.75, accuracy: 0.0001)
+        XCTAssertEqual(store.railResetDate(for: target, source: .automatic, now: fixtureNow), buckets[3].resetsAt)
         XCTAssertNil(store.railDisplayPercent(for: target, source: .none))
         XCTAssertNil(store.railResetDate(for: target, source: .none))
     }
@@ -950,7 +1572,7 @@ final class AntigravityRailQuotaTests: XCTestCase {
         account.buckets = merged
         store.accounts = [account]
         let target = RailDisplayTarget.account(id: accountID, provider: .antigravity)
-        let aggregate = try XCTUnwrap(store.railAggregate(for: target, source: .bucket(quotaID: selectedID)))
+        let aggregate = try XCTUnwrap(store.railAggregate(for: target, source: .bucket(quotaID: selectedID), now: fixtureNow))
         let selectedFetched = try XCTUnwrap(fetched.first(where: { $0.quotaID == selectedID }))
         XCTAssertEqual(store.railPercentSource(for: target), .bucket(quotaID: selectedID))
         XCTAssertEqual(aggregate.label, selectedFetched.label)
@@ -978,26 +1600,26 @@ final class AntigravityRailQuotaTests: XCTestCase {
 
         account.buckets[account.buckets.firstIndex(where: { $0.quotaID == selectedID })!].isEnabled = false
         store.accounts = [account]
-        XCTAssertNil(store.railAggregate(for: target, source: .bucket(quotaID: selectedID)))
-        XCTAssertNil(store.railDisplayPercent(for: target, source: .bucket(quotaID: selectedID)))
-        XCTAssertNil(store.railResetDate(for: target, source: .bucket(quotaID: selectedID)))
-        XCTAssertEqual(store.railAggregate(for: target, source: .bucket(quotaID: weeklyID))?.quotaID, weeklyID)
+        XCTAssertNil(store.railAggregate(for: target, source: .bucket(quotaID: selectedID), now: fixtureNow))
+        XCTAssertNil(store.railDisplayPercent(for: target, source: .bucket(quotaID: selectedID), now: fixtureNow))
+        XCTAssertNil(store.railResetDate(for: target, source: .bucket(quotaID: selectedID), now: fixtureNow))
+        XCTAssertEqual(store.railAggregate(for: target, source: .bucket(quotaID: weeklyID), now: fixtureNow)?.quotaID, weeklyID)
 
         account.buckets[account.buckets.firstIndex(where: { $0.quotaID == selectedID })!].isEnabled = true
         store.accounts = [account]
-        XCTAssertEqual(store.railAggregate(for: target, source: .bucket(quotaID: selectedID))?.quotaID, selectedID)
+        XCTAssertEqual(store.railAggregate(for: target, source: .bucket(quotaID: selectedID), now: fixtureNow)?.quotaID, selectedID)
 
         account.buckets.removeAll(where: { $0.quotaID == selectedID })
         store.accounts = [account]
-        XCTAssertNil(store.railAggregate(for: target, source: .bucket(quotaID: selectedID)))
-        XCTAssertNil(store.railDisplayPercent(for: target, source: .bucket(quotaID: selectedID)))
-        XCTAssertNil(store.railResetDate(for: target, source: .bucket(quotaID: selectedID)))
+        XCTAssertNil(store.railAggregate(for: target, source: .bucket(quotaID: selectedID), now: fixtureNow))
+        XCTAssertNil(store.railDisplayPercent(for: target, source: .bucket(quotaID: selectedID), now: fixtureNow))
+        XCTAssertNil(store.railResetDate(for: target, source: .bucket(quotaID: selectedID), now: fixtureNow))
         let missingSelection = RailQuotaSource.bucket(quotaID: selectedID)
         XCTAssertTrue(RailQuotaSource.options(buckets: account.buckets, selection: missingSelection, allowNone: false).contains(missingSelection))
 
         account.buckets = allBuckets
         store.accounts = [account]
-        XCTAssertEqual(store.railAggregate(for: target, source: missingSelection)?.quotaID, selectedID)
+        XCTAssertEqual(store.railAggregate(for: target, source: missingSelection, now: fixtureNow)?.quotaID, selectedID)
     }
 
     func testAntigravityQuotaOptionsIncludeHiddenMissingAndNoDuplicates() throws {
@@ -1047,7 +1669,7 @@ final class AntigravityRailQuotaTests: XCTestCase {
         let target = RailDisplayTarget.account(id: account.id, provider: .codex)
         XCTAssertTrue(RailQuotaSource.options(buckets: buckets, selection: nil, allowNone: false).contains(selected))
         XCTAssertEqual(store.railPercentSource(for: target), selected)
-        XCTAssertEqual(store.railDisplayPercent(for: target, source: selected) ?? -1, 0.6, accuracy: 0.0001)
+        XCTAssertEqual(store.railDisplayPercent(for: target, source: selected, now: fixtureNow) ?? -1, 0.6, accuracy: 0.0001)
     }
 
     func testQuotaNameWrapsInsteadOfTruncatingAtNarrowWidths() {

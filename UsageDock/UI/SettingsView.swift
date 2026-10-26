@@ -1324,10 +1324,6 @@ private struct ProviderSettingsSection: View {
         "UsageDock.settings.providerCollapsed.\(provider.rawValue).v1"
     }
 
-    private var summary: ProviderUsageSummary {
-        usageStore.summary(for: provider)
-    }
-
     private var providerAccounts: [UsageAccount] {
         usageStore.visibleAccounts(for: provider)
     }
@@ -1369,7 +1365,8 @@ private struct ProviderSettingsSection: View {
                             } : nil,
                             onCopyGrokDiagnostics: account.provider == .grok ? {
                                 _ = GrokWebDiagnostics.copyToPasteboard()
-                            } : nil
+                            } : nil,
+                            isStale: usageStore.accountRefreshState(for: account.id).isStale
                         )
                     }
                 }
@@ -1434,8 +1431,11 @@ private struct ProviderSettingsSection: View {
                     Text("\(providerAccounts.count) accounts")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
-                    Text(pressureText)
-                        .font(.headline.monospacedDigit())
+                    TimelineView(.periodic(from: .now, by: 30)) { context in
+                        Text(percentText(usageStore.displayPercent(usageStore.summary(for: provider, now: context.date).pressurePercent)))
+                            .font(.headline.monospacedDigit())
+                            .opacity(usageStore.refreshFailureLabel(for: .provider(provider)) == nil ? 1 : 0.55)
+                    }
                     Image(systemName: "chevron.right")
                         .font(.caption.weight(.semibold))
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
@@ -1495,40 +1495,40 @@ private struct ProviderSettingsSection: View {
     }
 
     private var aggregateSummary: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Combined quota windows · \(usageStore.presentationMode.label)")
-                .font(.subheadline.weight(.semibold))
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            let summary = usageStore.summary(for: provider, now: context.date)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Combined quota windows · \(usageStore.presentationMode.label)")
+                    .font(.subheadline.weight(.semibold))
 
-            if summary.aggregates.isEmpty {
-                Text("No live quota data")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(summary.aggregates) { aggregate in
-                    let displayed = usageStore.displayPercent(aggregate.percentUsed)
-                    HStack(spacing: 12) {
-                        QuotaNameLabel(name: aggregate.label)
-                            .frame(width: 145, alignment: .leading)
+                if summary.aggregates.isEmpty {
+                    Text("No live quota data")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(summary.aggregates) { aggregate in
+                        let displayed = usageStore.displayPercent(aggregate.percentUsed)
+                        HStack(spacing: 12) {
+                            QuotaNameLabel(name: aggregate.label)
+                                .frame(width: 145, alignment: .leading)
 
-                        ProgressView(value: displayed ?? 0)
-                            .frame(maxWidth: .infinity)
+                            ProgressView(value: displayed ?? 0)
+                                .frame(maxWidth: .infinity)
 
-                        Text(percentText(displayed))
-                            .font(.callout.monospacedDigit())
-                            .frame(width: 48, alignment: .trailing)
+                            Text(percentText(displayed))
+                                .font(.callout.monospacedDigit())
+                                .frame(width: 48, alignment: .trailing)
 
-                        Text(qualityText(aggregate.quality))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(width: 92, alignment: .leading)
+                            Text(qualityText(aggregate.quality))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(width: 92, alignment: .leading)
+                        }
+                        .opacity(usageStore.refreshFailureLabel(for: .provider(provider)) == nil ? 1 : 0.55)
                     }
                 }
             }
         }
-    }
-
-    private var pressureText: String {
-        percentText(usageStore.displayPercent(summary.pressurePercent))
     }
 
     private var statusColor: Color {
@@ -1601,6 +1601,7 @@ struct AccountEditor: View {
     let onDelete: () -> Void
     var onGrokWebLogin: (() -> Void)? = nil
     var onCopyGrokDiagnostics: (() -> Void)? = nil
+    var isStale: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1658,7 +1659,7 @@ struct AccountEditor: View {
             HStack(spacing: 8) {
                 Text(statusText)
                     .font(.caption)
-                    .foregroundStyle(statusText.localizedCaseInsensitiveContains("sign in again") ? .orange : .secondary)
+                    .foregroundStyle(isStale ? .orange : .secondary)
                     .lineLimit(3)
                     .textSelection(.enabled)
 
@@ -1719,9 +1720,12 @@ struct AccountEditor: View {
                                 .font(.caption.weight(.medium))
                                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                            Text(percentText(displayPercent(bucket.resolvedPercentUsed)))
-                                .font(.caption.monospacedDigit())
-                                .frame(width: 44, alignment: .trailing)
+                            TimelineView(.periodic(from: .now, by: 30)) { context in
+                                Text(percentText(displayPercent(bucket.forDisplay(at: context.date).resolvedPercentUsed)))
+                                    .font(.caption.monospacedDigit())
+                                    .frame(width: 44, alignment: .trailing)
+                                    .opacity(isStale ? 0.55 : 1)
+                            }
 
                             Button {
                                 moveBucket(bucket.id, direction: -1)

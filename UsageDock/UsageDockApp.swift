@@ -110,6 +110,11 @@ final class MenuBarStatusController: NSObject {
     }
 
     private func observeUsageChanges() {
+        // Reset windows can expire even when every network refresh fails.
+        Timer.publish(every: 30, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in self?.refreshStatusItem() }
+            .store(in: &cancellables)
         usageStore.objectWillChange
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
@@ -123,6 +128,9 @@ final class MenuBarStatusController: NSObject {
     private func refreshStatusItem() {
         guard let button = statusItem.button else { return }
         let items = usageStore.menuBarUsageItems()
+        button.toolTip = (["UsageDock"] + items.compactMap { item in
+            item.failureLabel.map { "\(item.accountName): \($0)" }
+        }).joined(separator: "\n")
         let shouldRenderUsage = usageStore.menuBarUsageEnabled
             && !items.isEmpty
             && (usageStore.menuBarShowRing || usageStore.menuBarShowPercentage)
@@ -166,7 +174,8 @@ final class MenuBarStatusController: NSObject {
     private func accessibilityLabel(for items: [MenuBarUsageItem]) -> String {
         let values = items.map { item in
             let percent = item.percent.map { "\(Int(($0 * 100).rounded())) percent" } ?? "unavailable"
-            return "\(item.provider.displayName) \(item.accountName), \(percent)"
+            return ["\(item.provider.displayName) \(item.accountName), \(percent)", item.failureLabel]
+                .compactMap { $0 }.joined(separator: ", ")
         }
         return "UsageDock, " + values.joined(separator: ", ")
     }
@@ -182,7 +191,7 @@ final class MenuBarStatusController: NSObject {
     }
 }
 
-private struct MenuBarStatusLabel: View {
+struct MenuBarStatusLabel: View {
     let items: [MenuBarUsageItem]
     let showRing: Bool
     let showPercentage: Bool
@@ -198,12 +207,19 @@ private struct MenuBarStatusLabel: View {
                             diameter: 12,
                             lineWidth: 2
                         )
+                        .opacity(item.isStale ? 0.55 : 1)
                     }
                     if showPercentage {
                         Text(percentText(item.percent))
                             .font(.system(size: 10.5, weight: .semibold, design: .rounded))
                             .monospacedDigit()
                             .foregroundStyle(accentColor(for: item))
+                            .opacity(item.isStale ? 0.55 : 1)
+                    }
+                    if item.isStale {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.orange)
                     }
                 }
             }
@@ -243,7 +259,7 @@ private struct CompactUsageRing: View {
     }
 }
 
-private struct MenuBarPopoverContent: View {
+struct MenuBarPopoverContent: View {
     @ObservedObject var usageStore: UsageStore
     @ObservedObject var placement: PlacementStore
     let onOpenSettings: () -> Void
@@ -256,16 +272,18 @@ private struct MenuBarPopoverContent: View {
             Divider().opacity(0.65)
 
             ScrollView {
-                VStack(spacing: 9) {
-                    if items.isEmpty {
-                        emptyState
-                    } else {
-                        ForEach(items) { item in
-                            usageRow(item)
+                TimelineView(.periodic(from: .now, by: 30)) { context in
+                    VStack(spacing: 9) {
+                        if items.isEmpty {
+                            emptyState
+                        } else {
+                            ForEach(usageStore.menuBarUsageItems(now: context.date)) { item in
+                                usageRow(item)
+                            }
                         }
                     }
+                    .padding(14)
                 }
-                .padding(14)
             }
             .frame(minHeight: 190, maxHeight: 285)
 
@@ -349,17 +367,20 @@ private struct MenuBarPopoverContent: View {
                     Text(item.accountName)
                         .font(.system(size: 12.5, weight: .semibold))
                         .lineLimit(1)
-                    Text(item.provider.displayName)
+                    Text(item.failureLabel ?? item.provider.displayName)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(item.isStale ? Color.orange : Color.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 8)
                 CompactUsageRing(percent: item.percent, accent: accent, diameter: 30, lineWidth: 3.2)
+                    .opacity(item.isStale ? 0.55 : 1)
                 Text(percentText(item.percent))
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(item.percent == nil ? Color.secondary : accent)
                     .frame(width: 42, alignment: .trailing)
+                    .opacity(item.isStale ? 0.55 : 1)
             }
             .padding(.horizontal, 11)
             .padding(.vertical, 9)

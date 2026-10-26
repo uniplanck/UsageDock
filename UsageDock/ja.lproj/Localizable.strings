@@ -153,3 +153,5 @@
 "7d Code" = "7日間 コード";
 "Kimi total usage is unavailable. Open Kimi and sign in to the same account. Showing Code quotas only." = "Kimiの合計使用量を取得できません。Kimiアプリで同じアカウントにログインしてください。コードの使用量のみ表示しています。";
 "Kimi Code quotas could not be refreshed. Showing total usage only." = "Kimiコードの使用量を更新できません。合計使用量のみ表示しています。";
+"Refresh failed – sign in again" = "更新失敗・再ログインが必要";
+"Refresh failed" = "更新失敗";
