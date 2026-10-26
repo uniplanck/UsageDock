@@ -2393,12 +2393,12 @@ final class LiveUsageAdapterParsingTests: XCTestCase {
     func testClaudeLimitsArrayParsesScopedModel() throws {
         let data = try jsonData([
             "limits": [
-                ["kind": "session", "group": "session", "percent": 0.44, "resets_at": "2026-08-29T01:00:00Z"],
-                ["kind": "weekly_all", "group": "weekly", "percent": 0.12, "resets_at": "2026-09-02T01:00:00Z"],
+                ["kind": "session", "group": "session", "percent": 44.0, "resets_at": "2026-08-29T01:00:00Z"],
+                ["kind": "weekly_all", "group": "weekly", "percent": 12.0, "resets_at": "2026-09-02T01:00:00Z"],
                 [
                     "kind": "weekly_scoped",
                     "group": "weekly",
-                    "percent": 0.28,
+                    "percent": 28.0,
                     "resets_at": "2026-09-02T01:00:00Z",
                     "scope": ["model": ["display_name": "Fable"]]
                 ]
@@ -2409,7 +2409,41 @@ final class LiveUsageAdapterParsingTests: XCTestCase {
         XCTAssertEqual(buckets.count, 3)
         XCTAssertEqual(buckets.first(where: { $0.kind == .fiveHour })?.label, "5h")
         XCTAssertEqual(buckets.first(where: { $0.kind == .weekly })?.label, "1w")
+        XCTAssertEqual(buckets.first(where: { $0.kind == .fiveHour })?.resolvedPercentUsed ?? -1, 0.44, accuracy: 0.0001)
+        XCTAssertEqual(buckets.first(where: { $0.kind == .weekly })?.resolvedPercentUsed ?? -1, 0.12, accuracy: 0.0001)
         XCTAssertEqual(buckets.first(where: { $0.model == "Fable" })?.resolvedPercentUsed ?? -1, 0.28, accuracy: 0.0001)
+    }
+
+    func testClaudeLimitsPercentAlwaysUsesZeroToHundredScale() throws {
+        let cases: [(raw: Double, expected: Double)] = [
+            (1, 0.01), (0, 0), (13, 0.13), (100, 1), (0.5, 0.005), (150, 1), (-1, 0)
+        ]
+        for (raw, expected) in cases {
+            for value in [raw, String(raw)] as [Any] {
+                let data = try jsonData(["limits": [["kind": "session", "percent": value]]])
+                let buckets = try ClaudeUsageAdapter.parseUsage(data: data)
+                XCTAssertEqual(buckets.count, 1)
+                XCTAssertEqual(try XCTUnwrap(buckets.first?.percentUsed), expected, accuracy: 0.000001,
+                               "limits percent \(value)")
+            }
+        }
+    }
+
+    func testClaudeLegacyUtilizationAlwaysUsesZeroToHundredScale() throws {
+        let cases: [(raw: Double, expected: Double)] = [
+            (1, 0.01), (0, 0), (13, 0.13), (100, 1), (0.5, 0.005), (150, 1), (-1, 0)
+        ]
+        for key in ["five_hour", "seven_day", "seven_day_fable"] {
+            for (raw, expected) in cases {
+                for value in [raw, String(raw)] as [Any] {
+                    let data = try jsonData([key: ["utilization": value]])
+                    let buckets = try ClaudeUsageAdapter.parseUsage(data: data)
+                    XCTAssertEqual(buckets.count, 1)
+                    XCTAssertEqual(try XCTUnwrap(buckets.first?.percentUsed), expected, accuracy: 0.000001,
+                                   "\(key) utilization \(value)")
+                }
+            }
+        }
     }
 
     func testKimiUsageParsesWeeklyFiveHourAndExtraUsage() throws {
