@@ -241,23 +241,12 @@ struct ProviderDetailView: View {
     private func resetText(_ date: Date) -> String {
         switch usageStore.resetTimeDisplayMode {
         case .relative:
-            return relativeResetText(date)
+            return usageStore.remainingResetTimeText(until: date) ?? "—"
         case .absolute:
             return Self.absoluteResetFormatter.string(from: date)
         case .both:
-            return "\(relativeResetText(date)) · \(Self.absoluteResetFormatter.string(from: date))"
+            return "\(usageStore.remainingResetTimeText(until: date) ?? "—") · \(Self.absoluteResetFormatter.string(from: date))"
         }
-    }
-
-    private func relativeResetText(_ date: Date) -> String {
-        let totalMinutes = max(Int(ceil(date.timeIntervalSinceNow / 60)), 0)
-        if totalMinutes <= 0 { return "<1m" }
-        let days = totalMinutes / (24 * 60)
-        let hours = (totalMinutes % (24 * 60)) / 60
-        let minutes = totalMinutes % 60
-        if days > 0 { return "\(days)d \(hours)h \(minutes)m" }
-        if hours > 0 { return "\(hours)h \(minutes)m" }
-        return "\(minutes)m"
     }
 
     private static let absoluteResetFormatter: DateFormatter = {

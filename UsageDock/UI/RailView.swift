@@ -646,7 +646,10 @@ struct RailView: View {
                             displayPercent: usageStore.railDisplayPercent(for: target, source: percentSource, now: context.date),
                             outerRingPercent: usageStore.railDisplayPercent(for: target, source: outerRingSource, now: context.date),
                             innerRingPercent: usageStore.railDisplayPercent(for: target, source: innerRingSource, now: context.date),
-                            remainingResetDate: usageStore.railResetDate(for: target, source: timeSource, now: context.date),
+                            remainingTimeText: usageStore.railRemainingTimeText(
+                                until: usageStore.railResetDate(for: target, source: timeSource, now: context.date),
+                                now: context.date
+                            ),
                             failureLabel: usageStore.refreshFailureLabel(for: target),
                             presentationMode: usageStore.presentationMode,
                             multiplier: usageStore.displayMultiplier(for: target),
@@ -657,13 +660,6 @@ struct RailView: View {
                             showOuterRing: outerRingSource != .none,
                             showInnerRing: innerRingSource != .none,
                             showRemainingTime: usageStore.railShowRemainingTime,
-                            dayDigits: usageStore.railDayDigits,
-                            hourDigits: usageStore.railHourDigits,
-                            minuteDigits: usageStore.railMinuteDigits,
-                            showHours: usageStore.railShowHours,
-                            showMinutes: usageStore.railShowMinutes,
-                            autoHideZeroDays: usageStore.railAutoHideZeroDays,
-                            autoHideZeroHours: usageStore.railAutoHideZeroHours,
                             showMultiplier: usageStore.railShowMultiplier,
                             backplateEnabled: usageStore.railBackplateEnabled,
                             autoContrast: usageStore.railAutoContrast,
@@ -2667,7 +2663,7 @@ private struct ProviderUsageTile: View {
     let displayPercent: Double?
     let outerRingPercent: Double?
     let innerRingPercent: Double?
-    let remainingResetDate: Date?
+    let remainingTimeText: String?
     let failureLabel: String?
     let presentationMode: UsagePresentationMode
     let multiplier: Int?
@@ -2678,13 +2674,6 @@ private struct ProviderUsageTile: View {
     let showOuterRing: Bool
     let showInnerRing: Bool
     let showRemainingTime: Bool
-    let dayDigits: RailDigitWidth
-    let hourDigits: RailDigitWidth
-    let minuteDigits: RailDigitWidth
-    let showHours: Bool
-    let showMinutes: Bool
-    let autoHideZeroDays: Bool
-    let autoHideZeroHours: Bool
     let showMultiplier: Bool
     let backplateEnabled: Bool
     let autoContrast: Bool
@@ -2795,16 +2784,14 @@ private struct ProviderUsageTile: View {
             }
 
             if showRemainingTime {
-                TimelineView(.periodic(from: .now, by: 30)) { context in
-                    Text(remainingTimeText(now: context.date) ?? "—")
-                        .font(.system(size: remainingTimeFontSize * scale, weight: .medium, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(remainingResetDate == nil ? ProviderBrand.tertiaryText(theme: theme) : ProviderBrand.secondaryText(theme: theme))
-                        .opacity(failureLabel == nil ? 1 : 0.55)
-                        .lineLimit(1)
-                        .frame(width: timeWidth * scale)
-                        .shadow(color: ProviderBrand.contrastShadow(theme: theme, enabled: autoContrast), radius: autoContrast ? 1.0 : 0)
-                }
+                Text(remainingTimeText ?? "—")
+                    .font(.system(size: remainingTimeFontSize * scale, weight: .medium, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(remainingTimeText == nil ? ProviderBrand.tertiaryText(theme: theme) : ProviderBrand.secondaryText(theme: theme))
+                    .opacity(failureLabel == nil ? 1 : 0.55)
+                    .lineLimit(1)
+                    .frame(width: timeWidth * scale)
+                    .shadow(color: ProviderBrand.contrastShadow(theme: theme, enabled: autoContrast), radius: autoContrast ? 1.0 : 0)
             }
 
             if isAccount && showTitle {
@@ -2831,30 +2818,4 @@ private struct ProviderUsageTile: View {
         .accessibilityValue(["\(presentationMode.label) \(percentText)", failureLabel].compactMap { $0 }.joined(separator: ", "))
     }
 
-    private func remainingTimeText(now: Date) -> String? {
-        guard let remainingResetDate, remainingResetDate > now else { return nil }
-        let totalMinutes = max(Int(remainingResetDate.timeIntervalSince(now) / 60), 0)
-        let days = totalMinutes / 1_440
-        let hours = (totalMinutes % 1_440) / 60
-        let minutes = totalMinutes % 60
-        var parts: [String] = []
-
-        if !(autoHideZeroDays && days == 0) {
-            parts.append("\(timerValue(days, width: dayDigits))d")
-        }
-        if showHours && !(autoHideZeroHours && hours == 0) {
-            parts.append("\(timerValue(hours, width: hourDigits))h")
-        }
-        if showMinutes || (days == 0 && hours == 0) {
-            parts.append("\(timerValue(minutes, width: minuteDigits))m")
-        }
-        if parts.isEmpty {
-            parts.append("\(timerValue(minutes, width: minuteDigits))m")
-        }
-        return parts.joined(separator: " ")
-    }
-
-    private func timerValue(_ value: Int, width: RailDigitWidth) -> String {
-        width == .two ? String(format: "%02d", value) : "\(value)"
-    }
 }
