@@ -53,25 +53,25 @@ enum ProviderPlanMultiplierDetector {
     static func hasCurrentSession(for provider: ProviderID) -> Bool {
         switch provider {
         case .claude:
-            guard let data = ClaudeCredentialStore.credentialData() else { return false }
-            return jsonStrings(in: data).contains { !$0.isEmpty }
+            return ClaudeCredentialStore.hasCurrentSession()
         case .codex:
-            guard let data = fileData(".codex/auth.json"),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let tokens = object["tokens"] as? [String: Any],
-                  let token = tokens["access_token"] as? String else { return false }
-            return !token.isEmpty
+            return fileExists(".codex/auth.json")
         case .kimi:
             return FileManager.default.fileExists(
                 atPath: FileManager.default.homeDirectoryForCurrentUser
                     .appendingPathComponent(".kimi-code/credentials", isDirectory: true).path
             )
         case .grok:
-            guard let data = fileData(".grok/auth.json") else { return false }
-            return GrokCredentialStore.containsSession(data: data)
+            return fileExists(".grok/auth.json")
         case .antigravity, .cursor:
             return false
         }
+    }
+
+    private static func fileExists(_ relativePath: String) -> Bool {
+        FileManager.default.fileExists(
+            atPath: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(relativePath).path
+        )
     }
 
     private static func credentialData(for account: UsageAccount) -> Data? {

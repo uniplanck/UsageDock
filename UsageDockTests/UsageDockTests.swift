@@ -73,7 +73,7 @@ final class ClaudeCredentialStoreTests: XCTestCase {
         XCTAssertNotNil(read(reload: true))
         XCTAssertEqual(sourceReads, 2)
         XCTAssertEqual(ownedReads, 1)
-        now += 299
+        now += 1_799
         XCTAssertNotNil(read())
         XCTAssertEqual(sourceReads, 2)
         now += 1
@@ -86,16 +86,273 @@ final class ClaudeCredentialStoreTests: XCTestCase {
         var source: Data?
         var reads = 0
         let cache = ClaudeCredentialCache(now: { now }, readOwned: { _ in nil }, writeOwned: { _, _ in })
-        func read() -> ClaudeCredentialStore.CredentialRecord? {
-            cache.record(sourceID: "keychain:fixture") { reads += 1; return source }
+        func read(reload: Bool = false) -> ClaudeCredentialStore.CredentialRecord? {
+            cache.record(sourceID: "keychain:fixture", reload: reload) { reads += 1; return source }
         }
         XCTAssertNil(read())
         source = Data("signed-in-fixture".utf8)
         XCTAssertNil(read())
         XCTAssertEqual(reads, 1)
         now += 30
+        XCTAssertNil(read(reload: true))
+        now += 569
+        XCTAssertNil(read())
+        XCTAssertNil(read(reload: true))
+        XCTAssertEqual(reads, 1)
+        now += 1
         XCTAssertEqual(read()?.data, source)
         XCTAssertEqual(reads, 2)
+    }
+
+    func testFailedForcedReloadIsCachedForTenMinutes() {
+        var now = Date(timeIntervalSince1970: 1_000)
+        var source: Data? = Data("fixture".utf8)
+        var reads = 0
+        let cache = ClaudeCredentialCache(now: { now }, readOwned: { _ in nil }, writeOwned: { _, _ in })
+        func read(reload: Bool = false) -> ClaudeCredentialStore.CredentialRecord? {
+            cache.record(sourceID: "keychain:fixture", reload: reload) { reads += 1; return source }
+        }
+        XCTAssertNotNil(read())
+        source = nil // Denial, failure and subprocess timeout all return nil.
+        now += 30
+        XCTAssertNil(read(reload: true))
+        source = Data("recovered-fixture".utf8)
+        now += 599
+        XCTAssertNil(read(reload: true))
+        XCTAssertEqual(reads, 2)
+        now += 1
+        XCTAssertEqual(read(reload: true)?.data, source)
+        XCTAssertEqual(reads, 3)
+    }
+
+    func testSourceReadMayReenterTheCacheWithoutDeadlock() async {
+        let completed = expectation(description: "Reentrant source read returns")
+        DispatchQueue.global().async {
+            let cache = ClaudeCredentialCache(readOwned: { _ in nil }, writeOwned: { _, _ in })
+            let record = cache.record(sourceID: "keychain:fixture") {
+                XCTAssertNil(cache.cachedRecord(sourceID: "keychain:fixture"))
+                XCTAssertNil(cache.record(sourceID: "keychain:fixture", reload: true) {
+                    XCTFail("A recursive read must share the in-flight read")
+                    return nil
+                })
+                return Data("fixture".utf8)
+            }
+            XCTAssertEqual(record?.data, Data("fixture".utf8))
+            completed.fulfill()
+        }
+        await fulfillment(of: [completed], timeout: 3)
+    }
+
+    func testOwnedReadAndWriteMayReenterTheCacheWithoutDeadlock() async {
+        let completed = expectation(description: "Reentrant owned reads and writes return")
+        DispatchQueue.global().async {
+            var cache: ClaudeCredentialCache!
+            cache = ClaudeCredentialCache(readOwned: { sourceID in
+                XCTAssertNil(cache.record(sourceID: sourceID) {
+                    XCTFail("Owned reads must share the in-flight source read")
+                    return nil
+                })
+                return nil
+            }, writeOwned: { _, sourceID in
+                XCTAssertEqual(cache.cachedRecord(sourceID: sourceID)?.data, Data("rotated".utf8))
+                XCTAssertNotNil(cache.record(sourceID: sourceID) {
+                    XCTFail("Persistence must keep the in-memory entry")
+                    return nil
+                })
+            })
+            let record = cache.record(sourceID: "keychain:fixture") { Data("fixture".utf8) }
+            if let record {
+                do {
+                    try cache.persist(Data("rotated".utf8), to: record.target)
+                } catch {
+                    XCTFail("Fixture persistence failed: \(error)")
+                }
+            } else {
+                XCTFail("Initial read failed")
+            }
+            completed.fulfill()
+        }
+        await fulfillment(of: [completed], timeout: 3)
+    }
+
+    @MainActor
+    func testConcurrentReadsCoalesceAndMainThreadNeverWaitsForAnInFlightRead() async {
+        let started = expectation(description: "Source read started")
+        let completed = expectation(description: "Concurrent readers completed")
+        completed.expectedFulfillmentCount = 2
+        let release = DispatchSemaphore(value: 0)
+        let cache = ClaudeCredentialCache(readOwned: { _ in nil }, writeOwned: { _, _ in })
+        DispatchQueue.global().async {
+            let record = cache.record(sourceID: "keychain:fixture") {
+                started.fulfill()
+                XCTAssertEqual(release.wait(timeout: .now() + 3), .success)
+                return Data("fixture".utf8)
+            }
+            XCTAssertEqual(record?.data, Data("fixture".utf8))
+            completed.fulfill()
+        }
+        await fulfillment(of: [started], timeout: 2)
+        DispatchQueue.global().async {
+            let record = cache.record(sourceID: "keychain:fixture") {
+                XCTFail("Concurrent callers must coalesce source reads")
+                return nil
+            }
+            XCTAssertEqual(record?.data, Data("fixture".utf8))
+            completed.fulfill()
+        }
+        XCTAssertNil(cache.record(sourceID: "keychain:fixture") {
+            XCTFail("The main thread must not enter a concurrent source read")
+            return nil
+        })
+        release.signal()
+        await fulfillment(of: [completed], timeout: 3)
+    }
+
+    func testCredentialFileIsPreferredWithoutReadingProviderKeychain() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent(".credentials.json")
+        let data = Data(#"{"claudeAiOauth":{"accessToken":"file-fixture"}}"#.utf8)
+        try data.write(to: file)
+        let records = await Task.detached {
+            let cache = ClaudeCredentialCache(readOwned: { _ in nil }, writeOwned: { _, _ in })
+            return ClaudeCredentialStore.credentialRecords(fileURL: file, service: "fixture", cache: cache) { _ in
+                XCTFail("A usable credentials file must not prompt for provider Keychain")
+                return nil
+            }
+        }.value
+        XCTAssertEqual(records.map(\.data), [data])
+        XCTAssertEqual(records.first?.target.account, "file:\(file.standardizedFileURL.path)")
+    }
+
+    func testMissingCredentialFileFallsBackToProviderKeychain() async {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let records = await Task.detached {
+            let cache = ClaudeCredentialCache(readOwned: { _ in nil }, writeOwned: { _, _ in })
+            return ClaudeCredentialStore.credentialRecords(fileURL: file, service: "fixture", cache: cache) { service in
+                XCTAssertEqual(service, "fixture")
+                return Data("keychain-fixture".utf8)
+            }
+        }.value
+        XCTAssertEqual(records.map(\.data), [Data("keychain-fixture".utf8)])
+        XCTAssertEqual(records.first?.target.account, "keychain:fixture")
+    }
+
+    func testMalformedCredentialFileFallsBackToProviderKeychain() async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: file) }
+        try Data("malformed fixture".utf8).write(to: file)
+        let records = await Task.detached {
+            let cache = ClaudeCredentialCache(readOwned: { _ in nil }, writeOwned: { _, _ in })
+            return ClaudeCredentialStore.credentialRecords(fileURL: file, service: "fixture", cache: cache) { _ in
+                Data("keychain-fixture".utf8)
+            }
+        }.value
+        XCTAssertEqual(records.map(\.data), [Data("keychain-fixture".utf8)])
+    }
+
+    func testFailedReadDoesNotEraseATokenRotatedWhileReading() async throws {
+        var now = Date(timeIntervalSince1970: 1_000)
+        let cache = ClaudeCredentialCache(now: { now }, readOwned: { _ in nil }, writeOwned: { _, _ in })
+        let original = try XCTUnwrap(cache.record(sourceID: "keychain:fixture") { Data("original".utf8) })
+        now += 30
+        let started = expectation(description: "Forced read started")
+        let completed = expectation(description: "Failed read preserved concurrent rotation")
+        let release = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            let record = cache.record(sourceID: "keychain:fixture", reload: true) {
+                started.fulfill()
+                XCTAssertEqual(release.wait(timeout: .now() + 3), .success)
+                return nil
+            }
+            XCTAssertEqual(record?.data, Data("rotated".utf8))
+            completed.fulfill()
+        }
+        await fulfillment(of: [started], timeout: 2)
+        try cache.persist(Data("rotated".utf8), to: original.target)
+        release.signal()
+        await fulfillment(of: [completed], timeout: 3)
+        XCTAssertEqual(cache.cachedRecord(sourceID: "keychain:fixture")?.data, Data("rotated".utf8))
+        now += 599
+        XCTAssertEqual(cache.record(sourceID: "keychain:fixture", reload: true) {
+            XCTFail("A failed read must stay throttled even when rotated data was preserved")
+            return nil
+        }?.data, Data("rotated".utf8))
+        now += 1
+        XCTAssertEqual(cache.record(sourceID: "keychain:fixture", reload: true) {
+            Data("provider-recovered".utf8)
+        }?.data, Data("provider-recovered".utf8))
+    }
+
+    @MainActor
+    func testMainThreadCredentialChecksOnlyObserveCacheAndFileExistence() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let cache = ClaudeCredentialCache(readOwned: { _ in
+            XCTFail("UI checks must not read UsageDock's Keychain")
+            return nil
+        }, writeOwned: { _, _ in })
+        func records() -> [ClaudeCredentialStore.CredentialRecord] {
+            ClaudeCredentialStore.credentialRecords(fileURL: file, service: "fixture", cache: cache, reload: true) { _ in
+                XCTFail("UI checks must not read provider Keychain")
+                return nil
+            }
+        }
+        XCTAssertFalse(ClaudeCredentialStore.hasCurrentSession(fileURL: file, service: "fixture", cache: cache))
+        XCTAssertTrue(records().isEmpty)
+        try Data("file-exists".utf8).write(to: file)
+        XCTAssertTrue(ClaudeCredentialStore.hasCurrentSession(fileURL: file, service: "fixture", cache: cache))
+        XCTAssertTrue(records().isEmpty) // Existence checks do not load file contents either.
+        try FileManager.default.removeItem(at: file)
+
+        let seeded = ClaudeCredentialCache(readOwned: { _ in nil }, writeOwned: { _, _ in })
+        _ = seeded.record(sourceID: "keychain:fixture") { Data("cached".utf8) }
+        XCTAssertTrue(ClaudeCredentialStore.hasCurrentSession(fileURL: file, service: "fixture", cache: seeded))
+        XCTAssertEqual(
+            ClaudeCredentialStore.credentialRecords(fileURL: file, service: "fixture", cache: seeded).first?.data,
+            Data("cached".utf8)
+        )
+    }
+
+    @MainActor
+    func testSecurityRunnerRefusesToLaunchOnMainThread() {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: file) }
+        XCTAssertNil(ProviderKeychainReader.runSecurity(URL(fileURLWithPath: "/usr/bin/touch"), [file.path]))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+    }
+
+    func testSecurityRunnerDrainsOutputLargerThanPipeCapacity() async throws {
+        let result = await Task.detached {
+            ProviderKeychainReader.runSecurity(
+                URL(fileURLWithPath: "/usr/bin/head"), ["-c", "262144", "/dev/zero"], timeout: 3
+            )
+        }.value
+        XCTAssertEqual(result?.status, 0)
+        XCTAssertEqual(result?.data, Data(repeating: 0, count: 262_144))
+    }
+
+    func testSecurityRunnerTimesOutAndStopsAnUnresponsiveProcess() async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let start = Date()
+        let result = await Task.detached {
+            ProviderKeychainReader.runSecurity(
+                URL(fileURLWithPath: "/bin/sh"),
+                ["-c", "trap '' TERM; echo $$ > \"$1\"; exec /bin/sleep 30", "fixture", file.path],
+                timeout: 0.3
+            )
+        }.value
+        XCTAssertNil(result)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2)
+        let pidText = try String(contentsOf: file, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        let pid = try XCTUnwrap(Int32(pidText))
+        for _ in 0..<100 where kill(pid, 0) == 0 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(kill(pid, 0), -1, "Timed-out processes must not survive the read")
+        if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
     }
 
     func testProviderRotationReloadIsBoundedEvenWithinCacheLifetime() throws {
