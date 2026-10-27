@@ -25,6 +25,10 @@
 "Theme" = "テーマ";
 "Reset time detail" = "リセット時刻表示";
 "Hide minutes when days are shown" = "日数があるときは分を表示しない";
+"Automatically open Terminal login when authentication expires" = "認証切れ時に自動でTerminalログインを開く";
+"Open Claude Code login in Terminal" = "TerminalでClaude Codeに再ログイン";
+"Terminal login could not be opened. Check Automation permissions." = "Terminalを開けませんでした。オートメーションの許可を確認してください。";
+"Claude profile directory is unavailable. Reconnect this profile." = "Claudeのプロファイルフォルダが見つかりません。プロファイルを再接続してください。";
 "Background opacity" = "背景の不透明度";
 "Surface helpers" = "表示補助";
 "Backplate" = "背景プレート";

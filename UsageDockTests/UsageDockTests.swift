@@ -39,6 +39,7 @@ final class UsageStoreRefreshPolicyTests: XCTestCase {
 
         init(providers: [ProviderID] = [.claude]) {
             defaults = UserDefaults(suiteName: suite)!
+            defaults.set(false, forKey: "UsageDock.autoOpenClaudeLogin.v1")
             store.accounts = providers.map { provider in
                 UsageAccount(provider: provider, name: provider.displayName, source: .profile, buckets: [
                     UsageBucket(quotaID: "weekly", label: "1w", kind: .weekly, percentUsed: 0.4,
@@ -422,87 +423,10 @@ final class ClaudeCredentialStoreTests: XCTestCase {
         XCTAssertEqual(query[kSecUseAuthenticationUI] as? String, kSecUseAuthenticationUIFail as String)
     }
 
-    func testCacheCoalescesReadsAndThrottlesForcedReloads() throws {
-        var now = Date(timeIntervalSince1970: 1_000)
-        var sourceReads = 0
-        var ownedReads = 0
-        let cache = ClaudeCredentialCache(now: { now }, readOwned: { _ in
-            ownedReads += 1
-            return nil
-        }, writeOwned: { _, _ in XCTFail("Read must not write credentials") })
-        func read(reload: Bool = false) -> ClaudeCredentialStore.CredentialRecord? {
-            cache.record(sourceID: "keychain:fixture", reload: reload) {
-                sourceReads += 1
-                return Data("provider-fixture".utf8)
-            }
-        }
-        let initial = try XCTUnwrap(read())
-        for _ in 0..<10 {
-            XCTAssertEqual(read()?.data, initial.data)
-            XCTAssertEqual(read(reload: true)?.data, initial.data)
-        }
-        XCTAssertEqual(sourceReads, 1)
-        XCTAssertEqual(ownedReads, 1)
-        now += 31
-        XCTAssertNotNil(read(reload: true))
-        XCTAssertEqual(sourceReads, 2)
-        XCTAssertEqual(ownedReads, 1)
-        now += 1_799
-        XCTAssertNotNil(read())
-        XCTAssertEqual(sourceReads, 2)
-        now += 1
-        XCTAssertNotNil(read())
-        XCTAssertEqual(sourceReads, 3)
-    }
-
-    func testCacheMissesAreThrottledAndRecoverAfterLogin() {
-        var now = Date(timeIntervalSince1970: 1_000)
-        var source: Data?
-        var reads = 0
-        let cache = ClaudeCredentialCache(now: { now }, readOwned: { _ in nil }, writeOwned: { _, _ in })
-        func read(reload: Bool = false) -> ClaudeCredentialStore.CredentialRecord? {
-            cache.record(sourceID: "keychain:fixture", reload: reload) { reads += 1; return source }
-        }
-        XCTAssertNil(read())
-        source = Data("signed-in-fixture".utf8)
-        XCTAssertNil(read())
-        XCTAssertEqual(reads, 1)
-        now += 30
-        XCTAssertNil(read(reload: true))
-        now += 569
-        XCTAssertNil(read())
-        XCTAssertNil(read(reload: true))
-        XCTAssertEqual(reads, 1)
-        now += 1
-        XCTAssertEqual(read()?.data, source)
-        XCTAssertEqual(reads, 2)
-    }
-
-    func testFailedForcedReloadIsCachedForTenMinutes() {
-        var now = Date(timeIntervalSince1970: 1_000)
-        var source: Data? = Data("fixture".utf8)
-        var reads = 0
-        let cache = ClaudeCredentialCache(now: { now }, readOwned: { _ in nil }, writeOwned: { _, _ in })
-        func read(reload: Bool = false) -> ClaudeCredentialStore.CredentialRecord? {
-            cache.record(sourceID: "keychain:fixture", reload: reload) { reads += 1; return source }
-        }
-        XCTAssertNotNil(read())
-        source = nil // Denial, failure and subprocess timeout all return nil.
-        now += 30
-        XCTAssertNil(read(reload: true))
-        source = Data("recovered-fixture".utf8)
-        now += 599
-        XCTAssertNil(read(reload: true))
-        XCTAssertEqual(reads, 2)
-        now += 1
-        XCTAssertEqual(read(reload: true)?.data, source)
-        XCTAssertEqual(reads, 3)
-    }
-
     func testSourceReadMayReenterTheCacheWithoutDeadlock() async {
         let completed = expectation(description: "Reentrant source read returns")
         DispatchQueue.global().async {
-            let cache = ClaudeCredentialCache(readOwned: { _ in nil }, writeOwned: { _, _ in })
+            let cache = ClaudeCredentialCache(readOwned: { _ in nil })
             let record = cache.record(sourceID: "keychain:fixture") {
                 XCTAssertNil(cache.cachedRecord(sourceID: "keychain:fixture"))
                 XCTAssertNil(cache.record(sourceID: "keychain:fixture", reload: true) {
@@ -517,45 +441,13 @@ final class ClaudeCredentialStoreTests: XCTestCase {
         await fulfillment(of: [completed], timeout: 3)
     }
 
-    func testOwnedReadAndWriteMayReenterTheCacheWithoutDeadlock() async {
-        let completed = expectation(description: "Reentrant owned reads and writes return")
-        DispatchQueue.global().async {
-            var cache: ClaudeCredentialCache!
-            cache = ClaudeCredentialCache(readOwned: { sourceID in
-                XCTAssertNil(cache.record(sourceID: sourceID) {
-                    XCTFail("Owned reads must share the in-flight source read")
-                    return nil
-                })
-                return nil
-            }, writeOwned: { _, sourceID in
-                XCTAssertEqual(cache.cachedRecord(sourceID: sourceID)?.data, Data("rotated".utf8))
-                XCTAssertNotNil(cache.record(sourceID: sourceID) {
-                    XCTFail("Persistence must keep the in-memory entry")
-                    return nil
-                })
-            })
-            let record = cache.record(sourceID: "keychain:fixture") { Data("fixture".utf8) }
-            if let record {
-                do {
-                    try cache.persist(Data("rotated".utf8), to: record.target)
-                } catch {
-                    XCTFail("Fixture persistence failed: \(error)")
-                }
-            } else {
-                XCTFail("Initial read failed")
-            }
-            completed.fulfill()
-        }
-        await fulfillment(of: [completed], timeout: 3)
-    }
-
     @MainActor
     func testConcurrentReadsCoalesceAndMainThreadNeverWaitsForAnInFlightRead() async {
         let started = expectation(description: "Source read started")
         let completed = expectation(description: "Concurrent readers completed")
         completed.expectedFulfillmentCount = 2
         let release = DispatchSemaphore(value: 0)
-        let cache = ClaudeCredentialCache(readOwned: { _ in nil }, writeOwned: { _, _ in })
+        let cache = ClaudeCredentialCache(readOwned: { _ in nil })
         DispatchQueue.global().async {
             let record = cache.record(sourceID: "keychain:fixture") {
                 started.fulfill()
@@ -590,7 +482,7 @@ final class ClaudeCredentialStoreTests: XCTestCase {
         let data = Data(#"{"claudeAiOauth":{"accessToken":"file-fixture"}}"#.utf8)
         try data.write(to: file)
         let records = await Task.detached {
-            let cache = ClaudeCredentialCache(readOwned: { _ in nil }, writeOwned: { _, _ in })
+            let cache = ClaudeCredentialCache(readOwned: { _ in nil })
             return ClaudeCredentialStore.credentialRecords(fileURL: file, service: "fixture", cache: cache) { _ in
                 XCTFail("A usable credentials file must not prompt for provider Keychain")
                 return nil
@@ -603,7 +495,7 @@ final class ClaudeCredentialStoreTests: XCTestCase {
     func testMissingCredentialFileFallsBackToProviderKeychain() async {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let records = await Task.detached {
-            let cache = ClaudeCredentialCache(readOwned: { _ in nil }, writeOwned: { _, _ in })
+            let cache = ClaudeCredentialCache(readOwned: { _ in nil })
             return ClaudeCredentialStore.credentialRecords(fileURL: file, service: "fixture", cache: cache) { service in
                 XCTAssertEqual(service, "fixture")
                 return Data("keychain-fixture".utf8)
@@ -618,45 +510,12 @@ final class ClaudeCredentialStoreTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: file) }
         try Data("malformed fixture".utf8).write(to: file)
         let records = await Task.detached {
-            let cache = ClaudeCredentialCache(readOwned: { _ in nil }, writeOwned: { _, _ in })
+            let cache = ClaudeCredentialCache(readOwned: { _ in nil })
             return ClaudeCredentialStore.credentialRecords(fileURL: file, service: "fixture", cache: cache) { _ in
                 Data("keychain-fixture".utf8)
             }
         }.value
         XCTAssertEqual(records.map(\.data), [Data("keychain-fixture".utf8)])
-    }
-
-    func testFailedReadDoesNotEraseATokenRotatedWhileReading() async throws {
-        var now = Date(timeIntervalSince1970: 1_000)
-        let cache = ClaudeCredentialCache(now: { now }, readOwned: { _ in nil }, writeOwned: { _, _ in })
-        let original = try XCTUnwrap(cache.record(sourceID: "keychain:fixture") { Data("original".utf8) })
-        now += 30
-        let started = expectation(description: "Forced read started")
-        let completed = expectation(description: "Failed read preserved concurrent rotation")
-        let release = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
-            let record = cache.record(sourceID: "keychain:fixture", reload: true) {
-                started.fulfill()
-                XCTAssertEqual(release.wait(timeout: .now() + 3), .success)
-                return nil
-            }
-            XCTAssertEqual(record?.data, Data("rotated".utf8))
-            completed.fulfill()
-        }
-        await fulfillment(of: [started], timeout: 2)
-        try cache.persist(Data("rotated".utf8), to: original.target)
-        release.signal()
-        await fulfillment(of: [completed], timeout: 3)
-        XCTAssertEqual(cache.cachedRecord(sourceID: "keychain:fixture")?.data, Data("rotated".utf8))
-        now += 599
-        XCTAssertEqual(cache.record(sourceID: "keychain:fixture", reload: true) {
-            XCTFail("A failed read must stay throttled even when rotated data was preserved")
-            return nil
-        }?.data, Data("rotated".utf8))
-        now += 1
-        XCTAssertEqual(cache.record(sourceID: "keychain:fixture", reload: true) {
-            Data("provider-recovered".utf8)
-        }?.data, Data("provider-recovered".utf8))
     }
 
     @MainActor
@@ -666,7 +525,7 @@ final class ClaudeCredentialStoreTests: XCTestCase {
         let cache = ClaudeCredentialCache(readOwned: { _ in
             XCTFail("UI checks must not read UsageDock's Keychain")
             return nil
-        }, writeOwned: { _, _ in })
+        })
         func records() -> [ClaudeCredentialStore.CredentialRecord] {
             ClaudeCredentialStore.credentialRecords(fileURL: file, service: "fixture", cache: cache, reload: true) { _ in
                 XCTFail("UI checks must not read provider Keychain")
@@ -680,7 +539,7 @@ final class ClaudeCredentialStoreTests: XCTestCase {
         XCTAssertTrue(records().isEmpty) // Existence checks do not load file contents either.
         try FileManager.default.removeItem(at: file)
 
-        let seeded = ClaudeCredentialCache(readOwned: { _ in nil }, writeOwned: { _, _ in })
+        let seeded = ClaudeCredentialCache(readOwned: { _ in nil })
         _ = seeded.record(sourceID: "keychain:fixture") { Data("cached".utf8) }
         XCTAssertTrue(ClaudeCredentialStore.hasCurrentSession(fileURL: file, service: "fixture", cache: seeded))
         XCTAssertEqual(
@@ -729,77 +588,6 @@ final class ClaudeCredentialStoreTests: XCTestCase {
         if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
     }
 
-    func testProviderRotationReloadIsBoundedEvenWithinCacheLifetime() throws {
-        var now = Date(timeIntervalSince1970: 1_000)
-        var source = Data("provider-login-A".utf8)
-        var reads = 0
-        let cache = ClaudeCredentialCache(now: { now }, readOwned: { _ in nil }, writeOwned: { _, _ in })
-        func read(reload: Bool) -> ClaudeCredentialStore.CredentialRecord? {
-            cache.record(sourceID: "keychain:fixture", reload: reload) { reads += 1; return source }
-        }
-        let original = try XCTUnwrap(read(reload: false))
-        try cache.persist(Data("refreshed-A".utf8), to: original.target)
-        source = Data("provider-login-B".utf8)
-        now += 29
-        XCTAssertEqual(read(reload: true)?.data, Data("refreshed-A".utf8))
-        XCTAssertEqual(reads, 1)
-        now += 1
-        XCTAssertEqual(read(reload: true)?.data, source)
-        XCTAssertEqual(reads, 2)
-    }
-
-    func testRefreshCacheSurvivesRestartAndYieldsToProviderRotation() throws {
-        var owned: [String: Data] = [:]
-        var source = Data("provider-login-A".utf8)
-        let cache = ClaudeCredentialCache(readOwned: { owned[$0] }, writeOwned: { owned[$1] = $0 })
-        let record = try XCTUnwrap(cache.record(sourceID: "keychain:Claude Code-credentials") { source })
-        let refreshed = Data("UsageDock-refreshed-A".utf8)
-        try cache.persist(refreshed, to: record.target)
-        XCTAssertEqual(cache.record(sourceID: record.target.account) { source }?.data, refreshed)
-        XCTAssertEqual(source, Data("provider-login-A".utf8))
-
-        let restarted = ClaudeCredentialCache(readOwned: { owned[$0] }, writeOwned: { owned[$1] = $0 })
-        XCTAssertEqual(restarted.record(sourceID: record.target.account) { source }?.data, refreshed)
-        source = Data("provider-login-B".utf8)
-        let afterRotation = ClaudeCredentialCache(readOwned: { owned[$0] }, writeOwned: { owned[$1] = $0 })
-        XCTAssertEqual(afterRotation.record(sourceID: record.target.account) { source }?.data, source)
-    }
-
-    func testRefreshDoesNotModifyFallbackFileOrAnotherProfile() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let file = directory.appendingPathComponent(".credentials.json")
-        let original = Data("provider-file-fixture".utf8)
-        try original.write(to: file)
-        var owned: [String: Data] = [:]
-        let cache = ClaudeCredentialCache(readOwned: { owned[$0] }, writeOwned: { owned[$1] = $0 })
-        let fileRecord = try XCTUnwrap(cache.record(sourceID: "file:\(file.path)") { try? Data(contentsOf: file) })
-        let profileRecord = try XCTUnwrap(cache.record(sourceID: "keychain:other-profile") { original })
-        try cache.persist(Data("refreshed-fixture".utf8), to: fileRecord.target)
-        XCTAssertEqual(try Data(contentsOf: file), original)
-        XCTAssertEqual(owned.count, 1)
-        XCTAssertNil(owned[profileRecord.target.account])
-        XCTAssertEqual(cache.record(sourceID: profileRecord.target.account) { original }?.data, original)
-    }
-
-    func testFailedPersistenceRetainsRotatedCredentialsInMemory() throws {
-        let original = Data("provider-fixture".utf8)
-        let cache = ClaudeCredentialCache(readOwned: { _ in nil }, writeOwned: { _, _ in
-            throw UsageAdapterError.invalidResponse("fixture-write-failure")
-        })
-        let record = try XCTUnwrap(cache.record(sourceID: "keychain:fixture") { original })
-        let refreshed = Data("refreshed-fixture".utf8)
-        XCTAssertThrowsError(try cache.persist(refreshed, to: record.target))
-        XCTAssertEqual(cache.record(sourceID: record.target.account) { original }?.data, refreshed)
-    }
-
-    func testCacheFailureMessageHasJapaneseLocalization() {
-        let message = "UsageDock could not save its Claude token cache. Unlock the login keychain and try again."
-        XCTAssertTrue(UsageDockLanguage.japanese.localized(message).contains("ログインキーチェーン"))
-        XCTAssertEqual(UsageDockLanguage.english.localized(message), message)
-    }
-
     func testProfileKeychainServiceUsesNormalizedConfigDirectoryHashPrefix() {
         XCTAssertEqual(
             ClaudeCredentialStore.keychainServiceName(
@@ -809,214 +597,463 @@ final class ClaudeCredentialStoreTests: XCTestCase {
         )
     }
 
-    func testRefreshMergeRotatesTokensAndUpdatesExpiryWithoutDroppingMetadata() throws {
-        let original = try JSONSerialization.data(withJSONObject: [
-            "claudeAiOauth": [
-                "accessToken": "old-access",
-                "refreshToken": "old-refresh",
-                "expiresAt": 1_000,
-                "subscriptionType": "pro",
-                "rateLimitTier": "default"
-            ],
-            "mcpOAuth": ["preserve": true]
-        ])
-        let refreshed = try JSONSerialization.data(withJSONObject: [
-            "access_token": "new-access",
-            "refresh_token": "new-refresh",
-            "expires_in": 3_600,
-            "refresh_token_expires_in": 7_200,
-            "scope": "user:profile user:inference"
-        ])
-        let now = Date(timeIntervalSince1970: 1_700_000_000)
-
-        let merged = try ClaudeCredentialStore.mergedCredentialData(
-            originalData: original,
-            refreshData: refreshed,
-            now: now
-        )
-        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: merged.data) as? [String: Any])
-        let oauth = try XCTUnwrap(root["claudeAiOauth"] as? [String: Any])
-
-        XCTAssertEqual(merged.accessToken, "new-access")
-        XCTAssertEqual(oauth["accessToken"] as? String, "new-access")
-        XCTAssertEqual(oauth["refreshToken"] as? String, "new-refresh")
-        XCTAssertEqual(oauth["expiresAt"] as? Int, 1_700_003_600_000)
-        XCTAssertEqual(oauth["refreshTokenExpiresAt"] as? Int, 1_700_007_200_000)
-        XCTAssertEqual(oauth["scopes"] as? [String], ["user:profile", "user:inference"])
-        XCTAssertEqual(oauth["subscriptionType"] as? String, "pro")
-        XCTAssertNotNil(root["mcpOAuth"])
+    func testForcedReloadBypassesCacheAndTracksSourceFingerprint() throws {
+        var now = Date(timeIntervalSince1970: 1_000)
+        var source = Data("source-one".utf8)
+        var reads = 0
+        let cache = ClaudeCredentialCache(now: { now }, readOwned: { _ in nil })
+        func read(_ reload: Bool = false) -> ClaudeCredentialStore.CredentialRecord? {
+            cache.record(sourceID: "keychain:fixture", reload: reload) { reads += 1; return source }
+        }
+        let first = try XCTUnwrap(read())
+        source = Data("source-two".utf8)
+        XCTAssertEqual(read()?.data, first.data)
+        let second = try XCTUnwrap(read(true))
+        XCTAssertEqual(second.data, source)
+        XCTAssertNotEqual(second.target.sourceFingerprint, first.target.sourceFingerprint)
+        XCTAssertEqual(reads, 2)
+        now += 1
+        XCTAssertEqual(read()?.data, source)
     }
 
-    func testRefreshMergeKeepsExistingRefreshTokenWhenServerDoesNotRotateIt() throws {
-        let original = try JSONSerialization.data(withJSONObject: [
-            "claudeAiOauth": [
-                "accessToken": "old-access",
-                "refreshToken": "keep-refresh",
-                "expiresAt": 1_000
-            ]
+    func testLegacyRotatedPrivateCacheIsNeverPreferredOverSource() throws {
+        let source = Data("source-credential".utf8)
+        let seed = ClaudeCredentialCache(readOwned: { _ in nil })
+        let fingerprint = try XCTUnwrap(seed.record(sourceID: "keychain:fixture") { source }).target.sourceFingerprint
+        let legacyEnvelope = try JSONSerialization.data(withJSONObject: [
+            "sourceFingerprint": fingerprint,
+            "data": Data("privately-rotated-credential".utf8).base64EncodedString()
         ])
-        let refreshed = try JSONSerialization.data(withJSONObject: [
-            "access_token": "new-access",
-            "expires_in": 60
-        ])
-
-        let merged = try ClaudeCredentialStore.mergedCredentialData(
-            originalData: original,
-            refreshData: refreshed,
-            now: Date(timeIntervalSince1970: 2_000)
-        )
-        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: merged.data) as? [String: Any])
-        let oauth = try XCTUnwrap(root["claudeAiOauth"] as? [String: Any])
-
-        XCTAssertEqual(oauth["refreshToken"] as? String, "keep-refresh")
-        XCTAssertEqual(oauth["expiresAt"] as? Int, 2_060_000)
+        let cache = ClaudeCredentialCache(readOwned: { _ in legacyEnvelope })
+        XCTAssertEqual(cache.record(sourceID: "keychain:fixture") { source }?.data, source)
     }
+
+    func testBlankFileDoesNotFallBackToPossiblyStaleKeychain() async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let source = Data(#"{"claudeAiOauth":{"accessToken":"","refreshToken":""}}"#.utf8)
+        try source.write(to: file)
+        let records = await Task.detached {
+            ClaudeCredentialStore.credentialRecords(fileURL: file, service: "fixture", cache: ClaudeCredentialCache(readOwned: { _ in nil })) { _ in
+                XCTFail("A logged-out file is authoritative")
+                return nil
+            }
+        }.value
+        XCTAssertEqual(records.first?.data, source)
+    }
+
 }
 
 final class ClaudeCredentialResolverTests: XCTestCase {
-    private func credential(access: String = "expired-fixture", expiry: Double = 1) throws -> Data {
-        try JSONSerialization.data(withJSONObject: [
-            "claudeAiOauth": ["accessToken": access, "refreshToken": "refresh-fixture", "expiresAt": expiry]
+    private func credential(access: String, expiry: Double, refresh: String = "fixture-refresh") throws -> ClaudeCredentialStore.CredentialRecord {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "claudeAiOauth": ["accessToken": access, "refreshToken": refresh, "expiresAt": expiry]
         ])
+        return .init(data: data, target: .init(account: "fixture", sourceFingerprint: UUID().uuidString))
     }
 
-    func testRefreshPersistsOnlyInOwnCacheAndReusesRotatedToken() async throws {
-        let source = try credential()
-        var sourceReads = 0
-        var saved: [Data] = []
-        let cache = ClaudeCredentialCache(readOwned: { _ in nil }, writeOwned: { data, account in
-            XCTAssertEqual(account, "keychain:Claude Code-credentials")
-            saved.append(data)
-        })
-        var requests = 0
-        let resolver = ClaudeCredentialResolver(records: { _, _ in
-            [cache.record(sourceID: "keychain:Claude Code-credentials") { sourceReads += 1; return source }!]
-        }, persist: cache.persist, send: { request in
-            requests += 1
-            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.httpBody!) as? [String: Any])
-            XCTAssertEqual(body["refresh_token"] as? String, "refresh-fixture")
-            return (
-                Data(#"{"access_token":"new-fixture","refresh_token":"rotated-fixture","expires_in":3600}"#.utf8),
-                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            )
-        })
-        let first = try await resolver.accessToken()
-        let second = try await resolver.accessToken()
-        XCTAssertEqual(first, "new-fixture")
-        XCTAssertEqual(second, first)
-        XCTAssertEqual(requests, 1)
-        XCTAssertEqual(sourceReads, 1)
-        XCTAssertEqual(saved.count, 2) // Own-cache preflight, then rotated credentials.
-        let record = try XCTUnwrap(cache.record(sourceID: "keychain:Claude Code-credentials") { source })
-        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: record.data) as? [String: Any])
-        XCTAssertEqual((root["claudeAiOauth"] as? [String: Any])?["refreshToken"] as? String, "rotated-fixture")
+    func testExpiredTokenRereadsThenRunsClaudeCLIAndUsesItsSource() async throws {
+        let date = Date(timeIntervalSince1970: 10_000)
+        var source = try credential(access: "old", expiry: 9_000)
+        var reads: [Bool] = []
+        var runs: [String] = []
+        let resolver = ClaudeCredentialResolver(records: { _, reload in
+            reads.append(reload)
+            return [source]
+        }, runCLI: { directory in
+            runs.append(directory.path)
+            source = try! self.credential(access: "new-from-cli", expiry: 20_000)
+            return .loggedIn
+        }, now: { date })
+        let result = try await resolver.accessToken(credentialPath: "/tmp/profile with space/.credentials.json")
+        XCTAssertEqual(result, "new-from-cli")
+        XCTAssertEqual(reads, [false, true, true])
+        XCTAssertEqual(runs, ["/tmp/profile with space"])
     }
 
-    func testPersistenceFailureStopsBeforeConsumingRefreshToken() async throws {
-        let record = ClaudeCredentialStore.CredentialRecord(
-            data: try credential(),
-            target: .init(account: "fixture", sourceFingerprint: "fixture")
-        )
-        let resolver = ClaudeCredentialResolver(records: { _, _ in [record] }, persist: { _, _ in
-            throw UsageAdapterError.invalidResponse("fixture-write-failure")
-        }, send: { _ in
-            XCTFail("Must not consume a rotating refresh token when persistence is unavailable")
-            throw URLError(.badServerResponse)
-        })
-        do {
-            _ = try await resolver.accessToken()
-            XCTFail("Expected preflight failure")
-        } catch {
-            XCTAssertEqual(error.localizedDescription, "fixture-write-failure")
-        }
-    }
-
-    func testUnauthorizedReloadUsesNewProviderTokenWithoutRefreshingIt() async throws {
-        let record = ClaudeCredentialStore.CredentialRecord(
-            data: try credential(access: "new-provider-fixture", expiry: Date().timeIntervalSince1970 + 3600),
-            target: .init(account: "fixture", sourceFingerprint: "fixture")
-        )
+    func testUnauthorizedReloadUsesNewProviderTokenWithoutRunningCLI() async throws {
+        let record = try credential(access: "new-source", expiry: 20_000)
         let resolver = ClaudeCredentialResolver(records: { _, reload in
             XCTAssertTrue(reload)
             return [record]
-        }, persist: { _, _ in XCTFail("New provider token needs no refresh") }, send: { _ in
-            XCTFail("New provider token needs no refresh")
-            throw URLError(.badServerResponse)
-        })
-        let token = try await resolver.accessToken(forceRefresh: true, rejectedAccessToken: "rejected-fixture")
-        XCTAssertEqual(token, "new-provider-fixture")
+        }, runCLI: { _ in XCTFail("New source token needs no CLI"); return .unavailable },
+        now: { Date(timeIntervalSince1970: 10_000) })
+        let token = try await resolver.accessToken(forceRefresh: true, rejectedAccessToken: "rejected")
+        XCTAssertEqual(token, "new-source")
     }
 
-    func testPostRefreshSaveFailureRetainsUsableRotatedTokenWithoutAnotherRequest() async throws {
-        let source = try credential()
-        var writes = 0
-        var requests = 0
-        let cache = ClaudeCredentialCache(readOwned: { _ in nil }, writeOwned: { _, _ in
-            writes += 1
-            if writes > 1 { throw UsageAdapterError.invalidResponse("fixture-keychain-locked") }
-        })
+    func testExpiredTokenWithChangedExpiryButSameValueDoesNotBypassCLI() async throws {
+        let expired = try credential(access: "same", expiry: 1)
+        let revised = try credential(access: "same", expiry: 20_000)
+        let refreshed = try credential(access: "new", expiry: 20_000)
+        var reads = 0
+        var runs = 0
         let resolver = ClaudeCredentialResolver(records: { _, _ in
-            [cache.record(sourceID: "keychain:fixture") { source }!]
-        }, persist: cache.persist, send: { request in
-            requests += 1
-            return (
-                Data(#"{"access_token":"rotated-fixture","expires_in":3600}"#.utf8),
-                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            )
-        })
-        do {
-            _ = try await resolver.accessToken()
-            XCTFail("Expected cache-save failure")
-        } catch {
-            XCTAssertEqual(error.localizedDescription, "fixture-keychain-locked")
-        }
+            reads += 1
+            return [reads == 1 ? expired : runs == 0 ? revised : refreshed]
+        }, runCLI: { _ in runs += 1; return .loggedIn }, now: { Date(timeIntervalSince1970: 10_000) })
         let token = try await resolver.accessToken()
-        XCTAssertEqual(token, "rotated-fixture")
-        XCTAssertEqual(writes, 2)
-        XCTAssertEqual(requests, 1)
+        XCTAssertEqual(token, "new")
+        XCTAssertEqual(runs, 1)
     }
 
-    func testUnauthorizedRetryJoiningNormalLookupNeverReusesRejectedToken() async throws {
-        let source = try credential(access: "rejected-fixture", expiry: Date().timeIntervalSince1970 + 3600)
-        let record = ClaudeCredentialStore.CredentialRecord(
-            data: source, target: .init(account: "fixture", sourceFingerprint: "fixture")
-        )
-        for _ in 0..<10 {
-            var requests = 0
-            let resolver = ClaudeCredentialResolver(records: { _, _ in [record] }, persist: { _, _ in }, send: { request in
-                requests += 1
-                return (
-                    Data(#"{"access_token":"new-fixture","expires_in":3600}"#.utf8),
-                    HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-                )
-            })
-            async let normal = resolver.accessToken()
-            async let forced = resolver.accessToken(forceRefresh: true, rejectedAccessToken: "rejected-fixture")
-            let (_, retryToken) = try await (normal, forced)
-            XCTAssertEqual(retryToken, "new-fixture")
-            XCTAssertEqual(requests, 1)
+    func testTokenWithMissingExpiryIsNotAssumedValid() async throws {
+        let data = Data(#"{"claudeAiOauth":{"accessToken":"unknown-expiry","refreshToken":"fixture"}}"#.utf8)
+        let record = ClaudeCredentialStore.CredentialRecord(data: data, target: .init(account: "fixture", sourceFingerprint: "same"))
+        var runs = 0
+        let resolver = ClaudeCredentialResolver(records: { _, _ in [record] }, runCLI: { _ in runs += 1; return .unavailable },
+                                                now: { Date(timeIntervalSince1970: 10_000) })
+        do { _ = try await resolver.accessToken(); XCTFail("Unknown expiry must not be treated as current") }
+        catch UsageAdapterError.authenticationExpired {} catch { XCTFail("Unexpected error") }
+        XCTAssertEqual(runs, 1)
+    }
+
+    func testLoggedOutAndBlankSourceAreAuthExpiredAndRecoverAfterPolling() async throws {
+        var date = Date(timeIntervalSince1970: 10_000)
+        var source = try credential(access: "", expiry: 0, refresh: "")
+        var reads = 0
+        var runs = 0
+        let resolver = ClaudeCredentialResolver(records: { _, _ in reads += 1; return [source] }, runCLI: { _ in
+            runs += 1
+            return .loggedOut
+        }, now: { date })
+        do { _ = try await resolver.accessToken(); XCTFail("Logged out must fail") }
+        catch UsageAdapterError.authenticationExpired {} catch { XCTFail("Unexpected error: \(error)") }
+        source = try credential(access: "logged-in", expiry: 20_000)
+        date += 29
+        do { _ = try await resolver.accessToken(); XCTFail("Polling is limited to 30 seconds") }
+        catch UsageAdapterError.authenticationExpired {} catch { XCTFail("Unexpected error") }
+        XCTAssertEqual(reads, 3)
+        date += 1
+        let result = try await resolver.accessToken()
+        XCTAssertEqual(result, "logged-in")
+        XCTAssertEqual(reads, 4)
+        XCTAssertEqual(runs, 1)
+    }
+
+    func testLoggedOutStatusDoesNotAcceptStaleNonemptySource() async throws {
+        let source = try credential(access: "rejected", expiry: 20_000)
+        let resolver = ClaudeCredentialResolver(records: { _, _ in [source] }, runCLI: { _ in .loggedOut },
+                                                now: { Date(timeIntervalSince1970: 10_000) })
+        do { _ = try await resolver.accessToken(forceRefresh: true, rejectedAccessToken: "rejected"); XCTFail("Expected auth expiry") }
+        catch UsageAdapterError.authenticationExpired {} catch { XCTFail("Unexpected error") }
+    }
+
+    func testLoggedOutStatusRequiresSourceToChangeBeforeRecovery() async throws {
+        var date = Date(timeIntervalSince1970: 10_000)
+        var source = try credential(access: "expired", expiry: 1)
+        let stale = try credential(access: "apparently-valid", expiry: 20_000)
+        let resolver = ClaudeCredentialResolver(records: { _, _ in [source] }, runCLI: { _ in
+            source = stale
+            return .loggedOut
+        }, now: { date })
+        do { _ = try await resolver.accessToken(); XCTFail("Logged-out CLI must fail") }
+        catch UsageAdapterError.authenticationExpired {} catch { XCTFail("Unexpected error") }
+        date += 30
+        do { _ = try await resolver.accessToken(); XCTFail("Unchanged source must remain logged out") }
+        catch UsageAdapterError.authenticationExpired {} catch { XCTFail("Unexpected error") }
+        source = try credential(access: "after-login", expiry: 20_000)
+        date += 30
+        let token = try await resolver.accessToken()
+        XCTAssertEqual(token, "after-login")
+    }
+
+    func testChangedCredentialFileIsRereadAfterLogin() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent(".credentials.json")
+        let blank = try credential(access: "", expiry: 0, refresh: "")
+        let loggedIn = try credential(access: "file-login", expiry: 20_000)
+        try blank.data.write(to: file)
+        var date = Date(timeIntervalSince1970: 10_000)
+        let cache = ClaudeCredentialCache(now: { date }, readOwned: { _ in nil })
+        let resolver = ClaudeCredentialResolver(records: { _, reload in
+            ClaudeCredentialStore.credentialRecords(fileURL: file, service: "fixture", cache: cache, reload: reload) { _ in
+                XCTFail("A credentials file must not fall back to Keychain")
+                return nil
+            }
+        }, runCLI: { _ in .loggedOut }, now: { date })
+        do { _ = try await resolver.accessToken(credentialPath: file.path); XCTFail("Expected auth expiry") }
+        catch UsageAdapterError.authenticationExpired {} catch { XCTFail("Unexpected error") }
+        try loggedIn.data.write(to: file, options: .atomic)
+        date += 30
+        let token = try await resolver.accessToken(credentialPath: file.path)
+        XCTAssertEqual(token, "file-login")
+        XCTAssertEqual(try Data(contentsOf: file), loggedIn.data)
+    }
+
+    func testCLIAttemptsAreThrottledForFiveMinutesPerAccount() async throws {
+        var date = Date(timeIntervalSince1970: 10_000)
+        let source = try credential(access: "expired", expiry: 1)
+        var runs: [String] = []
+        let resolver = ClaudeCredentialResolver(records: { _, _ in [source] }, runCLI: { directory in
+            runs.append(directory.path)
+            return .unavailable
+        }, now: { date })
+        for (path, delta) in [("/tmp/a/.credentials.json", 0.0), ("/tmp/b/.credentials.json", 0),
+                              ("/tmp/a/.credentials.json", 299), ("/tmp/a/.credentials.json", 1)] {
+            date += delta
+            do { _ = try await resolver.accessToken(credentialPath: path, forceRefresh: true, rejectedAccessToken: "expired"); XCTFail("Expected failure") }
+            catch UsageAdapterError.authenticationExpired {} catch { XCTFail("Unexpected error") }
         }
+        XCTAssertEqual(runs, ["/tmp/a", "/tmp/b", "/tmp/a"])
     }
 
-    func testConcurrentRequestsShareOneTokenRefresh() async throws {
-        let record = ClaudeCredentialStore.CredentialRecord(
-            data: try credential(),
-            target: .init(account: "fixture", sourceFingerprint: "fixture")
-        )
-        var requests = 0
-        let resolver = ClaudeCredentialResolver(records: { _, _ in [record] }, persist: { _, _ in }, send: { request in
-            requests += 1
-            try await Task.sleep(for: .milliseconds(30))
-            return (
-                Data(#"{"access_token":"new-fixture","expires_in":3600}"#.utf8),
-                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            )
-        })
+    func testCLIThrottleSurvivesResolverRestart() async throws {
+        let suite = "UsageDockTests.CLIThrottleRestart.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var date = Date(timeIntervalSince1970: 10_000)
+        let source = try credential(access: "expired", expiry: 1)
+        var runs = 0
+        func resolver() -> ClaudeCredentialResolver {
+            ClaudeCredentialResolver(records: { _, _ in [source] }, runCLI: { _ in runs += 1; return .unavailable },
+                                     now: { date }, attemptDefaults: defaults)
+        }
+        for advance in [0.0, 299, 1] {
+            date += advance
+            do { _ = try await resolver().accessToken(credentialPath: "/tmp/account/.credentials.json"); XCTFail("Expected auth expiry") }
+            catch UsageAdapterError.authenticationExpired {} catch { XCTFail("Unexpected error") }
+        }
+        XCTAssertEqual(runs, 2)
+    }
+
+    func testConcurrentRecoverySharesOneCLIRequest() async throws {
+        var source = try credential(access: "expired", expiry: 1)
+        var calls = 0
+        let resolver = ClaudeCredentialResolver(records: { _, _ in [source] }, runCLI: { _ in
+            calls += 1
+            try? await Task.sleep(nanoseconds: 30_000_000)
+            source = try! self.credential(access: "new", expiry: 20_000)
+            return .loggedIn
+        }, now: { Date(timeIntervalSince1970: 10_000) })
         async let first = resolver.accessToken()
         async let second = resolver.accessToken()
-        let tokens = try await [first, second]
-        XCTAssertEqual(tokens, ["new-fixture", "new-fixture"])
-        XCTAssertEqual(requests, 1)
+        let results = try await [first, second]
+        XCTAssertEqual(results, ["new", "new"])
+        XCTAssertEqual(calls, 1)
+    }
+
+    func testSecondUnauthorizedSourceTokenAlsoGetsSilentRecovery() async throws {
+        var source = try credential(access: "first", expiry: 20_000)
+        let second = try credential(access: "second", expiry: 20_000)
+        let third = try credential(access: "third", expiry: 20_000)
+        var requests: [String] = []
+        var runs = 0
+        let resolver = ClaudeCredentialResolver(records: { _, _ in [source] }, runCLI: { _ in
+            runs += 1
+            source = third
+            return .loggedIn
+        }, now: { Date(timeIntervalSince1970: 10_000) })
+        let endpoint = URL(string: "https://fixture.invalid/usage")!
+        let adapter = ClaudeUsageAdapter(resolver: resolver, requestUsage: { token in
+            requests.append(token)
+            if token == "first" { source = second }
+            let code = token == "third" ? 200 : 401
+            let body = code == 200 ? Data(#"{"five_hour":{"utilization":40}}"#.utf8) : Data()
+            return (body, HTTPURLResponse(url: endpoint, statusCode: code, httpVersion: nil, headerFields: nil)!)
+        })
+        let accounts = try await adapter.fetchAccounts()
+        XCTAssertEqual(requests, ["first", "second", "third"])
+        XCTAssertEqual(runs, 1)
+        XCTAssertEqual(accounts.first?.buckets.first?.percentUsed, 0.4)
+    }
+
+    func testClaude429DoesNotTriggerCredentialRecovery() async throws {
+        let source = try credential(access: "valid", expiry: 20_000)
+        var runs = 0
+        let resolver = ClaudeCredentialResolver(records: { _, _ in [source] }, runCLI: { _ in runs += 1; return .unavailable },
+                                                now: { Date(timeIntervalSince1970: 10_000) })
+        let response = HTTPURLResponse(url: URL(string: "https://fixture.invalid")!, statusCode: 429, httpVersion: nil,
+                                       headerFields: ["Retry-After": "900"])!
+        let adapter = ClaudeUsageAdapter(resolver: resolver, requestUsage: { _ in (Data(), response) })
+        do { _ = try await adapter.fetchAccounts(); XCTFail("Expected rate limit") }
+        catch UsageAdapterError.rateLimited(let provider, let delay) {
+            XCTAssertEqual(provider, .claude)
+            XCTAssertEqual(delay, 900)
+        } catch { XCTFail("Unexpected error") }
+        XCTAssertEqual(runs, 0)
+    }
+
+    func testCLIRunnerUsesLoginShellAndScopedEnvironment() async {
+        var calls = 0
+        let runner = ClaudeCLIRefreshRunner(run: { url, args, timeout, environment in
+            calls += 1
+            XCTAssertGreaterThan(timeout, 0)
+            XCTAssertLessThanOrEqual(timeout, 20)
+            if calls == 1 {
+                XCTAssertEqual(url.path, "/bin/zsh")
+                XCTAssertEqual(args, ["-lc", "command -v claude"])
+                XCTAssertNil(environment)
+                return (0, Data("/fixture/bin/claude\n".utf8))
+            }
+            XCTAssertEqual(url.path, "/bin/zsh")
+            XCTAssertEqual(args.prefix(1), ["-lc"])
+            XCTAssertTrue(args[1].contains("exec \"$1\" auth status"))
+            XCTAssertEqual(Array(args.suffix(3)), ["UsageDock", "/fixture/bin/claude", "/tmp/claude profile"])
+            XCTAssertEqual(environment?["CLAUDE_CONFIG_DIR"], "/tmp/claude profile")
+            return (0, Data(#"{"loggedIn":false}"#.utf8))
+        })
+        let result = await runner.refresh(configDirectory: URL(fileURLWithPath: "/tmp/claude profile"))
+        XCTAssertEqual(result, .loggedOut)
+        XCTAssertEqual(calls, 2)
+    }
+
+    func testCLIRunnerRemovesCustomEnvironmentForDefaultAccount() async {
+        var calls = 0
+        let runner = ClaudeCLIRefreshRunner(run: { _, _, _, environment in
+            calls += 1
+            if calls == 1 { return (0, Data("/fixture/claude\n".utf8)) }
+            XCTAssertNil(environment?["CLAUDE_CONFIG_DIR"])
+            XCTAssertNil(environment?["CLAUDE_SECURESTORAGE_CONFIG_DIR"])
+            return (0, Data(#"{"loggedIn":true}"#.utf8))
+        })
+        let status = await runner.refresh(configDirectory: ClaudeConfiguration.defaultDirectory)
+        XCTAssertEqual(status, .loggedIn)
+    }
+
+    func testCLIRunnerParsesStatusDespiteLoginShellOutput() async {
+        var calls = 0
+        let runner = ClaudeCLIRefreshRunner(run: { _, _, _, _ in
+            calls += 1
+            if calls == 1 { return (0, Data("shell greeting\n/fixture/claude\n".utf8)) }
+            return (1, Data("shell greeting\n{\n  \"loggedIn\": false\n}\n".utf8))
+        })
+        let status = await runner.refresh(configDirectory: ClaudeConfiguration.defaultDirectory)
+        XCTAssertEqual(status, .loggedOut)
+    }
+
+    func testCLIRunnerPassesProfileToRealLoginShellWithoutInterpolation() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executable = directory.appendingPathComponent("fake-claude")
+        let fixture = """
+        #!/bin/sh
+        if [ "$CLAUDE_CONFIG_DIR" = "$EXPECTED_DIRECTORY" ] && [ "$1" = auth ] && [ "$2" = status ]; then
+          printf '%s' '{"loggedIn":true}'
+        else
+          printf '%s' '{"loggedIn":false}'
+        fi
+        """
+        try Data(fixture.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let config = URL(fileURLWithPath: "/tmp/a 'quote' $(touch ignored)")
+        let runner = ClaudeCLIRefreshRunner(run: { url, arguments, timeout, environment in
+            if arguments == ["-lc", "command -v claude"] {
+                return (0, Data((executable.path + "\n").utf8))
+            }
+            var environment = environment ?? [:]
+            environment["ZDOTDIR"] = directory.path
+            environment["EXPECTED_DIRECTORY"] = config.path
+            return ProviderKeychainReader.runSecurity(url, arguments, timeout: timeout, environment: environment)
+        })
+        let status = await runner.refresh(configDirectory: config)
+        XCTAssertEqual(status, .loggedIn)
+    }
+}
+
+@MainActor
+private final class RecordingClaudeLoginOpener: ClaudeLoginOpening {
+    var directories: [URL] = []
+    func openLogin(configDirectory: URL) throws { directories.append(configDirectory) }
+}
+
+@MainActor
+final class ClaudeAutoLoginTests: XCTestCase {
+    func testTransitionOpensOncePerHourAndPollsUntilRecovery() async throws {
+        let suite = "UsageDockTests.AutoLogin.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var date = Date(timeIntervalSince1970: 1_000_000)
+        var shouldFail = true
+        var fetches = 0
+        let opener = RecordingClaudeLoginOpener()
+        let store = UsageStore(defaults: defaults, claudeLoginOpener: opener, now: { date }, usageFetcher: { account in
+            fetches += 1
+            if shouldFail { throw UsageAdapterError.authenticationExpired("fixture") }
+            return account
+        })
+        let account = UsageAccount(provider: .claude, name: "Profile", source: .profile,
+                                   credentialPath: "/tmp/profile/.credentials.json", buckets: [
+                                    UsageBucket(quotaID: "weekly", label: "1w", kind: .weekly, percentUsed: 1)
+                                   ])
+        store.accounts = [account]
+        let target = RailDisplayTarget.account(id: account.id, provider: .claude)
+        XCTAssertTrue(store.autoOpenClaudeLogin)
+        await store.refreshProvider(.claude)
+        XCTAssertEqual(opener.directories.map(\.path), ["/tmp/profile"])
+        XCTAssertNil(store.railDisplayPercent(for: target, source: .automatic, now: date))
+        date += 29
+        await store.refreshProvider(.claude)
+        XCTAssertEqual(fetches, 1)
+        date += 1
+        await store.refreshProvider(.claude)
+        XCTAssertEqual(fetches, 2)
+        XCTAssertEqual(opener.directories.count, 1)
+        shouldFail = false
+        date += 30
+        await store.refreshProvider(.claude)
+        XCTAssertEqual(store.railDisplayPercent(for: target, source: .automatic, now: date), 1)
+        shouldFail = true
+        date += 300
+        await store.refreshProvider(.claude)
+        XCTAssertEqual(opener.directories.count, 1)
+        shouldFail = false
+        date += 30
+        await store.refreshProvider(.claude)
+        shouldFail = true
+        date += 3_210
+        await store.refreshProvider(.claude)
+        XCTAssertEqual(opener.directories.count, 2)
+    }
+
+    func testToggleOffPersistsAndFailureNeverOpensTerminal() async {
+        let suite = "UsageDockTests.AutoLoginDisabled.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let opener = RecordingClaudeLoginOpener()
+        let store = UsageStore(defaults: defaults, claudeLoginOpener: opener, usageFetcher: { _ in
+            throw UsageAdapterError.credentialsUnavailable("fixture")
+        })
+        XCTAssertTrue(store.autoOpenClaudeLogin)
+        store.autoOpenClaudeLogin = false
+        store.accounts = [UsageAccount(provider: .claude, name: "Default", source: .currentSession, buckets: [])]
+        await store.refreshProvider(.claude)
+        XCTAssertTrue(opener.directories.isEmpty)
+        XCTAssertTrue(store.accountRefreshState(for: store.accounts[0].id).requiresSignIn)
+        XCTAssertFalse(UsageStore(defaults: defaults, claudeLoginOpener: opener).autoOpenClaudeLogin)
+    }
+
+    func testPromptThrottlePersistsAcrossStoreRestart() async {
+        let suite = "UsageDockTests.AutoLoginRestart.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var date = Date(timeIntervalSince1970: 1_000_000)
+        let opener = RecordingClaudeLoginOpener()
+        let failing: (UsageAccount) async throws -> UsageAccount = { _ in throw UsageAdapterError.authenticationExpired("fixture") }
+        let first = UsageStore(defaults: defaults, claudeLoginOpener: opener, now: { date }, usageFetcher: failing)
+        first.accounts = [UsageAccount(provider: .claude, name: "Default", source: .currentSession, buckets: [])]
+        await first.refreshProvider(.claude)
+        date += 1_800
+        let restarted = UsageStore(defaults: defaults, claudeLoginOpener: opener, now: { date }, usageFetcher: failing)
+        await restarted.refreshProvider(.claude)
+        XCTAssertEqual(opener.directories.count, 1)
+    }
+
+    func testProfileWithoutDirectoryFailsBeforeUsingDefaultCredentials() async {
+        let suite = "UsageDockTests.MissingProfileDirectory.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let opener = RecordingClaudeLoginOpener()
+        let store = UsageStore(defaults: defaults, claudeLoginOpener: opener)
+        store.autoOpenClaudeLogin = false
+        let account = UsageAccount(provider: .claude, name: "Profile", source: .profile, buckets: [])
+        store.accounts = [account]
+        await store.refreshProvider(.claude)
+        XCTAssertTrue(store.accountRefreshState(for: account.id).requiresSignIn)
+        XCTAssertTrue(opener.directories.isEmpty)
     }
 }
 
@@ -1362,7 +1399,7 @@ final class UsageStoreRefreshDisplayTests: XCTestCase {
         XCTAssertTrue(store.accountRefreshState(for: account.id).isStale)
     }
 
-    func testFailedActiveAccountKeepsRailVisibleAndExpiredSourcesReset() throws {
+    func testFailedActiveAccountKeepsRailVisibleButHidesUsage() throws {
         let suiteName = "UsageDockTests.RefreshFailureRail.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -1405,22 +1442,22 @@ final class UsageStoreRefreshDisplayTests: XCTestCase {
 
         XCTAssertEqual(store.railTargets(), [target])
         for source in sources {
-            XCTAssertEqual(store.railDisplayPercent(for: target, source: source, now: now) ?? -1, 0, accuracy: 0.0001)
+            XCTAssertNil(store.railDisplayPercent(for: target, source: source, now: now))
             XCTAssertNil(store.railResetDate(for: target, source: source, now: now))
             if source != .automatic {
                 let aggregate = try XCTUnwrap(store.railAggregate(for: target, source: source, now: now))
-                XCTAssertEqual(aggregate.percentUsed ?? -1, 0, accuracy: 0.0001)
+                XCTAssertNil(aggregate.percentUsed)
                 XCTAssertNil(aggregate.resetsAt)
             }
         }
 
         store.presentationMode = .remaining
         for source in sources {
-            XCTAssertEqual(store.railDisplayPercent(for: target, source: source, now: now) ?? -1, 1, accuracy: 0.0001)
+            XCTAssertNil(store.railDisplayPercent(for: target, source: source, now: now))
         }
     }
 
-    func testFailedMenuBarAccountKeepsItsPercentageAndIsMarkedStale() throws {
+    func testFailedMenuBarAccountHidesItsPercentageAndIsMarkedStale() throws {
         let suiteName = "UsageDockTests.RefreshFailureMenuBar.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -1448,7 +1485,7 @@ final class UsageStoreRefreshDisplayTests: XCTestCase {
 
         let item = try XCTUnwrap(store.menuBarUsageItems(now: now).first)
         XCTAssertEqual(item.id, account.id)
-        XCTAssertEqual(item.percent ?? -1, 0.44, accuracy: 0.0001)
+        XCTAssertNil(item.percent)
         XCTAssertTrue(item.isStale)
         XCTAssertEqual(item.failureLabel, "Refresh failed – sign in again")
         XCTAssertEqual(item.authenticationState, .required)

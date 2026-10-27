@@ -30,14 +30,51 @@ enum ProviderOpenStatus {
     case appUnavailable
     case appLaunchFailed
     case linkOpenFailed
+    case loginLaunchFailed
+    case profileDirectoryMissing
 
     var message: String {
         switch self {
         case .appUnavailable: "App not found. Clicks open the link. Choose another app or use the default."
         case .appLaunchFailed: "App could not open. Using the link. Choose another app or try again."
         case .linkOpenFailed: "Link could not open. Check the URL and your default browser."
+        case .loginLaunchFailed: "Terminal login could not be opened. Check Automation permissions."
+        case .profileDirectoryMissing: "Claude profile directory is unavailable. Reconnect this profile."
         }
     }
+}
+
+@MainActor
+protocol ClaudeLoginOpening {
+    func openLogin(configDirectory: URL) throws
+}
+
+@MainActor
+struct TerminalClaudeLoginOpener: ClaudeLoginOpening {
+    static func command(configDirectory: URL) -> String {
+        if ClaudeConfiguration.isDefault(configDirectory) { return "claude auth login" }
+        let quoted = "'" + configDirectory.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        return "CLAUDE_CONFIG_DIR=\(quoted) claude auth login"
+    }
+
+    static func appleScript(command: String) -> String {
+        let escaped = command.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\r", with: "\" & return & \"")
+            .replacingOccurrences(of: "\n", with: "\" & linefeed & \"")
+        return "tell application \"Terminal\"\nactivate\ndo script \"\(escaped)\"\nend tell"
+    }
+
+    func openLogin(configDirectory: URL) throws {
+        guard let script = NSAppleScript(source: Self.appleScript(command: Self.command(configDirectory: configDirectory))) else {
+            throw LoginError.unavailable
+        }
+        var error: NSDictionary?
+        script.executeAndReturnError(&error)
+        if error != nil { throw LoginError.unavailable }
+    }
+
+    private enum LoginError: Error { case unavailable }
 }
 
 extension ProviderID {

@@ -75,10 +75,11 @@ enum ProviderPlanMultiplierDetector {
     }
 
     private static func credentialData(for account: UsageAccount) -> Data? {
+        if account.provider == .claude, account.source == .profile {
+            guard let path = ClaudeConfiguration.credentialPath(for: account) else { return nil }
+            return ClaudeCredentialStore.credentialData(credentialPath: path)
+        }
         if account.source == .profile, let path = account.credentialPath {
-            if account.provider == .claude {
-                return ClaudeCredentialStore.credentialData(credentialPath: path)
-            }
             return try? Data(contentsOf: URL(fileURLWithPath: path))
         }
         switch account.provider {

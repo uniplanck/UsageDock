@@ -20,6 +20,8 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: UsageDock
         INFOPLIST_KEY_LSUIElement: YES
+        INFOPLIST_KEY_NSAppleEventsUsageDescription: "UsageDock opens Terminal so you can sign in to Claude Code."
+        CODE_SIGN_ENTITLEMENTS: UsageDock/UsageDock.entitlements
         CODE_SIGN_STYLE: Automatic
         ENABLE_HARDENED_RUNTIME: YES
     scheme:
