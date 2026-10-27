@@ -349,6 +349,9 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 18) {
             displayAccountSelectionSection
 
+            Toggle("Automatically open Terminal login when authentication expires", isOn: $usageStore.autoOpenClaudeLogin)
+                .toggleStyle(.switch)
+
             ForEach(usageStore.providerOrder) { provider in
                 ProviderSettingsSection(provider: provider, usageStore: usageStore)
             }
@@ -1374,7 +1377,8 @@ private struct ProviderSettingsSection: View {
                             onCopyGrokDiagnostics: account.provider == .grok ? {
                                 _ = GrokWebDiagnostics.copyToPasteboard()
                             } : nil,
-                            isStale: usageStore.accountRefreshState(for: account.id).isStale
+                            isStale: usageStore.accountRefreshState(for: account.id).isStale,
+                            hideUsage: usageStore.isClaudeAuthenticationFailed(account)
                         )
                     }
                 }
@@ -1610,6 +1614,7 @@ struct AccountEditor: View {
     var onGrokWebLogin: (() -> Void)? = nil
     var onCopyGrokDiagnostics: (() -> Void)? = nil
     var isStale: Bool = false
+    var hideUsage: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1729,7 +1734,7 @@ struct AccountEditor: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
 
                             TimelineView(.periodic(from: .now, by: 30)) { context in
-                                Text(percentText(displayPercent(bucket.forDisplay(at: context.date).resolvedPercentUsed)))
+                                Text(percentText(hideUsage ? nil : displayPercent(bucket.forDisplay(at: context.date).resolvedPercentUsed)))
                                     .font(.caption.monospacedDigit())
                                     .frame(width: 44, alignment: .trailing)
                                     .opacity(isStale ? 0.55 : 1)

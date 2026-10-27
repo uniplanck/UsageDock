@@ -7,33 +7,42 @@ import Security
 struct ClaudeUsageAdapter: UsageProviderAdapter {
     let provider: ProviderID = .claude
     let credentialPath: String?
+    private let resolver: ClaudeCredentialResolver
+    private let requestUsage: (String) async throws -> (Data, URLResponse)
 
-    init(credentialPath: String? = nil) {
+    init(
+        credentialPath: String? = nil,
+        resolver: ClaudeCredentialResolver = .shared,
+        requestUsage: @escaping (String) async throws -> (Data, URLResponse) = ClaudeUsageAdapter.requestUsage
+    ) {
         self.credentialPath = credentialPath
+        self.resolver = resolver
+        self.requestUsage = requestUsage
+    }
+
+    private static func requestUsage(_ accessToken: String) async throws -> (Data, URLResponse) {
+        var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        return try await URLSession.shared.data(for: request)
     }
 
     func fetchAccounts() async throws -> [UsageAccount] {
-        let resolver = ClaudeCredentialResolver.shared
-
-        func requestUsage(accessToken: String) async throws -> (Data, URLResponse) {
-            var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
-            request.httpMethod = "GET"
-            request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-            request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-            request.setValue("application/json", forHTTPHeaderField: "Accept")
-            return try await URLSession.shared.data(for: request)
-        }
-
         var token = try await resolver.accessToken(credentialPath: credentialPath)
-        var (data, response) = try await requestUsage(accessToken: token)
+        var (data, response) = try await requestUsage(token)
 
-        if let http = response as? HTTPURLResponse, http.statusCode == 401 {
+        // A source re-read can reveal another already-rejected token. Allow one
+        // more recovery so Claude Code gets a chance to refresh that token too.
+        for _ in 0..<2 {
+            guard let http = response as? HTTPURLResponse, http.statusCode == 401 else { break }
             token = try await resolver.accessToken(
                 credentialPath: credentialPath,
                 forceRefresh: true,
                 rejectedAccessToken: token
             )
-            (data, response) = try await requestUsage(accessToken: token)
+            (data, response) = try await requestUsage(token)
         }
 
         try HTTPUsageResponseValidator.validate(response: response, data: data, provider: .claude)
@@ -1335,7 +1344,8 @@ enum ProviderKeychainReader {
     static func runSecurity(
         _ executable: URL,
         _ arguments: [String],
-        timeout: TimeInterval = 10
+        timeout: TimeInterval = 10,
+        environment: [String: String]? = nil
     ) -> (status: Int32, data: Data)? {
         // Even an accidental UI caller must never launch a Keychain prompt or wait.
         guard !Thread.isMainThread else { return nil }
@@ -1345,6 +1355,7 @@ enum ProviderKeychainReader {
         process.terminationHandler = { _ in terminated.signal() }
         process.executableURL = executable
         process.arguments = arguments
+        if let environment { process.environment = environment }
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = stdout
         process.standardError = FileHandle.nullDevice
@@ -1409,8 +1420,8 @@ enum ProviderKeychainReader {
     }
 }
 
-/// Only this namespace may be modified by UsageDock. Never accept a provider service
-/// name as a write target, even when credentials originated in a provider file.
+/// Legacy UsageDock cache entries are read only and accepted only when they
+/// exactly match their fingerprinted provider source.
 enum UsageDockClaudeKeychain {
     static let service = "com.uniplanck.UsageDock.ClaudeCredentials"
 
@@ -1433,21 +1444,6 @@ enum UsageDockClaudeKeychain {
         return result as? Data
     }
 
-    static func write(_ data: Data, account: String) throws {
-        let query = query(account: account)
-        let attributes: [CFString: Any] = [kSecValueData: data]
-        var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if status == errSecItemNotFound {
-            var item = query
-            item[kSecValueData] = data
-            status = SecItemAdd(item as CFDictionary, nil)
-        }
-        guard status == errSecSuccess else {
-            throw UsageAdapterError.invalidResponse(
-                "UsageDock could not save its Claude token cache. Unlock the login keychain and try again."
-            )
-        }
-    }
 }
 
 // Cache state is locked. Injected I/O callbacks must support concurrent sources.
@@ -1461,7 +1457,6 @@ final class ClaudeCredentialCache: @unchecked Sendable {
         let loadedAt: Date
         var record: ClaudeCredentialStore.CredentialRecord?
         let sourceReadFailed: Bool
-        var generation = UUID()
     }
 
     private final class PendingRead {
@@ -1476,16 +1471,13 @@ final class ClaudeCredentialCache: @unchecked Sendable {
     private var pending: [String: PendingRead] = [:]
     private let now: () -> Date
     private let readOwned: (String) -> Data?
-    private let writeOwned: (Data, String) throws -> Void
 
     init(
         now: @escaping () -> Date = Date.init,
-        readOwned: @escaping (String) -> Data? = UsageDockClaudeKeychain.read,
-        writeOwned: @escaping (Data, String) throws -> Void = UsageDockClaudeKeychain.write
+        readOwned: @escaping (String) -> Data? = UsageDockClaudeKeychain.read
     ) {
         self.now = now
         self.readOwned = readOwned
-        self.writeOwned = writeOwned
     }
 
     func record(
@@ -1495,14 +1487,14 @@ final class ClaudeCredentialCache: @unchecked Sendable {
     ) -> ClaudeCredentialStore.CredentialRecord? {
         let date = now()
         lock.lock()
-        if let entry = entries[sourceID] {
+        if let entry = entries[sourceID], !reload {
             let interval: TimeInterval
             if sourceID.hasPrefix("keychain:") {
-                // A failed/denied/timed-out read must not reopen a password dialog,
-                // even on repeated 401s. Only successful reads allow a 30s reload.
-                interval = entry.sourceReadFailed ? 600 : (reload ? 30 : 1_800)
+                // Ordinary reads are throttled. Explicit recovery bypasses this
+                // cache so it can observe a logout or a newly completed login.
+                interval = entry.sourceReadFailed || entry.record == nil ? 30 : 1_800
             } else {
-                interval = reload || entry.record == nil ? 30 : 300
+                interval = entry.record == nil ? 30 : 300
             }
             if date.timeIntervalSince(entry.loadedAt) < interval {
                 lock.unlock()
@@ -1528,20 +1520,11 @@ final class ClaudeCredentialCache: @unchecked Sendable {
         }
         let loadedAt = now()
         lock.lock()
-        // A concurrent token refresh may have replaced the data while we read.
-        let current = entries[sourceID]
-        let result: ClaudeCredentialStore.CredentialRecord?
-        if let refreshed = current?.record,
-           refreshed.target == record?.target || (record == nil && current?.generation != previous?.generation) {
-            result = refreshed
-        } else {
-            result = record
-        }
-        entries[sourceID] = Entry(loadedAt: loadedAt, record: result, sourceReadFailed: record == nil)
+        entries[sourceID] = Entry(loadedAt: loadedAt, record: record, sourceReadFailed: record == nil)
         pending[sourceID] = nil
         lock.unlock()
         flight.finished.leave()
-        return result
+        return record
     }
 
     func cachedRecord(sourceID: String) -> ClaudeCredentialStore.CredentialRecord? {
@@ -1564,7 +1547,8 @@ final class ClaudeCredentialCache: @unchecked Sendable {
             data = previous.data
         } else if let saved = readOwned(sourceID),
                   let envelope = try? JSONDecoder().decode(Envelope.self, from: saved),
-                  envelope.sourceFingerprint == target.sourceFingerprint {
+                  envelope.sourceFingerprint == target.sourceFingerprint,
+                  envelope.data == sourceData {
             data = envelope.data
         } else {
             // A Claude Code token rotation / re-login takes precedence over our cache.
@@ -1573,18 +1557,6 @@ final class ClaudeCredentialCache: @unchecked Sendable {
         return ClaudeCredentialStore.CredentialRecord(data: data, target: target)
     }
 
-    func persist(_ data: Data, to target: ClaudeCredentialStore.PersistenceTarget) throws {
-        lock.lock()
-        // A rotation has already consumed the old refresh token. Keep the new bytes
-        // usable in this process even if the keychain becomes locked after preflight.
-        if entries[target.account]?.record?.target == target {
-            entries[target.account]?.record = ClaudeCredentialStore.CredentialRecord(data: data, target: target)
-            entries[target.account]?.generation = UUID()
-        }
-        lock.unlock()
-        let envelope = Envelope(sourceFingerprint: target.sourceFingerprint, data: data)
-        try writeOwned(JSONEncoder().encode(envelope), target.account)
-    }
 }
 
 enum ClaudeCredentialStore {
@@ -1622,8 +1594,7 @@ enum ClaudeCredentialStore {
         // Do not eagerly evaluate a Keychain fallback when a credentials file exists.
         if let file = cache.record(sourceID: fileID, reload: reload, readSource: { try? Data(contentsOf: fileURL) }),
            let object = try? JSONSerialization.jsonObject(with: file.data) as? [String: Any],
-           let oauth = object["claudeAiOauth"] as? [String: Any],
-           let token = oauth["accessToken"] as? String, !token.isEmpty {
+           object["claudeAiOauth"] is [String: Any] {
             return [file]
         }
         return [cache.record(sourceID: keychainID, reload: reload) { readKeychain(service) }].compactMap { $0 }
@@ -1641,14 +1612,13 @@ enum ClaudeCredentialStore {
     }
 
     private static func sourceLocation(credentialPath: String?) -> (fileURL: URL, service: String) {
-        if let credentialPath {
-            let fileURL = URL(fileURLWithPath: credentialPath)
-            return (fileURL, keychainServiceName(configDirectory: fileURL.deletingLastPathComponent().path))
-        }
-        return (
-            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/.credentials.json"),
-            "Claude Code-credentials"
-        )
+        let directory = ClaudeConfiguration.directory(credentialPath: credentialPath)
+        let fileURL = credentialPath.flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
+            ?? directory.appendingPathComponent(".credentials.json")
+        let service = ClaudeConfiguration.isDefault(directory)
+            ? "Claude Code-credentials"
+            : keychainServiceName(configDirectory: directory.path)
+        return (fileURL, service)
     }
 
     static func credentialCandidates(credentialPath: String? = nil) -> [Data] {
@@ -1666,79 +1636,124 @@ enum ClaudeCredentialStore {
         return "Claude Code-credentials-\(suffix)"
     }
 
-    static func persist(_ data: Data, to target: PersistenceTarget) throws {
-        try cache.persist(data, to: target)
+}
+
+enum ClaudeConfiguration {
+    static var defaultDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude", isDirectory: true).standardizedFileURL
     }
 
-    static func mergedCredentialData(
-        originalData: Data,
-        refreshData: Data,
-        now: Date = Date()
-    ) throws -> (data: Data, accessToken: String) {
-        guard
-            var object = try JSONSerialization.jsonObject(with: originalData) as? [String: Any],
-            var oauth = object["claudeAiOauth"] as? [String: Any],
-            let refreshed = try JSONSerialization.jsonObject(with: refreshData) as? [String: Any],
-            let accessToken = refreshed["access_token"] as? String,
-            !accessToken.isEmpty
-        else {
-            throw UsageAdapterError.invalidResponse("Claude token refresh returned malformed credentials.")
+    static func directory(credentialPath: String?) -> URL {
+        if let credentialPath, !credentialPath.isEmpty {
+            return URL(fileURLWithPath: credentialPath).deletingLastPathComponent().standardizedFileURL
         }
-
-        oauth["accessToken"] = accessToken
-
-        if let refreshToken = refreshed["refresh_token"] as? String, !refreshToken.isEmpty {
-            oauth["refreshToken"] = refreshToken
+        if let path = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"], !path.isEmpty {
+            return URL(fileURLWithPath: path).standardizedFileURL
         }
-
-        if let expiresIn = numeric(refreshed["expires_in"]), expiresIn > 0 {
-            oauth["expiresAt"] = Int((now.timeIntervalSince1970 + expiresIn) * 1000)
-        }
-
-        if let refreshTokenExpiresIn = numeric(refreshed["refresh_token_expires_in"]), refreshTokenExpiresIn > 0 {
-            oauth["refreshTokenExpiresAt"] = Int((now.timeIntervalSince1970 + refreshTokenExpiresIn) * 1000)
-        }
-
-        if let scope = refreshed["scope"] as? String {
-            oauth["scopes"] = scope.split(whereSeparator: \.isWhitespace).map(String.init)
-        }
-
-        object["claudeAiOauth"] = oauth
-        let encoded = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
-        return (encoded, accessToken)
+        return defaultDirectory
     }
 
-    private static func numeric(_ value: Any?) -> Double? {
-        switch value {
-        case let number as NSNumber: return number.doubleValue
-        case let string as String: return Double(string)
-        default: return nil
+    static func credentialPath(for account: UsageAccount) -> String? {
+        guard account.source == .profile else { return nil }
+        if let path = account.credentialPath, !path.isEmpty { return path }
+        guard let home = account.profileHomePath, !home.isEmpty else { return nil }
+        return URL(fileURLWithPath: home).appendingPathComponent(".claude/.credentials.json").path
+    }
+
+    static func directory(for account: UsageAccount) -> URL? {
+        if account.source == .currentSession { return directory(credentialPath: nil) }
+        guard let path = credentialPath(for: account) else { return nil }
+        return directory(credentialPath: path)
+    }
+
+    static func isDefault(_ directory: URL) -> Bool {
+        directory.standardizedFileURL.path == defaultDirectory.path
+    }
+}
+
+enum ClaudeCLIStatus: Equatable {
+    case loggedIn, loggedOut, unavailable
+}
+
+/// Runs Claude Code itself, never its OAuth endpoint. Child output is parsed in
+/// memory and discarded; credentials and CLI output are never logged.
+struct ClaudeCLIRefreshRunner {
+    var run: (URL, [String], TimeInterval, [String: String]?) -> (status: Int32, data: Data)? = {
+        ProviderKeychainReader.runSecurity($0, $1, timeout: $2, environment: $3)
+    }
+
+    func refresh(configDirectory: URL) async -> ClaudeCLIStatus {
+        await Task.detached(priority: .utility) {
+            let started = Date()
+            guard let lookup = run(
+                URL(fileURLWithPath: "/bin/zsh"), ["-lc", "command -v claude"], 20, nil
+            ), lookup.status == 0,
+                  let output = String(data: lookup.data, encoding: .utf8),
+                  let lastLine = output.split(whereSeparator: \.isNewline).last else { return .unavailable }
+            let path = lastLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard path.hasPrefix("/") else { return .unavailable }
+            let remaining = 20 - Date().timeIntervalSince(started)
+            guard remaining > 0 else { return .unavailable }
+            var environment = ProcessInfo.processInfo.environment
+            environment.removeValue(forKey: "CLAUDE_CONFIG_DIR")
+            environment.removeValue(forKey: "CLAUDE_SECURESTORAGE_CONFIG_DIR")
+            if !ClaudeConfiguration.isDefault(configDirectory) {
+                environment["CLAUDE_CONFIG_DIR"] = configDirectory.path
+                environment["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = configDirectory.path
+            }
+            // Keep the login-shell PATH for nvm-installed Node. Pass both the
+            // executable and config path as positional arguments, never shell code.
+            let script = "if [ -n \"$2\" ]; then export CLAUDE_CONFIG_DIR=\"$2\" CLAUDE_SECURESTORAGE_CONFIG_DIR=\"$2\"; else unset CLAUDE_CONFIG_DIR CLAUDE_SECURESTORAGE_CONFIG_DIR; fi; exec \"$1\" auth status"
+            let configArgument = ClaudeConfiguration.isDefault(configDirectory) ? "" : configDirectory.path
+            guard let result = run(
+                URL(fileURLWithPath: "/bin/zsh"), ["-lc", script, "UsageDock", path, configArgument], remaining, environment
+            ) else { return .unavailable }
+            return Self.status(from: result.data)
+        }.value
+    }
+
+    private static func status(from data: Data) -> ClaudeCLIStatus {
+        guard let output = String(data: data, encoding: .utf8), let end = output.lastIndex(of: "}") else { return .unavailable }
+        for start in output.indices where start <= end && output[start] == "{" {
+            let json = Data(output[start...end].utf8)
+            if let object = try? JSONSerialization.jsonObject(with: json) as? [String: Any],
+               let loggedIn = object["loggedIn"] as? Bool {
+                return loggedIn ? .loggedIn : .loggedOut
+            }
         }
+        return .unavailable
     }
 }
 
 actor ClaudeCredentialResolver {
-    static let shared = ClaudeCredentialResolver()
-    private let tokenURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
-    private let clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+    static let shared = ClaudeCredentialResolver(attemptDefaults: .standard)
+    private static let cliAttemptTimesKey = "UsageDock.claudeCLIRefreshTimes.v1"
     private struct Pending {
         let id: UUID
         let forceRefresh: Bool
         let task: Task<String, Error>
     }
     private var pending: [String: Pending] = [:]
+    private var lastCLIAttempt: [String: Date] = [:]
+    private var lastRecoveryProbe: [String: Date] = [:]
+    private var needsRecovery: Set<String> = []
+    private var rejectedTokens: [String: String] = [:]
+    private var loggedOutFingerprints: [String: Set<String>] = [:]
     private let records: (String?, Bool) -> [ClaudeCredentialStore.CredentialRecord]
-    private let persist: (Data, ClaudeCredentialStore.PersistenceTarget) throws -> Void
-    private let send: (URLRequest) async throws -> (Data, URLResponse)
+    private let runCLI: (URL) async -> ClaudeCLIStatus
+    private let now: () -> Date
+    private let attemptDefaults: UserDefaults?
 
     init(
         records: @escaping (String?, Bool) -> [ClaudeCredentialStore.CredentialRecord] = ClaudeCredentialStore.credentialRecords,
-        persist: @escaping (Data, ClaudeCredentialStore.PersistenceTarget) throws -> Void = ClaudeCredentialStore.persist,
-        send: @escaping (URLRequest) async throws -> (Data, URLResponse) = { try await URLSession.shared.data(for: $0) }
+        runCLI: @escaping (URL) async -> ClaudeCLIStatus = { await ClaudeCLIRefreshRunner().refresh(configDirectory: $0) },
+        now: @escaping () -> Date = Date.init,
+        attemptDefaults: UserDefaults? = nil
     ) {
         self.records = records
-        self.persist = persist
-        self.send = send
+        self.runCLI = runCLI
+        self.now = now
+        self.attemptDefaults = attemptDefaults
     }
 
     func accessToken(
@@ -1746,150 +1761,138 @@ actor ClaudeCredentialResolver {
         forceRefresh: Bool = false,
         rejectedAccessToken: String? = nil
     ) async throws -> String {
-        let key = credentialPath.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? "current-session"
-        // Plan checks and overlapping usage requests share cache reads. Token refreshes
-        // for one profile must also share a single rotation / persistence operation.
+        let key = ClaudeConfiguration.directory(credentialPath: credentialPath).path
         if let current = pending[key] {
             let token = try await current.task.value
-            if current.forceRefresh || !forceRefresh || (rejectedAccessToken != nil && token != rejectedAccessToken) {
+            if !forceRefresh || (rejectedAccessToken != nil && token != rejectedAccessToken)
+                || (rejectedAccessToken == nil && current.forceRefresh) {
                 return token
             }
-            // A normal lookup may have just returned the same token rejected by HTTP
-            // 401. Join only a useful result; otherwise start the required refresh.
             if pending[key]?.id == current.id { pending[key] = nil }
-            return try await accessToken(
-                credentialPath: credentialPath,
-                forceRefresh: forceRefresh,
-                rejectedAccessToken: rejectedAccessToken
-            )
+            return try await accessToken(credentialPath: credentialPath, forceRefresh: forceRefresh, rejectedAccessToken: rejectedAccessToken)
         }
         let id = UUID()
         let task = Task {
-            try await resolve(
-                credentialPath: credentialPath,
-                forceRefresh: forceRefresh,
-                rejectedAccessToken: rejectedAccessToken
-            )
+            try await resolve(key: key, credentialPath: credentialPath, forceRefresh: forceRefresh, rejectedAccessToken: rejectedAccessToken)
         }
         pending[key] = Pending(id: id, forceRefresh: forceRefresh, task: task)
         defer { if pending[key]?.id == id { pending[key] = nil } }
         return try await task.value
     }
 
-    private func resolve(
-        credentialPath: String?,
-        forceRefresh: Bool,
-        rejectedAccessToken: String?
-    ) async throws -> String {
-        let records = records(credentialPath, forceRefresh)
-        if credentialPath != nil, records.isEmpty {
-            throw UsageAdapterError.credentialsUnavailable(
-                "Claude profile credentials could not be read. Re-authenticate this UsageDock profile."
-            )
+    private func resolve(key: String, credentialPath: String?, forceRefresh: Bool, rejectedAccessToken: String?) async throws -> String {
+        if let rejectedAccessToken { rejectedTokens[key] = rejectedAccessToken }
+        var rejected = rejectedTokens[key]
+        if !forceRefresh, needsRecovery.contains(key),
+           let last = lastRecoveryProbe[key], now().timeIntervalSince(last) < 30 {
+            throw expiredError()
         }
 
-        var sawExpired = false
-        var lastRefreshError: Error?
+        let recovering = needsRecovery.contains(key)
+        let first = records(credentialPath, forceRefresh || recovering)
+        if forceRefresh || recovering { lastRecoveryProbe[key] = now() }
+        if let token = usableToken(first, key: key, rejecting: rejected),
+           !forceRefresh || rejectedAccessToken.map({ token != $0 }) == true {
+            needsRecovery.remove(key)
+            rejectedTokens[key] = nil
+            loggedOutFingerprints[key] = nil
+            return token
+        }
 
-        for record in records {
-            guard
-                let object = try? JSONSerialization.jsonObject(with: record.data) as? [String: Any],
-                let oauth = object["claudeAiOauth"] as? [String: Any],
-                let token = oauth["accessToken"] as? String,
-                !token.isEmpty
-            else { continue }
+        // An expired token is no safer merely because its expiry metadata was
+        // rewritten. Recovery must observe a different access token.
+        if rejected == nil, let expired = expiredToken(first) {
+            rejected = expired
+            rejectedTokens[key] = expired
+        }
 
-            let expired = Self.isExpired(oauth["expiresAt"])
-            if !expired && (!forceRefresh || (rejectedAccessToken != nil && token != rejectedAccessToken)) {
+        // A rejected or expired cached token is never used as evidence of login.
+        // Re-read the actual file/Keychain before asking Claude Code to refresh.
+        let fresh = (forceRefresh || recovering) ? first : records(credentialPath, true)
+        lastRecoveryProbe[key] = now()
+        if let token = usableToken(fresh, key: key, rejecting: rejected),
+           !forceRefresh || (rejectedAccessToken != nil && token != rejectedAccessToken) {
+            needsRecovery.remove(key)
+            rejectedTokens[key] = nil
+            loggedOutFingerprints[key] = nil
+            return token
+        }
+
+        if lastAttempt(for: key).map({ now().timeIntervalSince($0) >= 300 }) ?? true {
+            saveAttempt(now(), for: key)
+            let status = await runCLI(ClaudeConfiguration.directory(credentialPath: credentialPath))
+            let after = records(credentialPath, true)
+            lastRecoveryProbe[key] = now()
+            if status == .loggedOut {
+                loggedOutFingerprints[key] = Set(after.map { $0.target.sourceFingerprint })
+            }
+            if status != .loggedOut, let token = usableToken(after, key: key, rejecting: rejected) {
+                needsRecovery.remove(key)
+                rejectedTokens[key] = nil
+                loggedOutFingerprints[key] = nil
                 return token
             }
-            sawExpired = sawExpired || expired
-
-            guard let refreshToken = oauth["refreshToken"] as? String, !refreshToken.isEmpty else {
-                continue
-            }
-
-            do {
-                // Refresh tokens may rotate. Prove we can persist before consuming one.
-                try persist(record.data, record.target)
-                return try await refresh(
-                    record: record,
-                    oauth: oauth,
-                    refreshToken: refreshToken
-                )
-            } catch {
-                lastRefreshError = error
-            }
         }
-
-        if let lastRefreshError {
-            throw lastRefreshError
-        }
-        if sawExpired || forceRefresh {
-            throw UsageAdapterError.authenticationExpired(
-                "Claude login has expired and could not be refreshed automatically. Re-authenticate in Claude Code, then refresh UsageDock."
-            )
-        }
-        throw UsageAdapterError.credentialsUnavailable("Claude OAuth credentials were not found. Sign in to Claude Code first.")
+        needsRecovery.insert(key)
+        throw expiredError()
     }
 
-    private func refresh(
-        record: ClaudeCredentialStore.CredentialRecord,
-        oauth: [String: Any],
-        refreshToken: String
-    ) async throws -> String {
-        var payload: [String: Any] = [
-            "grant_type": "refresh_token",
-            "refresh_token": refreshToken,
-            "client_id": clientID
-        ]
-
-        if let scopes = oauth["scopes"] as? [String], !scopes.isEmpty {
-            payload["scope"] = scopes.joined(separator: " ")
+    private func usableToken(_ records: [ClaudeCredentialStore.CredentialRecord], key: String, rejecting rejected: String?) -> String? {
+        for record in records {
+            if loggedOutFingerprints[key]?.contains(record.target.sourceFingerprint) == true { continue }
+            guard let object = try? JSONSerialization.jsonObject(with: record.data) as? [String: Any],
+                  let oauth = object["claudeAiOauth"] as? [String: Any],
+                  let token = oauth["accessToken"] as? String, !token.isEmpty,
+                  token != rejected, !Self.isExpired(oauth["expiresAt"], now: now()) else { continue }
+            return token
         }
-
-        var request = URLRequest(url: tokenURL)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-
-        let (data, response) = try await send(request)
-        guard let http = response as? HTTPURLResponse else {
-            throw UsageAdapterError.invalidResponse("Claude token refresh returned a non-HTTP response.")
-        }
-
-        guard (200..<300).contains(http.statusCode) else {
-            if http.statusCode == 400 || http.statusCode == 401 {
-                throw UsageAdapterError.authenticationExpired(
-                    "Claude refresh token was rejected. Re-authenticate in Claude Code, then refresh UsageDock."
-                )
-            }
-            throw UsageAdapterError.httpFailure(
-                provider: .claude,
-                statusCode: http.statusCode,
-                message: "OAuth token refresh failed"
-            )
-        }
-
-        let merged = try ClaudeCredentialStore.mergedCredentialData(
-            originalData: record.data,
-            refreshData: data
-        )
-        try persist(merged.data, record.target)
-        return merged.accessToken
+        return nil
     }
 
-    private static func isExpired(_ value: Any?) -> Bool {
+    private func expiredToken(_ records: [ClaudeCredentialStore.CredentialRecord]) -> String? {
+        for record in records {
+            guard let object = try? JSONSerialization.jsonObject(with: record.data) as? [String: Any],
+                  let oauth = object["claudeAiOauth"] as? [String: Any],
+                  let token = oauth["accessToken"] as? String, !token.isEmpty,
+                  Self.isExpired(oauth["expiresAt"], now: now()) else { continue }
+            return token
+        }
+        return nil
+    }
+
+    private func expiredError() -> UsageAdapterError {
+        .authenticationExpired("Claude login has expired or credentials are unavailable. Sign in to Claude Code again.")
+    }
+
+    private func attemptKey(_ path: String) -> String {
+        SHA256.hash(data: Data(path.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func lastAttempt(for key: String) -> Date? {
+        if let date = lastCLIAttempt[key] { return date }
+        guard let times = attemptDefaults?.dictionary(forKey: Self.cliAttemptTimesKey),
+              let seconds = times[attemptKey(key)] as? Double else { return nil }
+        return Date(timeIntervalSince1970: seconds)
+    }
+
+    private func saveAttempt(_ date: Date, for key: String) {
+        lastCLIAttempt[key] = date
+        guard let attemptDefaults else { return }
+        var times = attemptDefaults.dictionary(forKey: Self.cliAttemptTimesKey) as? [String: Double] ?? [:]
+        times[attemptKey(key)] = date.timeIntervalSince1970
+        attemptDefaults.set(times, forKey: Self.cliAttemptTimesKey)
+    }
+
+    private static func isExpired(_ value: Any?, now: Date) -> Bool {
         let raw: Double?
         switch value {
         case let number as NSNumber: raw = number.doubleValue
         case let string as String: raw = Double(string)
         default: raw = nil
         }
-        guard let raw, raw > 0 else { return false }
+        guard let raw, raw.isFinite, raw > 0 else { return true }
         let seconds = raw > 100_000_000_000 ? raw / 1000 : raw
-        return Date(timeIntervalSince1970: seconds) <= Date()
+        return Date(timeIntervalSince1970: seconds) <= now
     }
 }
 

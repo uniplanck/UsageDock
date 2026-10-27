@@ -28,6 +28,8 @@ final class UsageStore: ObservableObject {
     private static let languageKey = "UsageDock.language.v1"
     private static let resetTimeModeKey = "UsageDock.resetTimeMode.v1"
     private static let hideMinutesWhenDaysKey = "UsageDock.hideMinutesWhenDays.v1"
+    private static let autoOpenClaudeLoginKey = "UsageDock.autoOpenClaudeLogin.v1"
+    private static let claudeLoginPromptTimesKey = "UsageDock.claudeLoginPromptTimes.v1"
     private static let railBackgroundOpacityKey = "UsageDock.railBackgroundOpacity.v1"
     private static let railBackplateEnabledKey = "UsageDock.railBackplateEnabled.v1"
     private static let railAutoContrastKey = "UsageDock.railAutoContrast.v1"
@@ -146,6 +148,7 @@ final class UsageStore: ObservableObject {
     @Published var appLanguage: UsageDockLanguage { didSet { defaults.set(appLanguage.rawValue, forKey: Self.languageKey) } }
     @Published var resetTimeDisplayMode: ResetTimeDisplayMode { didSet { defaults.set(resetTimeDisplayMode.rawValue, forKey: Self.resetTimeModeKey) } }
     @Published var hideMinutesWhenDays: Bool { didSet { defaults.set(hideMinutesWhenDays, forKey: Self.hideMinutesWhenDaysKey) } }
+    @Published var autoOpenClaudeLogin: Bool { didSet { defaults.set(autoOpenClaudeLogin, forKey: Self.autoOpenClaudeLoginKey) } }
     @Published var railBackgroundOpacity: Double {
         didSet {
             let clamped = min(max(railBackgroundOpacity, 0), 1)
@@ -376,6 +379,7 @@ final class UsageStore: ObservableObject {
     private let defaults: UserDefaults
     private let appLocator: any ProviderAppLocating
     private let targetOpener: any ProviderTargetOpening
+    private let claudeLoginOpener: any ClaudeLoginOpening
     private let now: () -> Date
     private let usageFetcher: ((UsageAccount) async throws -> UsageAccount)?
     private let encoder = JSONEncoder()
@@ -383,6 +387,7 @@ final class UsageStore: ObservableObject {
     private var autoRefreshTask: Task<Void, Never>?
     private var refreshHistory: [UUID: AccountRefreshHistory] = [:]
     private var refreshingProviders: Set<ProviderID> = []
+    private var claudeAuthFailures: Set<UUID> = []
 
     private struct AccountRefreshHistory {
         var firstAttemptAt: Date
@@ -398,12 +403,14 @@ final class UsageStore: ObservableObject {
         defaults: UserDefaults = .standard,
         appLocator: (any ProviderAppLocating)? = nil,
         targetOpener: (any ProviderTargetOpening)? = nil,
+        claudeLoginOpener: (any ClaudeLoginOpening)? = nil,
         now: @escaping () -> Date = Date.init,
         usageFetcher: ((UsageAccount) async throws -> UsageAccount)? = nil
     ) {
         self.defaults = defaults
         self.appLocator = appLocator ?? WorkspaceProviderAppLocator()
         self.targetOpener = targetOpener ?? WorkspaceProviderTargetOpener()
+        self.claudeLoginOpener = claudeLoginOpener ?? TerminalClaudeLoginOpener()
         self.now = now
         self.usageFetcher = usageFetcher
         let savedPreferences = defaults.data(forKey: Self.providerOpenPreferencesKey)
@@ -450,6 +457,7 @@ final class UsageStore: ObservableObject {
         appLanguage = UsageDockLanguage(rawValue: defaults.string(forKey: Self.languageKey) ?? "system") ?? .system
         resetTimeDisplayMode = ResetTimeDisplayMode(rawValue: defaults.string(forKey: Self.resetTimeModeKey) ?? "both") ?? .both
         hideMinutesWhenDays = defaults.object(forKey: Self.hideMinutesWhenDaysKey) == nil ? true : defaults.bool(forKey: Self.hideMinutesWhenDaysKey)
+        autoOpenClaudeLogin = defaults.object(forKey: Self.autoOpenClaudeLoginKey) == nil ? true : defaults.bool(forKey: Self.autoOpenClaudeLoginKey)
         railBackgroundOpacity = defaults.object(forKey: Self.railBackgroundOpacityKey) == nil ? 0.95 : min(max(defaults.double(forKey: Self.railBackgroundOpacityKey), 0), 1)
         railBackplateEnabled = defaults.object(forKey: Self.railBackplateEnabledKey) == nil ? true : defaults.bool(forKey: Self.railBackplateEnabledKey)
         railAutoContrast = defaults.object(forKey: Self.railAutoContrastKey) == nil ? true : defaults.bool(forKey: Self.railAutoContrastKey)
@@ -566,6 +574,24 @@ final class UsageStore: ObservableObject {
         accounts.filter(UsageDockDistributionPolicy.isAccountVisible)
     }
 
+    func isClaudeAuthenticationFailed(_ account: UsageAccount) -> Bool {
+        account.provider == .claude && (claudeAuthFailures.contains(account.id) || accountRefreshState(for: account.id).requiresSignIn)
+    }
+
+    private func displayAccount(_ account: UsageAccount) -> UsageAccount {
+        guard isClaudeAuthenticationFailed(account) else { return account }
+        var copy = account
+        copy.buckets = copy.buckets.map { bucket in
+            var hidden = bucket
+            hidden.used = nil
+            hidden.limit = nil
+            hidden.percentUsed = nil
+            hidden.resetsAt = nil
+            return hidden
+        }
+        return copy
+    }
+
     func visibleAccounts(for provider: ProviderID) -> [UsageAccount] {
         runtimeAccounts.filter { $0.provider == provider }
     }
@@ -612,7 +638,7 @@ final class UsageStore: ObservableObject {
         menuBarAccounts().map { account in
             let authState = displayAuthenticationState(for: account)
             let state = accountRefreshState(for: account.id)
-            let summary = UsageAggregator.summary(for: account.provider, accounts: [account], now: now)
+            let summary = UsageAggregator.summary(for: account.provider, accounts: [displayAccount(account)], now: now)
             let percent = authState == .valid || state.isStale ? displayPercent(summary.pressurePercent) : nil
             return MenuBarUsageItem(
                 id: account.id,
@@ -682,11 +708,11 @@ final class UsageStore: ObservableObject {
     }
 
     func summaries(now: Date = Date()) -> [ProviderUsageSummary] {
-        UsageAggregator.summaries(accounts: runtimeAccounts, now: now)
+        UsageAggregator.summaries(accounts: runtimeAccounts.map(displayAccount), now: now)
     }
 
     func summary(for provider: ProviderID, now: Date = Date()) -> ProviderUsageSummary {
-        UsageAggregator.summary(for: provider, accounts: runtimeAccounts, now: now)
+        UsageAggregator.summary(for: provider, accounts: runtimeAccounts.map(displayAccount), now: now)
     }
 
     func summary(for target: RailDisplayTarget, now: Date = Date()) -> ProviderUsageSummary {
@@ -694,7 +720,7 @@ final class UsageStore: ObservableObject {
         case .provider(let provider):
             return summary(for: provider, now: now)
         case .account(let id, let provider):
-            let scoped = runtimeAccounts.filter { $0.id == id && $0.isEnabled }
+            let scoped = runtimeAccounts.filter { $0.id == id && $0.isEnabled }.map(displayAccount)
             return UsageAggregator.summary(for: provider, accounts: scoped, now: now)
         }
     }
@@ -917,6 +943,11 @@ final class UsageStore: ObservableObject {
     }
 
     func openTargetHelp(for target: RailDisplayTarget) -> String {
+        if claudeLoginAccount(for: target) != nil {
+            let title = appLanguage.localized("Open Claude Code login in Terminal")
+            guard let status = providerOpenStatuses[.claude] else { return title }
+            return title + "\n" + appLanguage.localized(status.message)
+        }
         let label: String
         switch openResolution(for: target) {
         case .app(let app): label = app.name
@@ -929,6 +960,9 @@ final class UsageStore: ObservableObject {
 
     @discardableResult
     func openTarget(for target: RailDisplayTarget) async -> Bool {
+        if let account = claudeLoginAccount(for: target) {
+            return openClaudeLogin(for: account)
+        }
         let resolution = openResolution(for: target)
         providerOpenStatuses[target.provider] = nil
         switch resolution {
@@ -947,6 +981,43 @@ final class UsageStore: ObservableObject {
             return false
         }
         return true
+    }
+
+    private func claudeLoginAccount(for target: RailDisplayTarget) -> UsageAccount? {
+        guard target.provider == .claude else { return nil }
+        return runtimeAccounts.first { account in
+            guard account.isEnabled, isClaudeAuthenticationFailed(account) else { return false }
+            if case .account(let id, _) = target { return account.id == id }
+            return true
+        }
+    }
+
+    @discardableResult
+    private func openClaudeLogin(for account: UsageAccount) -> Bool {
+        do {
+            guard let directory = ClaudeConfiguration.directory(for: account) else {
+                providerOpenStatuses[.claude] = .profileDirectoryMissing
+                return false
+            }
+            try claudeLoginOpener.openLogin(configDirectory: directory)
+            providerOpenStatuses[.claude] = nil
+            return true
+        } catch {
+            providerOpenStatuses[.claude] = .loginLaunchFailed
+            return false
+        }
+    }
+
+    private func autoOpenClaudeLoginIfNeeded(for account: UsageAccount) {
+        guard autoOpenClaudeLogin else { return }
+        var times = defaults.dictionary(forKey: Self.claudeLoginPromptTimesKey) as? [String: Double] ?? [:]
+        let key = account.id.uuidString
+        let date = now().timeIntervalSince1970
+        if let last = times[key], date - last < 3_600 { return }
+        // Persist before opening to avoid a loop if Automation permission is denied.
+        times[key] = date
+        defaults.set(times, forKey: Self.claudeLoginPromptTimesKey)
+        _ = openClaudeLogin(for: account)
     }
 
     func moveProvider(_ provider: ProviderID, direction: Int) {
@@ -1067,6 +1138,7 @@ final class UsageStore: ObservableObject {
         }
         accounts.removeAll { $0.id == id }
         accountRefreshStates[id] = nil
+        claudeAuthFailures.remove(id)
         multiplierDetectionStates[id] = nil
         if displayAccountIDs.contains(id) {
             displayAccountIDs.removeAll { $0 == id }
@@ -1179,7 +1251,7 @@ final class UsageStore: ObservableObject {
         return multipliers.max()
     }
 
-    func startAutoRefresh(intervalSeconds: UInt64 = 60) {
+    func startAutoRefresh(intervalSeconds: UInt64 = 30) {
         guard autoRefreshTask == nil else { return }
         autoRefreshTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -1223,6 +1295,7 @@ final class UsageStore: ObservableObject {
 
     func accountRefreshState(for accountID: UUID) -> AccountRefreshState {
         let state = accountRefreshStates[accountID] ?? .idle
+        if claudeAuthFailures.contains(accountID), state.requiresSignIn { return state }
         // A long backoff can cross the stale threshold without another request.
         if state != .refreshing,
            let history = refreshHistory[accountID], let error = history.lastError,
@@ -1310,7 +1383,7 @@ final class UsageStore: ObservableObject {
             }
 
             guard let account = accounts.first(where: { $0.id == accountID }) else { continue }
-            accountRefreshStates[accountID] = .refreshing
+            if !claudeAuthFailures.contains(accountID) { accountRefreshStates[accountID] = .refreshing }
 
             do {
                 let fetched: UsageAccount
@@ -1320,8 +1393,12 @@ final class UsageStore: ObservableObject {
                 } else {
                     switch provider {
                     case .claude:
+                        let credentialPath = ClaudeConfiguration.credentialPath(for: account)
+                        if account.source == .profile && credentialPath == nil {
+                            throw UsageAdapterError.credentialsUnavailable("Claude profile directory is unavailable. Reconnect this profile.")
+                        }
                         let fetchedAccounts = try await ClaudeUsageAdapter(
-                            credentialPath: account.source == .currentSession ? nil : account.credentialPath
+                            credentialPath: credentialPath
                         ).fetchAccounts()
                         guard let first = fetchedAccounts.first else {
                             throw UsageAdapterError.invalidResponse("Claude returned no account data.")
@@ -1371,13 +1448,16 @@ final class UsageStore: ObservableObject {
                 refreshHistory[accountID] = AccountRefreshHistory(
                     firstAttemptAt: startedAt, lastAttemptAt: startedAt, lastSuccessAt: now
                 )
+                claudeAuthFailures.remove(accountID)
                 if let webNotice {
                     accountRefreshStates[accountID] = .degraded(now, webNotice)
                 } else {
                     accountRefreshStates[accountID] = .live(now)
                 }
             } catch {
-                recordRefreshFailure(error, for: accountID)
+                if recordRefreshFailure(error, for: accountID), account.provider == .claude {
+                    autoOpenClaudeLoginIfNeeded(for: account)
+                }
             }
         }
 
@@ -1422,6 +1502,9 @@ final class UsageStore: ObservableObject {
         guard let history = refreshHistory[accountID] else { return true }
         let date = now()
         if let retryAt = history.retryAt, date < retryAt { return false }
+        if provider == .claude, claudeAuthFailures.contains(accountID) {
+            return history.lastAttemptAt.map { date.timeIntervalSince($0) >= 30 } ?? true
+        }
         // Bound repeated manual failures as well as successful requests.
         if let lastAttempt = history.lastAttemptAt {
             let elapsed = date.timeIntervalSince(lastAttempt)
@@ -1435,13 +1518,18 @@ final class UsageStore: ObservableObject {
         return true
     }
 
-    func recordRefreshFailure(_ error: Error, for accountID: UUID) {
+    @discardableResult
+    func recordRefreshFailure(_ error: Error, for accountID: UUID) -> Bool {
         // F17: keep the last known quota rows on refresh failures so persisted per-quota
         // visibility (for example a disabled Spark 5h row) cannot be erased and later
         // silently re-created as enabled by a successful refresh.
         let date = now()
         var history = refreshHistory[accountID] ?? AccountRefreshHistory(firstAttemptAt: date)
         history.lastError = error
+        let authFailure = AccountRefreshState.failure(error).requiresSignIn
+        let isClaude = accounts.contains { $0.id == accountID && $0.provider == .claude }
+        let enteredAuthFailure = isClaude && authFailure && claudeAuthFailures.insert(accountID).inserted
+        let previousState = accountRefreshStates[accountID]
         if case UsageAdapterError.rateLimited(_, let retryAfter) = error {
             history.backoff = history.backoff == 0 ? 5 * 60 : min(history.backoff * 2, 30 * 60)
             let delay = retryAfter.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil } ?? history.backoff
@@ -1462,7 +1550,12 @@ final class UsageStore: ObservableObject {
                 )
             }
         }
+        if isClaude, claudeAuthFailures.contains(accountID), !authFailure,
+           let previousState, previousState.requiresSignIn {
+            accountRefreshStates[accountID] = previousState
+        }
         refreshHistory[accountID] = history
+        return enteredAuthFailure
     }
 
     static func mergeRefreshedBuckets(existing: [UsageBucket], fetched: [UsageBucket]) -> [UsageBucket] {
@@ -1594,6 +1687,11 @@ enum AccountRefreshState: Equatable {
 
     var isStale: Bool {
         if case .failed = self { return true }
+        return false
+    }
+
+    var requiresSignIn: Bool {
+        if case .failed(_, let required) = self { return required }
         return false
     }
 

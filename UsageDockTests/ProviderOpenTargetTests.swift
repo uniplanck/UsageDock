@@ -205,6 +205,78 @@ final class ProviderOpenTargetTests: XCTestCase {
         XCTAssertNil(store.openStatus(for: .kimi))
     }
 
+    func testClaudeLoginCommandQuotesConfigAndOmitsDefaultDirectory() {
+        XCTAssertEqual(TerminalClaudeLoginOpener.command(configDirectory: ClaudeConfiguration.defaultDirectory), "claude auth login")
+        let config = URL(fileURLWithPath: "/tmp/space 'quote' $(touch ignored)")
+        XCTAssertEqual(
+            TerminalClaudeLoginOpener.command(configDirectory: config),
+            "CLAUDE_CONFIG_DIR='/tmp/space '\\''quote'\\'' $(touch ignored)' claude auth login"
+        )
+        let script = TerminalClaudeLoginOpener.appleScript(command: "echo \"quoted\"\\path\nnext")
+        XCTAssertTrue(script.contains("tell application \"Terminal\""))
+        XCTAssertTrue(script.contains("activate"))
+        XCTAssertTrue(script.contains("\\\"quoted\\\"\\\\path\" & linefeed & \"next"))
+    }
+
+    func testClaudeLoginShellCommandPassesTheExactDirectory() async {
+        let directory = URL(fileURLWithPath: "/tmp/a 'quote' $(touch ignored)")
+        let command = TerminalClaudeLoginOpener.command(configDirectory: directory)
+        let result = await Task.detached {
+            ProviderKeychainReader.runSecurity(URL(fileURLWithPath: "/bin/zsh"),
+                ["-c", "claude() { printf '%s' \"$CLAUDE_CONFIG_DIR\"; }; " + command])
+        }.value
+        XCTAssertEqual(result?.status, 0)
+        XCTAssertEqual(result.flatMap { String(data: $0.data, encoding: .utf8) }, directory.path)
+    }
+
+    func testClaudeClickRoutesFailedAccountAndFusionToTerminalAndConnectedToApp() async {
+        let suite = "UsageDockTests.ClaudeClick.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let locator = TestAppLocator()
+        let app = selection("Claude")
+        locator.byName["Claude"] = app
+        let targetOpener = TestTargetOpener()
+        let loginOpener = TestClaudeLoginOpener()
+        let store = UsageStore(defaults: defaults, appLocator: locator, targetOpener: targetOpener, claudeLoginOpener: loginOpener)
+        let account = UsageAccount(provider: .claude, name: "Profile", source: .profile,
+                                   credentialPath: "/tmp/profile's/.credentials.json", buckets: [])
+        store.accounts = [account]
+        let target = RailDisplayTarget.account(id: account.id, provider: .claude)
+        let connected = await store.openTarget(for: target)
+        XCTAssertTrue(connected)
+        XCTAssertEqual(targetOpener.apps, [app.url])
+        XCTAssertTrue(loginOpener.directories.isEmpty)
+
+        store.recordRefreshFailure(UsageAdapterError.credentialsUnavailable("missing"), for: account.id)
+        let disconnected = await store.openTarget(for: target)
+        let fusion = await store.openTarget(for: .provider(.claude))
+        XCTAssertTrue(disconnected)
+        XCTAssertTrue(fusion)
+        XCTAssertEqual(loginOpener.directories.map(\.path), ["/tmp/profile's", "/tmp/profile's"])
+        XCTAssertEqual(targetOpener.apps, [app.url])
+        XCTAssertTrue(targetOpener.links.isEmpty)
+    }
+
+    func testClaudeProfileLoginUsesProfileHomeAndNeverFallsBackToDefault() async {
+        let suite = "UsageDockTests.ClaudeProfileDirectory.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let opener = TestClaudeLoginOpener()
+        let store = UsageStore(defaults: defaults, claudeLoginOpener: opener)
+        let withHome = UsageAccount(provider: .claude, name: "Home", source: .profile,
+                                    profileHomePath: "/tmp/profile home", buckets: [])
+        let missing = UsageAccount(provider: .claude, name: "Missing", source: .profile, buckets: [])
+        store.accounts = [withHome, missing]
+        store.recordRefreshFailure(UsageAdapterError.credentialsUnavailable("missing"), for: withHome.id)
+        store.recordRefreshFailure(UsageAdapterError.credentialsUnavailable("missing"), for: missing.id)
+        let opened = await store.openTarget(for: .account(id: withHome.id, provider: .claude))
+        let refused = await store.openTarget(for: .account(id: missing.id, provider: .claude))
+        XCTAssertTrue(opened)
+        XCTAssertFalse(refused)
+        XCTAssertEqual(opener.directories.map(\.path), ["/tmp/profile home/.claude"])
+    }
+
     private func resolve(
         _ provider: ProviderID,
         preference: ProviderOpenPreference = ProviderOpenPreference(),
@@ -230,6 +302,12 @@ final class ProviderOpenTargetTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         body(store, defaults, locator, opener)
     }
+}
+
+@MainActor
+private final class TestClaudeLoginOpener: ClaudeLoginOpening {
+    var directories: [URL] = []
+    func openLogin(configDirectory: URL) throws { directories.append(configDirectory) }
 }
 
 @MainActor
