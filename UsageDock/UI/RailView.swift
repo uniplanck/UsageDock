@@ -87,6 +87,8 @@ struct RailHorizontalLayout {
 }
 
 enum RailMetrics {
+    static let tileStackSpacing: CGFloat = 2
+
     static func contentWidth(
         showRing: Bool,
         showMultiplier: Bool,
@@ -216,11 +218,17 @@ enum RailMetrics {
         showTitle: Bool = true,
         titleFontSize: Double = 11
     ) -> CGFloat {
-        var base = CGFloat(max(showRing ? 50 : 34, iconSize + (showRing ? 20 : 10))) + 8
-        if showPercent { base += max(15, CGFloat(percentFontSize) + 4) }
-        if showRemainingTime { base += max(14, CGFloat(remainingTimeFontSize) + 4) }
-        if showTitle { base += max(14, CGFloat(titleFontSize) + 4) }
-        return max(base * CGFloat(scale), showRing ? 36 : 22)
+        let factor = CGFloat(scale)
+        var height = CGFloat(max(showRing ? 50 : 34, iconSize + (showRing ? 20 : 10))) * factor
+        // Reserve the no-ring backplate and each visible text line's native line height.
+        if !showRing { height += 4 * factor }
+        func textHeight(_ size: Double) -> CGFloat {
+            ceil(CGFloat(size) * factor * 1.2) + 1 + tileStackSpacing * factor
+        }
+        if showPercent { height += textHeight(percentFontSize) }
+        if showRemainingTime { height += textHeight(remainingTimeFontSize) }
+        if showTitle { height += textHeight(titleFontSize) }
+        return ceil(max(height, showRing ? 36 : 22))
     }
 
     static func edgePadding(scale: Double, amount: Double) -> CGFloat {
@@ -2656,7 +2664,7 @@ private enum EdgeRailGeometry {
     }
 }
 
-private struct ProviderUsageTile: View {
+struct ProviderUsageTile: View {
     let target: RailDisplayTarget
     let summary: ProviderUsageSummary
     let displayName: String
@@ -2695,7 +2703,7 @@ private struct ProviderUsageTile: View {
     private var iconFrameSize: CGFloat { max(showRing ? 50 : 34, iconSize + (showRing ? 20 : 10)) * scale }
 
     var body: some View {
-        VStack(spacing: 3 * scale) {
+        VStack(spacing: RailMetrics.tileStackSpacing * scale) {
             ZStack {
                 if isHovered {
                     Ellipse()
@@ -2804,7 +2812,7 @@ private struct ProviderUsageTile: View {
                     .shadow(color: ProviderBrand.contrastShadow(theme: theme, enabled: autoContrast), radius: autoContrast ? 1.1 : 0)
             }
         }
-        .padding(backplateEnabled && !showRing ? 3 * scale : 0)
+        .padding(backplateEnabled && !showRing ? 2 * scale : 0)
         .background {
             if backplateEnabled && theme == .transparentFloating {
                 RoundedRectangle(cornerRadius: 10 * scale, style: .continuous)

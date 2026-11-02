@@ -616,7 +616,7 @@ struct KimiUsageAdapter: UsageProviderAdapter {
     }
 
     func fetchOutcome() async throws -> KimiUsageFetch {
-        let credentials = try await KimiCredentialResolver().credentials(credentialPath: credentialPath)
+        let credentials = try await KimiCredentialResolver(session: session).credentials(credentialPath: credentialPath)
         var buckets: [UsageBucket] = []
         var codeError: Error?
         do {
@@ -718,7 +718,7 @@ struct KimiUsageAdapter: UsageProviderAdapter {
         if let usages = payload["usages"] as? [String: Any] {
             for (key, quotaID, label, kind) in [
                 ("limit_5h", "kimi-300", "5h Code", UsageWindowKind.fiveHour),
-                ("limit_7d", "kimi-weekly", "7d Code", UsageWindowKind.weekly)
+                ("limit_7d", "kimi-weekly", "1w Code", UsageWindowKind.weekly)
             ] {
                 guard let window = usages[key] as? [String: Any], let used = ratio(window["used_ratio"]) else { continue }
                 bucketsByID[quotaID] = UsageBucket(
@@ -808,7 +808,7 @@ struct KimiUsageAdapter: UsageProviderAdapter {
     private static func labelForWindow(minutes: Int?, fallback: String) -> String {
         guard let minutes else { return fallback }
         if (295...305).contains(minutes) { return "5h Code" }
-        if (10_000...10_160).contains(minutes) { return "7d Code" }
+        if (10_000...10_160).contains(minutes) { return "1w Code" }
         if minutes % 10_080 == 0 { return "\(minutes / 10_080)w" }
         if minutes % 1_440 == 0 { return "\(minutes / 1_440)d" }
         if minutes % 60 == 0 { return "\(minutes / 60)h" }
@@ -1985,7 +1985,7 @@ struct KimiDesktopCredentialResolver {
               let credentials = root["credentials"] as? [String: Any],
               let web = credentials["kimiWeb"] as? [String: Any],
               let token = web["accessToken"] as? String, !token.isEmpty,
-              let webClaims = claims(token), let codeClaims = claims(codeAccessToken),
+              let webClaims = KimiTokenClaims.parse(token), let codeClaims = KimiTokenClaims.parse(codeAccessToken),
               let webUser = webClaims["sub"] as? String, !webUser.isEmpty,
               let codeUser = codeClaims["sub"] as? String, webUser == codeUser,
               let expiration = webClaims["exp"] as? NSNumber,
@@ -1997,7 +1997,10 @@ struct KimiDesktopCredentialResolver {
         return token
     }
 
-    private static func claims(_ token: String) -> [String: Any]? {
+}
+
+enum KimiTokenClaims {
+    static func parse(_ token: String) -> [String: Any]? {
         let parts = token.split(separator: ".", omittingEmptySubsequences: false)
         guard parts.count == 3 else { return nil }
         var payload = String(parts[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
@@ -2007,16 +2010,63 @@ struct KimiDesktopCredentialResolver {
     }
 }
 
-private struct KimiCredentials {
+struct KimiCredentials {
     let accessToken: String
     let baseURL: String
 }
 
-private struct KimiCredentialResolver {
+struct KimiCredentialResolver {
     private let oauthHost = "https://auth.kimi.com"
     private let clientID = "17e5f671-d194-4dfb-9706-5516cb48c098"
+    var session: URLSession = .shared
+
+    init(session: URLSession = .shared) {
+        self.session = session
+    }
+
+    static func credentialPath(for account: UsageAccount) throws -> String? {
+        if account.source == .currentSession { return nil }
+        if let path = account.credentialPath, !path.isEmpty { return path }
+        if let home = account.profileHomePath, !home.isEmpty {
+            return URL(fileURLWithPath: home).appendingPathComponent(".kimi-code/credentials").path
+        }
+        throw UsageAdapterError.credentialsUnavailable("Kimi profile directory is unavailable. Reconnect this profile.")
+    }
+
+    // Read only the identity claims in memory; never persist the claims or trigger a token refresh.
+    func identity(credentialPath: String?) -> Set<String>? {
+        guard let source = try? credentialSource(credentialPath: credentialPath),
+              let data = try? Data(contentsOf: source.url),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let token = object["access_token"] as? String,
+              let claims = KimiTokenClaims.parse(token) else { return nil }
+        let values = [claims["sub"] as? String, claims["user_id"] as? String]
+            .compactMap { $0 }.filter { !$0.isEmpty }
+        return values.isEmpty ? nil : Set(values)
+    }
 
     func credentials(credentialPath: String? = nil) async throws -> KimiCredentials {
+        let source = try credentialSource(credentialPath: credentialPath)
+        let credentialURL = source.url
+        guard
+            let data = try? Data(contentsOf: credentialURL),
+            var object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            throw UsageAdapterError.credentialsUnavailable("Kimi Code credential file could not be read.")
+        }
+
+        if isExpired(object["expires_at"]) {
+            object = try await refreshCredentials(object, credentialURL: credentialURL)
+        }
+
+        guard let accessToken = object["access_token"] as? String, !accessToken.isEmpty else {
+            throw UsageAdapterError.credentialsUnavailable("Kimi Code credential file contained no access token.")
+        }
+
+        return KimiCredentials(accessToken: accessToken, baseURL: source.baseURL)
+    }
+
+    private func credentialSource(credentialPath: String?) throws -> (url: URL, baseURL: String) {
         let suppliedURL = credentialPath.map { URL(fileURLWithPath: $0) }
         let suppliedIsDirectory = suppliedURL.flatMap { url -> Bool? in
             var isDirectory: ObjCBool = false
@@ -2040,40 +2090,31 @@ private struct KimiCredentialResolver {
         let baseURL = parsed.baseURL ?? "https://api.kimi.com/coding/v1"
 
         let credentialURL: URL
-        if let suppliedURL, suppliedIsDirectory,
-           let profileCredential = try? FileManager.default.contentsOfDirectory(at: suppliedURL, includingPropertiesForKeys: nil)
-            .first(where: { $0.pathExtension == "json" }) {
-            credentialURL = profileCredential
+        if let suppliedURL, suppliedIsDirectory {
+            if let key = parsed.credentialKey, !key.isEmpty {
+                credentialURL = suppliedURL.appendingPathComponent(URL(fileURLWithPath: key).lastPathComponent + ".json")
+            } else {
+                credentialURL = try uniqueCredential(in: suppliedURL)
+            }
         } else if let suppliedURL {
             credentialURL = suppliedURL
         } else if let key = parsed.credentialKey, !key.isEmpty {
             let fileName = URL(fileURLWithPath: key).lastPathComponent + ".json"
             credentialURL = home.appendingPathComponent("credentials/\(fileName)")
-        } else if let fallback = try? FileManager.default.contentsOfDirectory(
-            at: home.appendingPathComponent("credentials", isDirectory: true),
-            includingPropertiesForKeys: nil
-        ).first(where: { $0.pathExtension == "json" && $0.lastPathComponent.hasPrefix("kimi-code") }) {
-            credentialURL = fallback
         } else {
-            throw UsageAdapterError.credentialsUnavailable("Kimi Code OAuth credentials were not found. Sign in to Kimi Code first.")
+            credentialURL = try uniqueCredential(in: home.appendingPathComponent("credentials", isDirectory: true))
         }
 
-        guard
-            let data = try? Data(contentsOf: credentialURL),
-            var object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else {
-            throw UsageAdapterError.credentialsUnavailable("Kimi Code credential file could not be read.")
-        }
+        return (credentialURL, baseURL)
+    }
 
-        if isExpired(object["expires_at"]) {
-            object = try await refreshCredentials(object, credentialURL: credentialURL)
+    private func uniqueCredential(in directory: URL) throws -> URL {
+        let candidates = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil))?
+            .filter { $0.pathExtension == "json" } ?? []
+        guard candidates.count == 1, let candidate = candidates.first else {
+            throw UsageAdapterError.credentialsUnavailable("Kimi Code credential is missing or ambiguous. Log in to Kimi again.")
         }
-
-        guard let accessToken = object["access_token"] as? String, !accessToken.isEmpty else {
-            throw UsageAdapterError.credentialsUnavailable("Kimi Code credential file contained no access token.")
-        }
-
-        return KimiCredentials(accessToken: accessToken, baseURL: baseURL)
+        return candidate
     }
 
     private func refreshCredentials(_ current: [String: Any], credentialURL: URL) async throws -> [String: Any] {
@@ -2100,7 +2141,7 @@ private struct KimiCredentialResolver {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.httpBody = body.data(using: .utf8)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
               let refreshed = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let accessToken = refreshed["access_token"] as? String, !accessToken.isEmpty else {

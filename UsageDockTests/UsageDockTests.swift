@@ -2899,7 +2899,7 @@ final class LiveUsageAdapterParsingTests: XCTestCase {
         let buckets = try KimiUsageAdapter.parseUsage(data: data)
         let weekly = try XCTUnwrap(buckets.first(where: { $0.kind == .weekly }))
         XCTAssertEqual(weekly.quotaID, "kimi-weekly")
-        XCTAssertEqual(weekly.label, "7d Code")
+        XCTAssertEqual(weekly.label, "1w Code")
         XCTAssertEqual(weekly.resolvedPercentUsed ?? -1, 0.0001, accuracy: 0.000001)
         XCTAssertEqual(weekly.resetsAt?.timeIntervalSince1970 ?? -1, 1_788_566_400, accuracy: 0.001)
 
@@ -2935,7 +2935,7 @@ final class LiveUsageAdapterParsingTests: XCTestCase {
         let buckets = try KimiUsageAdapter.parseUsage(data: data)
         let weekly = try XCTUnwrap(buckets.first(where: { $0.kind == .weekly }))
         XCTAssertEqual(weekly.quotaID, "kimi-weekly")
-        XCTAssertEqual(weekly.label, "7d Code")
+        XCTAssertEqual(weekly.label, "1w Code")
         XCTAssertEqual(weekly.resolvedPercentUsed ?? -1, 0.25, accuracy: 0.0001)
 
         let fiveHour = try XCTUnwrap(buckets.first(where: { $0.kind == .fiveHour }))
@@ -3596,6 +3596,185 @@ private struct KimiCredentialFixture {
 }
 
 final class KimiUsageAdapterFetchTests: XCTestCase {
+    @MainActor
+    func testTwoProfilesRefreshAndDisplayIndependently() async throws {
+        let vivace = try makeCredentialFixture(codeSubject: "fixture-vivace", webSubject: "fixture-vivace")
+        let allegro = try makeCredentialFixture(codeSubject: "fixture-allegro", webSubject: "fixture-allegro")
+        defer {
+            try? FileManager.default.removeItem(at: vivace.root)
+            try? FileManager.default.removeItem(at: allegro.root)
+        }
+        let suiteName = "UsageDockTests.KimiTwoProfiles.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        for (fixture, refresh) in [(vivace, "synthetic-refresh-v"), (allegro, "synthetic-refresh-a")] {
+            let object: [String: Any] = ["access_token": fixture.codeToken, "refresh_token": refresh, "expires_at": 1]
+            try jsonData(object).write(to: URL(fileURLWithPath: fixture.codeCredentialPath))
+            // The configured file must win even when another JSON file is present.
+            try jsonData(["access_token": "synthetic-decoy"]).write(
+                to: URL(fileURLWithPath: fixture.codeCredentialPath).deletingLastPathComponent().appendingPathComponent("other.json")
+            )
+        }
+        let refreshedV = try syntheticJWT(subject: "fixture-vivace", expiration: 4_000_000_000, marker: "new-v")
+        let refreshedA = try syntheticJWT(subject: "fixture-allegro", expiration: 4_000_000_000, marker: "new-a")
+        let oauthV = try jsonData(["access_token": refreshedV, "expires_in": 3600])
+        let oauthA = try jsonData(["access_token": refreshedA, "expires_in": 3600])
+        let codeV = try jsonData(["usages": ["limit_5h": ["used_ratio": 0.1], "limit_7d": ["used_ratio": 0.2]]])
+        let codeA = try jsonData(["usages": ["limit_5h": ["used_ratio": 0.6], "limit_7d": ["used_ratio": 0.8]]])
+        let total = try jsonData(["balances": [[
+            "feature": "FEATURE_OMNI", "unit": "UNIT_CREDIT", "type": "SUBSCRIPTION",
+            "amountUsedRatio": 0.3, "expireTime": "2090-11-07T15:51:00Z"
+        ]]])
+        KimiURLProtocol.configure { request in
+            if request.url?.host == "auth.kimi.com" {
+                let body = String(data: request.httpBody ?? Data(), encoding: .utf8) ?? ""
+                if body.contains("synthetic-refresh-v") { return KimiStubResponse(statusCode: 200, data: oauthV) }
+                if body.contains("synthetic-refresh-a") { return KimiStubResponse(statusCode: 200, data: oauthA) }
+            } else if request.url?.path == "/coding/v1/usages" {
+                let authorization = request.value(forHTTPHeaderField: "Authorization")
+                if authorization == "Bearer \(refreshedV)" { return KimiStubResponse(statusCode: 200, data: codeV) }
+                if authorization == "Bearer \(refreshedA)" { return KimiStubResponse(statusCode: 200, data: codeA) }
+            } else if request.url?.path.contains("GetSubscription") == true {
+                return KimiStubResponse(statusCode: 200, data: total)
+            }
+            return KimiStubResponse(statusCode: 500, data: Data("{}".utf8))
+        }
+        defer { KimiURLProtocol.reset() }
+        let session = makeSession()
+        var clock = Date(timeIntervalSince1970: 1_800_000_000)
+        let store = UsageStore(defaults: defaults, now: { clock }, kimiUsageFetcher: { path in
+            try await KimiUsageAdapter(credentialPath: path, desktopCredentialPath: vivace.desktopCredentialPath, session: session).fetchOutcome()
+        }, kimiIdentityReader: { KimiCredentialResolver().identity(credentialPath: $0) })
+        let first = UsageAccount(provider: .kimi, name: "Vivace", source: .profile,
+                                 profileHomePath: vivace.root.path, buckets: [])
+        let second = UsageAccount(provider: .kimi, name: "Allegro", source: .profile,
+                                  credentialPath: URL(fileURLWithPath: allegro.codeCredentialPath).deletingLastPathComponent().path,
+                                  profileHomePath: allegro.root.path, buckets: [])
+        store.accounts = [first, second]
+        await store.refreshProvider(.kimi)
+
+        let firstTarget = RailDisplayTarget.account(id: first.id, provider: .kimi)
+        let secondTarget = RailDisplayTarget.account(id: second.id, provider: .kimi)
+        XCTAssertEqual(store.railTargets(), [firstTarget, secondTarget])
+        XCTAssertEqual(store.displayName(for: firstTarget), "Vivace")
+        XCTAssertEqual(store.displayName(for: secondTarget), "Allegro")
+        let firstSummary = store.summary(for: firstTarget)
+        let secondSummary = store.summary(for: secondTarget)
+        XCTAssertEqual(firstSummary.aggregates.first(where: { $0.quotaID == "kimi-300" })?.percentUsed ?? -1, 0.1, accuracy: 0.0001)
+        XCTAssertEqual(firstSummary.aggregates.first(where: { $0.quotaID == "kimi-weekly" })?.percentUsed ?? -1, 0.2, accuracy: 0.0001)
+        XCTAssertEqual(secondSummary.aggregates.first(where: { $0.quotaID == "kimi-300" })?.percentUsed ?? -1, 0.6, accuracy: 0.0001)
+        XCTAssertEqual(secondSummary.aggregates.first(where: { $0.quotaID == "kimi-weekly" })?.percentUsed ?? -1, 0.8, accuracy: 0.0001)
+        XCTAssertTrue(firstSummary.aggregates.contains { $0.quotaID == "kimi-total" })
+        XCTAssertFalse(secondSummary.aggregates.contains { $0.quotaID == "kimi-total" })
+        XCTAssertNil(store.kimiDuplicateWarning(for: first.id))
+        XCTAssertNil(store.kimiDuplicateWarning(for: second.id))
+        store.setMenuBarAccountSelected(first.id, enabled: true)
+        store.setMenuBarAccountSelected(second.id, enabled: true)
+        let menuItems = store.menuBarUsageItems()
+        XCTAssertEqual(menuItems.map(\.accountName), ["Vivace", "Allegro"])
+        XCTAssertEqual(menuItems[0].percent ?? -1, 0.3, accuracy: 0.0001)
+        XCTAssertEqual(menuItems[1].percent ?? -1, 0.8, accuracy: 0.0001)
+        XCTAssertEqual(KimiURLProtocol.requests().filter { $0.url?.host == "auth.kimi.com" }.count, 2)
+        XCTAssertTrue(try String(contentsOfFile: vivace.codeCredentialPath, encoding: .utf8).contains(refreshedV))
+        XCTAssertTrue(try String(contentsOfFile: allegro.codeCredentialPath, encoding: .utf8).contains(refreshedA))
+
+        // A failure in one profile must not contaminate the other's refresh state.
+        clock.addTimeInterval(61)
+        KimiURLProtocol.configure { request in
+            if request.url?.path == "/coding/v1/usages",
+               request.value(forHTTPHeaderField: "Authorization") == "Bearer \(refreshedV)" {
+                return KimiStubResponse(statusCode: 200, data: codeV)
+            }
+            if request.url?.path.contains("GetSubscription") == true {
+                return KimiStubResponse(statusCode: 200, data: total)
+            }
+            return KimiStubResponse(statusCode: 500, data: Data("{}".utf8))
+        }
+        await store.refreshProvider(.kimi)
+        XCTAssertFalse(store.accountRefreshState(for: first.id).isStale)
+        XCTAssertFalse(store.accountRefreshState(for: second.id).isStale)
+        clock.addTimeInterval(61)
+        await store.refreshProvider(.kimi)
+        XCTAssertFalse(store.accountRefreshState(for: first.id).isStale)
+        XCTAssertTrue(store.accountRefreshState(for: second.id).isStale)
+        XCTAssertEqual(ProviderDetailView(target: firstTarget, edge: .left, usageStore: store).statusColor, .green)
+        XCTAssertEqual(ProviderDetailView(target: secondTarget, edge: .left, usageStore: store).statusColor, .orange)
+        XCTAssertEqual(store.summary(for: secondTarget).aggregates.first(where: { $0.quotaID == "kimi-weekly" })?.percentUsed ?? -1, 0.8, accuracy: 0.0001)
+    }
+
+    @MainActor
+    func testDuplicateLoginWarningUsesSubjectOrUserIDAndClearsAfterRelogin() async throws {
+        let existing = try makeCredentialFixture(codeSubject: "fixture-same")
+        let added = try makeCredentialFixture(codeSubject: "fixture-same")
+        defer {
+            try? FileManager.default.removeItem(at: existing.root)
+            try? FileManager.default.removeItem(at: added.root)
+        }
+        let payload = try jsonData(["user_id": "fixture-same"])
+        let encoded = payload.base64EncodedString().replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_").trimmingCharacters(in: CharacterSet(charactersIn: "="))
+        try jsonData(["access_token": "header.\(encoded).signature"]).write(to: URL(fileURLWithPath: added.codeCredentialPath))
+        let suiteName = "UsageDockTests.KimiDuplicate.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = UsageStore(defaults: defaults, kimiUsageFetcher: { _ in
+            throw UsageAdapterError.invalidResponse("synthetic network failure")
+        }, kimiIdentityReader: { KimiCredentialResolver().identity(credentialPath: $0) })
+        let first = UsageAccount(provider: .kimi, name: "Allegro", isEnabled: false, source: .profile,
+                                 credentialPath: existing.codeCredentialPath, buckets: [])
+        let second = UsageAccount(provider: .kimi, name: "Vivace", source: .profile,
+                                  credentialPath: added.codeCredentialPath, buckets: [])
+        store.accounts = [first, second]
+        store.appLanguage = .english
+        await store.refreshProvider(.kimi)
+        XCTAssertEqual(store.kimiDuplicateWarning(for: second.id), "Same Kimi account as Allegro. Log in with a different account.")
+        store.appLanguage = .japanese
+        XCTAssertEqual(store.kimiDuplicateWarning(for: second.id), "Allegro と同じ Kimi アカウントです。別のアカウントでログインしてください。")
+        XCTAssertEqual(store.accounts.count, 2)
+        let saved = try XCTUnwrap(defaults.data(forKey: "UsageDock.accounts.v3"))
+        XCTAssertFalse(String(decoding: saved, as: UTF8.self).contains("fixture-same"))
+
+        let different = try syntheticJWT(subject: "fixture-different", expiration: 4_000_000_000, marker: "relogin")
+        try jsonData(["access_token": different]).write(to: URL(fileURLWithPath: added.codeCredentialPath))
+        await store.refreshProvider(.kimi)
+        XCTAssertNil(store.kimiDuplicateWarning(for: second.id))
+        XCTAssertNil(store.kimiDuplicateWarning(for: first.id))
+    }
+
+    @MainActor
+    func testKimiProfileWithoutPathNeverFallsBackToCurrentSession() async {
+        let suiteName = "UsageDockTests.KimiMissingPath.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = UsageStore(defaults: defaults, kimiUsageFetcher: { _ in
+            XCTFail("A missing profile path must not fetch current-session credentials")
+            throw UsageAdapterError.credentialsUnavailable("synthetic")
+        }, kimiIdentityReader: { _ in
+            XCTFail("A missing profile path must not read current-session credentials")
+            return nil
+        })
+        let account = UsageAccount(provider: .kimi, name: "Missing", source: .profile, buckets: [])
+        store.accounts = [account]
+        await store.refreshProvider(.kimi)
+        XCTAssertTrue(store.accountRefreshState(for: account.id).requiresSignIn)
+    }
+
+    func testAmbiguousKimiCredentialsAreNotSelectedArbitrarily() async throws {
+        let fixture = try makeCredentialFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let directory = URL(fileURLWithPath: fixture.codeCredentialPath).deletingLastPathComponent()
+        try "".write(to: directory.deletingLastPathComponent().appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
+        try jsonData(["access_token": "synthetic-other"]).write(to: directory.appendingPathComponent("other.json"))
+        XCTAssertNil(KimiCredentialResolver().identity(credentialPath: directory.path))
+        do {
+            _ = try await KimiCredentialResolver().credentials(credentialPath: directory.path)
+            XCTFail("Multiple credentials without a configured key must be rejected")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("ambiguous"))
+        }
+    }
+
     func testKimiFetchCombinesCodeAndPlanWideUsageWithCorrectEndpointTokens() async throws {
         let fixture = try makeCredentialFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -3823,6 +4002,132 @@ final class KimiUsageAdapterFetchTests: XCTestCase {
 
 @MainActor
 final class KimiRailDefaultsTests: XCTestCase {
+    func testCompactRailTileFitsCalculatedHeightAndKeepsUserSpacing() {
+        let summary = ProviderUsageSummary(provider: .kimi, aggregates: [], pressurePercent: nil)
+        for showRing in [false, true] {
+            for fontSize in [7.0, 11.0, 20.0] {
+              for scale in [0.45, 1.0, 1.45] {
+                let tile = ProviderUsageTile(
+                    target: .account(id: UUID(), provider: .kimi), summary: summary,
+                    displayName: "Allegro", displayPercent: 0.8, outerRingPercent: 0.8,
+                    innerRingPercent: 0.4, remainingTimeText: "1d 23h", failureLabel: nil,
+                    presentationMode: .used, multiplier: nil, accentHex: nil, isHovered: false,
+                    showPercent: true, showRing: showRing, showOuterRing: true, showInnerRing: true,
+                    showRemainingTime: true, showMultiplier: false, backplateEnabled: true,
+                    autoContrast: false, theme: .dark, iconSize: 24, percentFontSize: CGFloat(fontSize),
+                    accountLabelFontSize: CGFloat(fontSize), remainingTimeFontSize: CGFloat(fontSize),
+                    showTitle: true, titleWidth: 120, timeWidth: 120, scale: CGFloat(scale)
+                )
+                let view = NSHostingView(rootView: tile)
+                let allocated = RailMetrics.rowHeight(scale: scale, showRing: showRing, showPercent: true,
+                    showRemainingTime: true, remainingTimeFontSize: fontSize, percentFontSize: fontSize,
+                    showTitle: true, titleFontSize: fontSize)
+                XCTAssertLessThanOrEqual(view.fittingSize.height, allocated + 0.5,
+                                         "ring=\(showRing), font=\(fontSize), scale=\(scale)")
+              }
+            }
+        }
+        let base = RailMetrics.contentHeight(entryCount: 5, scale: 1, itemSpacing: 0, innerPaddingY: 0,
+                                             showRing: true, showPercent: true)
+        let customized = RailMetrics.contentHeight(entryCount: 5, scale: 1, itemSpacing: 7, innerPaddingY: 9,
+                                                   showRing: true, showPercent: true)
+        XCTAssertEqual(customized - base, 4 * 7 + 2 * 9, accuracy: 0.001)
+        XCTAssertEqual(HoverDetailMetrics.height(rowCount: 0), 158)
+        XCTAssertEqual(HoverDetailMetrics.height(rowCount: 2), 194)
+        XCTAssertEqual(HoverDetailMetrics.height(rowCount: 7), 424)
+        XCTAssertEqual(HoverDetailMetrics.height(rowCount: 8), 424)
+    }
+
+    func testCompactHoverFitsEmptyAndSevenRowContent() {
+        let suiteName = "UsageDockTests.CompactHover.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = UsageStore(defaults: defaults)
+        store.railItemSpacing = 7
+        store.railInnerPaddingY = 9
+        for count in [0, 1, 2, 7] {
+            let buckets = (0..<count).map { index in
+                UsageBucket(quotaID: "fixture-\(index)", label: "Quota \(index)", kind: .custom, percentUsed: 0.25)
+            }
+            let account = UsageAccount(provider: .kimi, name: "Allegro", source: .profile, buckets: buckets)
+            store.accounts = [account]
+            let detail = ProviderDetailView(target: .account(id: account.id, provider: .kimi), edge: .left, usageStore: store)
+            let content = detail.content.frame(width: 340).fixedSize(horizontal: false, vertical: true)
+            let view = NSHostingView(rootView: content)
+            XCTAssertLessThanOrEqual(view.fittingSize.height + 22, HoverDetailMetrics.height(rowCount: count) + 0.5,
+                                     "row count: \(count)")
+        }
+        let restored = UsageStore(defaults: defaults)
+        XCTAssertEqual(restored.railItemSpacing, 7)
+        XCTAssertEqual(restored.railInnerPaddingY, 9)
+    }
+
+    func testAccountEditorDisplaysDuplicateWarning() {
+        let account = UsageAccount(provider: .kimi, name: "Vivace", source: .profile, buckets: [])
+        func editor(_ warning: String?) -> some View {
+            AccountEditor(account: .constant(account), statusText: "", presentationMode: .used,
+                          canMoveUp: false, canMoveDown: false, supportsMultiplier: false,
+                          multiplierDetectionText: nil, onMoveUp: {}, onMoveDown: {},
+                          onAutoDetectMultiplier: {}, onDelete: {}, duplicateLoginWarning: warning)
+                .frame(width: 800).fixedSize(horizontal: false, vertical: true)
+        }
+        let withoutWarning = NSHostingView(rootView: editor(nil)).fittingSize.height
+        let withWarning = NSHostingView(rootView: editor("Allegro と同じ Kimi アカウントです。別のアカウントでログインしてください。"))
+            .fittingSize.height
+        XCTAssertGreaterThan(withWarning, withoutWarning)
+    }
+
+    func testFiveAccountRailAndTwoWindowHoverRender() throws {
+        let suiteName = "UsageDockTests.FiveAccountRail.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = UsageStore(defaults: defaults)
+        let placement = PlacementStore(defaults: defaults)
+        store.railShowTitle = true
+        store.railShowRemainingTime = true
+        let accounts = [(ProviderID.claude, "Claude"), (.codex, "Codex"), (.grok, "Grok"),
+                        (.kimi, "Vivace"), (.kimi, "Allegro")].enumerated().map { index, item in
+            UsageAccount(provider: item.0, name: item.1, source: .profile, buckets: [
+                UsageBucket(quotaID: "5h", label: "5h Code", kind: .fiveHour,
+                            percentUsed: Double(index + 1) * 0.1, resetsAt: Date().addingTimeInterval(7200)),
+                UsageBucket(quotaID: "weekly", label: "1w Code", kind: .weekly,
+                            percentUsed: Double(index + 1) * 0.12, resetsAt: Date().addingTimeInterval(86400))
+            ])
+        }
+        store.accounts = accounts
+        XCTAssertEqual(store.railTargets().count, 5)
+
+        func capture<V: View>(_ content: V, size: CGSize, name: String) throws {
+            let view = NSHostingView(rootView: content.frame(width: size.width, height: size.height))
+            view.frame = NSRect(origin: .zero, size: size)
+            view.layoutSubtreeIfNeeded()
+            let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+            let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+            attachment.name = name
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+
+        let railSize = RailMetrics.windowSize(
+            entryCount: 5, scale: store.railScale, itemSpacing: store.railItemSpacing,
+            innerPaddingY: store.railInnerPaddingY, showRing: store.railShowRing,
+            showPercent: store.railShowPercent, showMultiplier: store.railShowMultiplier,
+            showRemainingTime: store.railShowRemainingTime, remainingTimeFontSize: store.railRemainingTimeFontSize,
+            iconSize: store.railIconSize, percentFontSize: store.railPercentFontSize,
+            showTitle: store.railShowTitle, titleFontSize: store.railAccountLabelFontSize,
+            titleWidth: store.railTitleWidth, timeWidth: store.railTimeWidth
+        )
+        try capture(RailView(usageStore: store, placement: placement, onTargetHover: { _, _ in },
+                             onDragCanvasWidthChange: { _, _ in }, onDragVerticalPositionChange: { _ in },
+                             onOpenSettings: {}), size: railSize, name: "Five account rail")
+        let target = RailDisplayTarget.account(id: accounts[3].id, provider: .kimi)
+        try capture(ProviderDetailView(target: target, edge: .right, usageStore: store),
+                    size: CGSize(width: 390, height: HoverDetailMetrics.height(rowCount: 2)),
+                    name: "Kimi two window hover")
+    }
+
     func testKimiAutomaticDefaultsPreferEnabledTotalAndPreserveExplicitSources() throws {
         let suiteName = "UsageDockTests.KimiRailDefaults.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -3843,7 +4148,7 @@ final class KimiRailDefaultsTests: XCTestCase {
         )
         let weekly = UsageBucket(
             quotaID: "kimi-weekly",
-            label: "7d Code",
+            label: "1w Code",
             kind: .weekly,
             percentUsed: 0.0001
         )

@@ -65,6 +65,8 @@ The desktop also references `GetSubscriptionStats`. The Code token received HTTP
 - The desktop and Code JWT subjects must match, and the desktop token must be unexpired. This check prevents mixing a desktop user's total with another CLI profile's quotas; the membership server still validates the token.
 - The verified default desktop config path is supported. A missing, expired, or different-account desktop session leaves Code quotas visible with a notice. A Code API failure can leave a valid total visible with a notice. Both sources failing fails the refresh.
 - Desktop secrets stay in the existing desktop config. UsageDock does not persist them, print them, or rotate the desktop session. Opening Kimi and signing in again is the recovery path.
+- Each UsageDock Kimi profile uses its own configured Code credential. Expired Code credentials are refreshed back into that same profile's credential file. A missing profile path cannot fall back to the current session, and ambiguous credential directories are rejected.
+- Settings compares the locally decoded `sub` and `user_id` claims during refresh and warns about matching Kimi accounts, including disabled accounts. These unverified claims are advisory only and are not saved to preferences; no account is deleted automatically.
 - With no account override and a global Auto source, Kimi's Percent and Outer use Total when available. Explicit account/global quota choices remain effective. Inner and Timer retain their existing settings.
 
 ## Verification
