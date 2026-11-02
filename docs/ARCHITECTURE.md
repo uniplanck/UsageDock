@@ -115,7 +115,7 @@ Provider marks are bundled in `Assets.xcassets` as vector SVG image sets:
 
 - account UUID/provider/name
 - enabled state
-- authenticated account source (`currentSession` or `profile`)
+- account source (`currentSession`, `profile`, or the read-only Kimi `cloudSnapshot`)
 - profile metadata paths created by UsageDock's authenticated profile-login flow
 - per-account plan multiplier and manual/automatic mode
 - per-provider Fusion-mode preference
@@ -123,7 +123,7 @@ Provider marks are bundled in `Assets.xcassets` as vector SVG image sets:
 
 UsageDock does **not** copy provider access tokens or refresh tokens into its preferences. Where a provider adapter supports refreshing an expired login, it uses that provider's existing credential file rather than storing a separate token in preferences.
 
-A discovered local provider credential is **not** automatically registered as a UsageDock account. `Add Current Login` is an explicit user action. Additional profiles are created only through the supported provider login flow. Unsupported legacy account-source values are discarded during migration while valid login-backed records are preserved.
+A discovered local provider credential is **not** automatically registered as a UsageDock account. `Add Current Login` is an explicit user action. Additional local profiles are created only through the supported provider login flow. When the cloud config exists, the one-time Kimi migration creates Vivace or converts an existing Vivace profile, preserves its account ID and cached 5-hour/weekly buckets, and orders it before the local Kimi profiles. Deleting it later does not recreate it automatically. Unsupported legacy account-source values are discarded during migration while valid accounts are preserved.
 
 ## Plan multiplier contract
 
@@ -143,11 +143,21 @@ All acquisition conforms to `UsageProviderAdapter` and returns domain `UsageAcco
 
 The Claude adapter resolves the official local Claude OAuth credential, queries the usage endpoint, and parses both legacy named windows and newer `limits` rows. Supported result shapes include 5h, weekly, model-scoped/Fable, and future dynamically identified windows.
 
-Claude credentials prefer `~/.claude/.credentials.json` (or the selected profile's credential file); a usable OAuth credential file skips the provider Keychain entirely. Missing, unreadable, or malformed files fall back to Keychain. Claude Code's current-session and profile Keychain items are read only through `/usr/bin/security find-generic-password -s <service> -w`, with password output captured privately and errors discarded. UsageDock never modifies these items or the credential files. Refreshed credentials are saved in UsageDock's own `com.uniplanck.UsageDock.ClaudeCredentials` Keychain service, with a separate account per source. A fingerprint ties each cached payload to its original provider credential, so Claude Code token rotation or re-login supersedes the saved cache.
+Claude credentials first use `~/.claude/.credentials.json` or the selected profile/`CLAUDE_CONFIG_DIR` equivalent. A present provider file remains authoritative even if unreadable or malformed. If absent, UsageDock reads the Claude Code-owned item through the absolute `/usr/bin/security` executable using only `find-generic-password -s <service> -w`. The default service is `Claude Code-credentials`; profiles use the existing configuration-directory hash suffix. The child gets `/dev/null` as stdin, its stderr is discarded, and stdout is captured only in memory and parsed as JSON. It is stopped on a five-second timeout. UsageDock never calls `SecItem*` for this item and never consumes or rotates Claude Code's refresh token.
 
-SwiftUI eligibility checks use only cached state or file existence. Background refresh discovers Keychain-only sessions and publishes availability; plan metadata detection also runs off the main thread. Credential store reads on the main thread return cached records only, and both native Keychain reads and the security subprocess refuse main-thread calls. The subprocess uses a termination handler and semaphore with a shared 10-second deadline for exit and pipe draining, never `waitUntilExit`; timeout sends termination and escalates to a kill after one second if necessary.
+Source reads run outside the cache lock and coalesce; main-thread observers see only cached records or file existence. Missing or inaccessible sources show the existing warning indicator and can produce a rate-limited notification. Security exit statuses 36, 51 and 128, and a timeout, are treated as requiring Keychain interaction. Background recovery does not run `claude auth status` or automatically open Terminal. The Settings import button uses the same CLI reader and, on success, primes the in-memory source cache and copies only an unexpired access token, expiry and optional plan metadata to a private file. That snapshot is not a fallback for an unavailable provider file and CLI read. File-backed UsageDock state lives under `~/Library/Application Support/UsageDock/`; the directory is mode 0700 and atomically replaced files are mode 0600. Migration does not read, delete or modify the old `com.uniplanck.UsageDock.ClaudeCredentials` Keychain item. Notification authorization is requested once, and notifications are limited to one per hour. Secrets are never placed in logs, account metadata or UserDefaults. Hosted tests inject subprocess results and block the real security binary.
 
-The shared in-memory cache reuses successful provider Keychain reads for 30 minutes. An explicit reload after HTTP 401 can recheck a successful entry after 30 seconds. Missing, denied, failed, or timed-out Keychain reads are cached for 10 minutes, including forced reloads. File reads retain their five-minute cache and 30-second reload/miss throttle. Source reads and UsageDock Keychain reads/writes run outside the cache lock. Concurrent source reads coalesce, while reentrant calls and main-thread observers return cached state without waiting. Requests for the same profile share one token refresh. UsageDock checks that its own cache can be saved before consuming a rotating refresh token, and its native Keychain operations disallow authentication UI. Secrets are never placed in subprocess arguments, logs, account metadata, or UserDefaults. Hosted unit tests skip window creation and automatic live refresh and use injected credential stores and HTTP responses.
+#### Why Keychain prompts recurred
+
+The user reported that Claude Code created its item through `/usr/bin/security`, that a separate scheduled job can read it using that executable without a prompt, and that direct `SecItemCopyMatching` reads from UsageDock triggered prompts. Local Debug builds were verified as ad-hoc signed, with designated requirements tied to a cdhash that changed between two inspected builds. That makes an ACL approval tied to an earlier UsageDock build a plausible cause of repeated prompts. The mitigation is to use the same read-only `/usr/bin/security` route for both background reads and explicit imports. ACLs vary by machine and can still require interaction; the timeout and warning do not guarantee prompt-free access. The current CLI behavior has not been verified against a live Keychain by the hosted tests.
+
+For optional stable local signing, create a suitable local self-signed code-signing identity using the normal macOS tools, then override signing for that build only, for example:
+
+```sh
+xcodebuild build -scheme UsageDock -destination 'platform=macOS' CODE_SIGN_IDENTITY="<name>" CODE_SIGN_STYLE=Manual
+```
+
+The project defaults remain compatible with ad-hoc builds. A stable identity does not guarantee access to another application's Keychain item; ACLs and user authorization still apply.
 
 ### Codex / OpenAI
 
@@ -155,7 +165,9 @@ The Codex adapter resolves the official ChatGPT/Codex auth state and queries the
 
 ### Kimi
 
-The Kimi adapter integrates with Kimi Code credentials without taking ownership of them.
+Vivace is fetched only by the other machine and published by the Cloudflare Worker. UsageDock reads `~/.usage-widget/cloud.json`'s `read_key`, then requests `GET /u/<read_key>` from `https://usage-widget.naoyamao-world.workers.dev` with `User-Agent: usage-widget/1.0` and a 10-second timeout. The key is not written to account metadata or error messages. Only the `kimi_vivace` 5-hour and weekly windows are displayed. Missing, invalid, failed, or stale snapshots retain the last observed buckets as stale with `クラウド未取得`; they never request a local login. Settings identifies the source as `box から取得 (クラウド)`. The one-time migration runs when the config exists. No live Worker request is made by unit tests.
+
+Allegro and other local profiles use the Kimi Code adapter, which integrates with Kimi Code credentials without taking ownership of them. A missing Kimi profile does not automatically open Terminal.
 
 Current-session resolution:
 
@@ -210,7 +222,7 @@ Gemini is present in the domain and branded UI, but live quota acquisition remai
 
 ## Refresh and failure semantics
 
-`UsageStore` refreshes only explicitly registered login-backed accounts (`currentSession` or `profile`) for providers with a live usage adapter. Unsupported providers remain idle.
+`UsageStore` refreshes registered login-backed accounts (`currentSession` or `profile`) and the read-only Kimi cloud snapshot using the existing cadence. Unsupported providers remain idle.
 
 Provider state can be:
 

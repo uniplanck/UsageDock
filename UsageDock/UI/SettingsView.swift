@@ -1377,11 +1377,23 @@ private struct ProviderSettingsSection: View {
                             onCopyGrokDiagnostics: account.provider == .grok ? {
                                 _ = GrokWebDiagnostics.copyToPasteboard()
                             } : nil,
-                            isStale: usageStore.accountRefreshState(for: account.id).isStale,
+                            onCheckClaudeKeychain: account.provider == .claude ? {
+                                Task { await usageStore.importClaudeKeychain(for: account) }
+                            } : nil,
+                            keychainCheckMessage: account.provider == .claude ? usageStore.claudeKeychainCheckMessages[account.id] : nil,
+                            isStale: usageStore.isAccountStale(account),
                             hideUsage: usageStore.isClaudeAuthenticationFailed(account),
                             duplicateLoginWarning: usageStore.kimiDuplicateWarning(for: account.id)
                         )
                     }
+                }
+
+                if provider == .claude && !hasCurrentSession {
+                    Button("Claude の現在のログインをキーチェーンから取り込む") {
+                        Task { await usageStore.importClaudeCurrentSession() }
+                    }
+                    .controlSize(.small)
+                    .help("許可画面を表示せずに読み取り、使用中のアクセス情報だけを保存します。")
                 }
 
                 HStack(spacing: 10) {
@@ -1614,6 +1626,8 @@ struct AccountEditor: View {
     let onDelete: () -> Void
     var onGrokWebLogin: (() -> Void)? = nil
     var onCopyGrokDiagnostics: (() -> Void)? = nil
+    var onCheckClaudeKeychain: (() -> Void)? = nil
+    var keychainCheckMessage: String? = nil
     var isStale: Bool = false
     var hideUsage: Bool = false
     var duplicateLoginWarning: String? = nil
@@ -1625,9 +1639,13 @@ struct AccountEditor: View {
                     .labelsHidden()
                     .help("Show this account on the rail and include it in Fusion")
 
-                TextField("Account name", text: $account.name)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 210)
+                if account.source == .cloudSnapshot {
+                    Text("Vivace").frame(maxWidth: 210, alignment: .leading)
+                } else {
+                    TextField("Account name", text: $account.name)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 210)
+                }
 
                 Text(sourceLabel)
                     .font(.caption2.weight(.medium))
@@ -1687,6 +1705,12 @@ struct AccountEditor: View {
                         .disabled(GrokWebDiagnostics.latest.isEmpty)
                 }
 
+                if let onCheckClaudeKeychain {
+                    Button("キーチェーンから取り込む", action: onCheckClaudeKeychain)
+                        .controlSize(.small)
+                        .help("許可画面を表示せずに読み取り、使用中のアクセス情報だけを保存します。")
+                }
+
                 if let profileCredentialName {
                     Text(profileCredentialName)
                         .font(.caption2.monospaced())
@@ -1695,6 +1719,13 @@ struct AccountEditor: View {
                 }
             }
             .padding(.leading, 30)
+
+            if let keychainCheckMessage {
+                Text(keychainCheckMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 30)
+            }
 
             if let duplicateLoginWarning {
                 Label(duplicateLoginWarning, systemImage: "exclamationmark.triangle.fill")
@@ -1744,7 +1775,7 @@ struct AccountEditor: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
 
                             TimelineView(.periodic(from: .now, by: 30)) { context in
-                                Text(percentText(hideUsage ? nil : displayPercent(bucket.forDisplay(at: context.date).resolvedPercentUsed)))
+                                Text(percentText(hideUsage ? nil : displayPercent((isStale ? bucket : bucket.forDisplay(at: context.date)).resolvedPercentUsed)))
                                     .font(.caption.monospacedDigit())
                                     .frame(width: 44, alignment: .trailing)
                                     .opacity(isStale ? 0.55 : 1)
@@ -1907,12 +1938,14 @@ struct AccountEditor: View {
             switch account.source {
             case .currentSession: return "Web login"
             case .profile: return "Web login · profile"
+            case .cloudSnapshot: return "box から取得 (クラウド)"
             case .legacyUnsupported, nil: return "Web login"
             }
         }
         switch account.source {
         case .currentSession: return "Current login"
         case .profile: return "UsageDock profile"
+        case .cloudSnapshot: return "box から取得 (クラウド)"
         case .legacyUnsupported, nil: return "Unavailable"
         }
     }

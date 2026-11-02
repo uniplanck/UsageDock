@@ -238,6 +238,7 @@ struct ProviderDetailView: View {
         switch source {
         case .currentSession: return "Local Login"
         case .profile: return "UsageDock Profile"
+        case .cloudSnapshot: return "box から取得 (クラウド)"
         case .legacyUnsupported, nil: return "Unavailable"
         }
     }

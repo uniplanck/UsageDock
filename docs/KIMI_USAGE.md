@@ -1,5 +1,9 @@
 # Kimi usage sources
 
+## Vivace cloud ownership
+
+Vivace is owned and refreshed by the other machine only. On this Mac, UsageDock reads the `kimi_vivace` entry published by the Worker, using the `read_key` stored locally in `~/.usage-widget/cloud.json`. It never performs a Vivace OAuth login or token refresh. The cloud account is migrated once when that file exists and is displayed before the local Allegro profile. The Worker sends percentage values on a 0–100 scale; UsageDock converts them to its internal 0–1 scale for the 5-hour and weekly buckets. An unavailable or stale entry keeps the last values dimmed with `クラウド未取得`. Local profile credentials and the live API observations below apply to locally owned accounts only.
+
 Verified on 2026-10-22 using the existing local Kimi Code and Kimi desktop credentials. Tokens, user IDs, and subscription IDs are omitted. The Code token was expired and was refreshed through the existing OAuth flow, updating only its existing credential file. Desktop credentials were read without modification.
 
 ## Code quotas
