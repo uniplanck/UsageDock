@@ -121,7 +121,7 @@ Provider marks are bundled in `Assets.xcassets` as vector SVG image sets:
 - per-provider Fusion-mode preference
 - last cached non-secret quota buckets
 
-UsageDock does **not** copy provider access tokens or refresh tokens into its preferences and does not own refresh-token rotation.
+UsageDock does **not** copy provider access tokens or refresh tokens into its preferences. Where a provider adapter supports refreshing an expired login, it uses that provider's existing credential file rather than storing a separate token in preferences.
 
 A discovered local provider credential is **not** automatically registered as a UsageDock account. `Add Current Login` is an explicit user action. Additional profiles are created only through the supported provider login flow. Unsupported legacy account-source values are discarded during migration while valid login-backed records are preserved.
 
@@ -163,7 +163,9 @@ Current-session resolution:
 2. resolve the managed Kimi provider base URL and OAuth credential key;
 3. read the referenced credential JSON from `~/.kimi-code/credentials/`;
 4. use its access token only in memory for the request;
-5. never persist or rotate that token inside UsageDock.
+5. if the Code token is expired, refresh it and attempt to write the result back to that same credential file.
+
+Each Kimi profile resolves its own config and configured credential file. A profile with no usable path does not fall back to the current session, and an unconfigured directory containing multiple credential files is treated as ambiguous. During refresh, Settings warns when two Kimi logins have matching JWT `sub` or `user_id` claims; this is an advisory comparison of locally decoded, unverified claims, and it neither deletes accounts nor stores the claims in preferences.
 
 The adapter targets the managed Kimi coding usage surface and parses:
 

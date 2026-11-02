@@ -1378,7 +1378,8 @@ private struct ProviderSettingsSection: View {
                                 _ = GrokWebDiagnostics.copyToPasteboard()
                             } : nil,
                             isStale: usageStore.accountRefreshState(for: account.id).isStale,
-                            hideUsage: usageStore.isClaudeAuthenticationFailed(account)
+                            hideUsage: usageStore.isClaudeAuthenticationFailed(account),
+                            duplicateLoginWarning: usageStore.kimiDuplicateWarning(for: account.id)
                         )
                     }
                 }
@@ -1615,6 +1616,7 @@ struct AccountEditor: View {
     var onCopyGrokDiagnostics: (() -> Void)? = nil
     var isStale: Bool = false
     var hideUsage: Bool = false
+    var duplicateLoginWarning: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1693,6 +1695,14 @@ struct AccountEditor: View {
                 }
             }
             .padding(.leading, 30)
+
+            if let duplicateLoginWarning {
+                Label(duplicateLoginWarning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 30)
+            }
 
             HStack(spacing: 8) {
                 Text("Web")

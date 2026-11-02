@@ -1,6 +1,13 @@
 import AppKit
 import SwiftUI
 
+enum HoverDetailMetrics {
+    static func height(rowCount: Int) -> CGFloat {
+        guard rowCount > 0 else { return 158 }
+        return 102 + CGFloat(min(rowCount, 7)) * 46
+    }
+}
+
 @MainActor
 final class HoverDetailPanelController {
     private let usageStore: UsageStore
@@ -41,10 +48,7 @@ final class HoverDetailPanelController {
     func show(target: RailDisplayTarget, index: Int, anchorPanel: NSPanel) {
         visibleTarget = target
         let summary = usageStore.summary(for: target)
-        let rowCount = max(1, min(summary.aggregates.count, 7))
-        let height: CGFloat = summary.aggregates.isEmpty
-            ? 184
-            : min(430, 118 + CGFloat(rowCount) * 56)
+        let height = HoverDetailMetrics.height(rowCount: summary.aggregates.count)
 
         panel.contentView = NSHostingView(
             rootView: ProviderDetailView(

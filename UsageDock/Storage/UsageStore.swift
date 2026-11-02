@@ -372,6 +372,7 @@ final class UsageStore: ObservableObject {
     @Published private(set) var refreshStates: [ProviderID: ProviderRefreshState] = [:]
     @Published private(set) var accountRefreshStates: [UUID: AccountRefreshState] = [:]
     @Published private(set) var multiplierDetectionStates: [UUID: MultiplierDetectionState] = [:]
+    @Published private var kimiDuplicateAccountIDs: [UUID: UUID] = [:]
     @Published private(set) var isRefreshing = false
     @Published private(set) var hasClaudeLocalLogin = false
     @Published var settingsBubblePreviewRequested = false
@@ -382,6 +383,8 @@ final class UsageStore: ObservableObject {
     private let claudeLoginOpener: any ClaudeLoginOpening
     private let now: () -> Date
     private let usageFetcher: ((UsageAccount) async throws -> UsageAccount)?
+    private let kimiUsageFetcher: ((String?) async throws -> KimiUsageFetch)?
+    private let kimiIdentityReader: ((String?) -> Set<String>?)?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var autoRefreshTask: Task<Void, Never>?
@@ -405,7 +408,9 @@ final class UsageStore: ObservableObject {
         targetOpener: (any ProviderTargetOpening)? = nil,
         claudeLoginOpener: (any ClaudeLoginOpening)? = nil,
         now: @escaping () -> Date = Date.init,
-        usageFetcher: ((UsageAccount) async throws -> UsageAccount)? = nil
+        usageFetcher: ((UsageAccount) async throws -> UsageAccount)? = nil,
+        kimiUsageFetcher: ((String?) async throws -> KimiUsageFetch)? = nil,
+        kimiIdentityReader: ((String?) -> Set<String>?)? = nil
     ) {
         self.defaults = defaults
         self.appLocator = appLocator ?? WorkspaceProviderAppLocator()
@@ -413,6 +418,15 @@ final class UsageStore: ObservableObject {
         self.claudeLoginOpener = claudeLoginOpener ?? TerminalClaudeLoginOpener()
         self.now = now
         self.usageFetcher = usageFetcher
+        self.kimiUsageFetcher = kimiUsageFetcher
+        if let kimiIdentityReader {
+            self.kimiIdentityReader = kimiIdentityReader
+        } else if usageFetcher == nil && kimiUsageFetcher == nil {
+            self.kimiIdentityReader = { KimiCredentialResolver().identity(credentialPath: $0) }
+        } else {
+            // Injected provider tests must not fall through to real local credentials.
+            self.kimiIdentityReader = nil
+        }
         let savedPreferences = defaults.data(forKey: Self.providerOpenPreferencesKey)
             .flatMap { try? JSONDecoder().decode([String: ProviderOpenPreference].self, from: $0) } ?? [:]
         providerOpenPreferences = Dictionary(uniqueKeysWithValues: savedPreferences.compactMap { key, value in
@@ -859,6 +873,49 @@ final class UsageStore: ObservableObject {
     func displayName(for target: RailDisplayTarget) -> String {
         guard let account = account(for: target) else { return target.provider.displayName }
         return account.name
+    }
+
+    func kimiDuplicateWarning(for accountID: UUID) -> String? {
+        guard let duplicateID = kimiDuplicateAccountIDs[accountID],
+              accounts.contains(where: { $0.id == accountID && $0.provider == .kimi }),
+              let duplicate = accounts.first(where: { $0.id == duplicateID && $0.provider == .kimi }) else { return nil }
+        return String(
+            format: appLanguage.localized("Same Kimi account as %@. Log in with a different account."),
+            locale: appLanguage.locale,
+            duplicate.name
+        )
+    }
+
+    private func updateKimiDuplicateAccounts() async {
+        guard let kimiIdentityReader else { return }
+        let candidates: [(id: UUID, path: String?)] = accounts.compactMap { account in
+            guard account.provider == .kimi, UsageDockDistributionPolicy.isAccountVisible(account) else { return nil }
+            do { return (account.id, try KimiCredentialResolver.credentialPath(for: account)) }
+            catch { return nil }
+        }
+        let identities = await Task.detached(priority: .utility) {
+            candidates.compactMap { candidate -> (UUID, String?, Set<String>)? in
+                guard let identity = kimiIdentityReader(candidate.path) else { return nil }
+                return (candidate.id, candidate.path, identity)
+            }
+        }.value
+
+        // Paths can change while file reads are in flight. Ignore such stale results.
+        let current = identities.filter { id, path, _ in
+            guard let account = accounts.first(where: { $0.id == id && $0.provider == .kimi }),
+                  let currentPath = try? KimiCredentialResolver.credentialPath(for: account) else {
+                // A current-session path is nil, so handle it separately below.
+                return accounts.contains { $0.id == id && $0.provider == .kimi && $0.source == .currentSession } && path == nil
+            }
+            return currentPath == path
+        }
+        var duplicates: [UUID: UUID] = [:]
+        for (id, _, identity) in current {
+            if let other = current.first(where: { $0.0 != id && !identity.isDisjoint(with: $0.2) }) {
+                duplicates[id] = other.0
+            }
+        }
+        kimiDuplicateAccountIDs = duplicates
     }
 
     func accentHex(for target: RailDisplayTarget) -> String? {
@@ -1351,6 +1408,7 @@ final class UsageStore: ObservableObject {
     func refreshProvider(_ provider: ProviderID, manual: Bool = false) async {
         guard refreshingProviders.insert(provider).inserted else { return }
         defer { refreshingProviders.remove(provider) }
+        if provider == .kimi { await updateKimiDuplicateAccounts() }
         let accountIDs = accounts
             .filter {
                 $0.provider == provider &&
@@ -1421,9 +1479,13 @@ final class UsageStore: ObservableObject {
                         }
                         fetched = first
                     case .kimi:
-                        let outcome = try await KimiUsageAdapter(
-                            credentialPath: account.source == .currentSession ? nil : account.credentialPath
-                        ).fetchOutcome()
+                        let path = try KimiCredentialResolver.credentialPath(for: account)
+                        let outcome: KimiUsageFetch
+                        if let kimiUsageFetcher {
+                            outcome = try await kimiUsageFetcher(path)
+                        } else {
+                            outcome = try await KimiUsageAdapter(credentialPath: path).fetchOutcome()
+                        }
                         webNotice = outcome.notice.map { appLanguage.localized($0) }
                         fetched = UsageAccount(provider: .kimi, name: account.name, buckets: outcome.buckets)
                     case .grok:
@@ -1789,7 +1851,7 @@ private enum UsageProfileLoginLauncher {
         return UsageAccount(
             id: id,
             provider: provider,
-            name: isAntigravity ? "Antigravity Login" : "Profile \(ordinal)",
+            name: isAntigravity ? "Antigravity Login" : (provider == .kimi ? "Kimi Profile \(ordinal)" : "Profile \(ordinal)"),
             source: isAntigravity ? .currentSession : .profile,
             credentialPath: isAntigravity ? nil : credentialURL.path,
             planMultiplier: supportsMultiplier ? 1 : nil,

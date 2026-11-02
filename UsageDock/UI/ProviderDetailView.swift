@@ -50,10 +50,11 @@ struct ProviderDetailView: View {
 
             TimelineView(.periodic(from: .now, by: 30)) { _ in
                 content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
             .padding(.leading, edge == .left ? CGFloat(usageStore.bubblePointerDepth) + 14 : 16)
             .padding(.trailing, edge == .right ? CGFloat(usageStore.bubblePointerDepth) + 14 : 16)
-            .padding(.vertical, 16)
+            .padding(.vertical, 11)
         }
     }
 
@@ -67,14 +68,14 @@ struct ProviderDetailView: View {
         }
     }
 
-    private var content: some View {
-        VStack(alignment: .leading, spacing: 14) {
+    var content: some View {
+        VStack(alignment: .leading, spacing: 10) {
             header
 
             if summary.aggregates.isEmpty {
                 emptyState
             } else {
-                VStack(spacing: 9) {
+                VStack(spacing: 6) {
                     ForEach(summary.aggregates.prefix(7)) { aggregate in
                         quotaRow(aggregate)
                     }
@@ -94,7 +95,7 @@ struct ProviderDetailView: View {
             }
             .frame(width: 42, height: 42)
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(usageStore.displayName(for: target))
                     .font(.system(size: 16, weight: .semibold, design: .rounded))
                     .foregroundStyle(ProviderBrand.primaryText(theme: theme))
@@ -139,14 +140,14 @@ struct ProviderDetailView: View {
                 .foregroundStyle(ProviderBrand.secondaryText(theme: theme))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 12)
+        .padding(.vertical, 8)
         .padding(.horizontal, 12)
         .background(ProviderBrand.surface(theme: theme, opacity: 0.84), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private func quotaRow(_ aggregate: UsageAggregate) -> some View {
         let displayed = usageStore.displayPercent(aggregate.percentUsed)
-        return VStack(alignment: .leading, spacing: 7) {
+        return VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(LocalizedStringKey(aggregate.label))
                     .font(.system(size: 12.5, weight: .semibold, design: .rounded))
@@ -178,7 +179,7 @@ struct ProviderDetailView: View {
             UsageProgressBar(provider: provider, value: displayed, accentHex: accentHex, theme: theme)
         }
         .padding(.horizontal, 11)
-        .padding(.vertical, 9)
+        .padding(.vertical, 6)
         .background(ProviderBrand.surface(theme: theme, opacity: 0.92), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
@@ -215,7 +216,15 @@ struct ProviderDetailView: View {
         percentText(usageStore.displayPercent(summary.pressurePercent))
     }
 
-    private var statusColor: Color {
+    var statusColor: Color {
+        if let account {
+            switch usageStore.accountRefreshState(for: account.id) {
+            case .live: return .green
+            case .degraded, .rateLimited, .failed: return .orange
+            case .refreshing: return .blue
+            case .idle: return ProviderBrand.tertiaryText(theme: theme)
+            }
+        }
         switch usageStore.refreshState(for: provider) {
         case .live: return .green
         case .partial: return .orange
