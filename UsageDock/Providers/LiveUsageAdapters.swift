@@ -1316,7 +1316,7 @@ enum UsageAdapterError: LocalizedError {
         switch self {
         case .credentialsUnavailable(let message): message
         case .authenticationExpired(let message): message
-        case .keychainAccessRequired: "Claude の資格情報ファイルを確認できません。キーチェーンのみのログインは設定で確認してください。"
+        case .keychainAccessRequired: "Claude の資格情報を取得できません。キーチェーンのアクセスとログイン状態を確認してください。"
         case .rateLimited(let provider, _):
             "\(provider.displayName) usage is rate limited. Showing last known usage."
         case .httpFailure(let provider, let statusCode, let message):
@@ -1328,14 +1328,36 @@ enum UsageAdapterError: LocalizedError {
 
 /// Bounded subprocess I/O used by explicitly invoked or injected commands.
 enum ProviderKeychainReader {
+    enum Result {
+        case exited(status: Int32, data: Data)
+        case timedOut
+        case unavailable
+    }
+
     static func runSecurity(
         _ executable: URL,
         _ arguments: [String],
         timeout: TimeInterval = 10,
         environment: [String: String]? = nil
     ) -> (status: Int32, data: Data)? {
-        // Even an accidental UI caller must never launch a Keychain prompt or wait.
-        guard !Thread.isMainThread else { return nil }
+        guard case let .exited(status, data) = run(executable, arguments, timeout: timeout, environment: environment) else {
+            return nil
+        }
+        return (status, data)
+    }
+
+    static func run(
+        _ executable: URL,
+        _ arguments: [String],
+        timeout: TimeInterval,
+        environment: [String: String]? = nil
+    ) -> Result {
+        // Tests must never run the real security binary, even if a caller
+        // forgets to inject a runner. UI callers must not block or launch it.
+        let testing = ProcessInfo.processInfo.environment["USAGEDOCK_TESTING"] == "1" ||
+            ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        guard !Thread.isMainThread,
+              !(testing && executable.standardizedFileURL.path == "/usr/bin/security") else { return .unavailable }
         let process = Process()
         let stdout = Pipe()
         let terminated = DispatchSemaphore(value: 0)
@@ -1349,7 +1371,7 @@ enum ProviderKeychainReader {
         do {
             try process.run()
         } catch {
-            return nil
+            return .unavailable
         }
         let deadline = DispatchTime.now() + timeout
         let output = OutputBuffer()
@@ -1360,7 +1382,7 @@ enum ProviderKeychainReader {
         let descriptor = dup(stdout.fileHandleForReading.fileDescriptor)
         guard descriptor >= 0 else {
             stop(process)
-            return nil
+            return .unavailable
         }
         let channel = DispatchIO(type: .stream, fileDescriptor: descriptor, queue: queue) { _ in
             close(descriptor)
@@ -1372,10 +1394,11 @@ enum ProviderKeychainReader {
         }
         guard terminated.wait(timeout: deadline) == .success else {
             stop(process)
-            return nil
+            return .timedOut
         }
-        guard drained.wait(timeout: deadline) == .success, let data = output.data else { return nil }
-        return (process.terminationStatus, data)
+        guard drained.wait(timeout: deadline) == .success else { return .timedOut }
+        guard let data = output.data else { return .unavailable }
+        return .exited(status: process.terminationStatus, data: data)
     }
 
     private static func stop(_ process: Process) {
@@ -1552,52 +1575,50 @@ enum ClaudeCredentialStore {
 
     static func credentialRecords(credentialPath: String? = nil, reload: Bool = false) -> [CredentialRecord] {
         let source = sourceLocation(credentialPath: credentialPath)
-        let importedID = "imported:\(source.service)"
-        let store = SecureCredentialFileStore()
         return credentialRecords(fileURL: source.fileURL, cache: cache, reload: reload,
-                                 importedID: importedID, readImported: { store.read(account: importedID) })
+                                 service: source.service)
     }
 
     static func credentialRecords(
         fileURL: URL,
         cache: ClaudeCredentialCache,
         reload: Bool = false,
-        importedID: String? = nil,
-        readImported: (() -> Data?)? = nil
+        service: String? = nil,
+        readKeychain: (String) -> ClaudeKeychainProbe.Result = { ClaudeKeychainProbe.check(service: $0) }
     ) -> [CredentialRecord] {
         let fileID = "file:\(fileURL.standardizedFileURL.path)"
+        let keychainID = service.map { "keychain:\($0)" }
         let providerFileExists = FileManager.default.fileExists(atPath: fileURL.path)
         // Defensive boundary for synchronous consumers, including plan metadata.
         // Body evaluation may observe cached data but must never read credentials.
         if Thread.isMainThread {
             let cached = providerFileExists ? cache.cachedRecord(sourceID: fileID)
-                : importedID.flatMap { cache.cachedRecord(sourceID: $0) }
+                : keychainID.flatMap { cache.cachedRecord(sourceID: $0) }
             return [cached].compactMap { $0 }
         }
-        // The provider file takes precedence over an explicitly imported copy.
+        // An existing provider file is authoritative, including if it is invalid.
         if providerFileExists,
            let file = cache.record(sourceID: fileID, reload: reload, readSource: { try? Data(contentsOf: fileURL) }),
            let object = try? JSONSerialization.jsonObject(with: file.data) as? [String: Any],
            object["claudeAiOauth"] is [String: Any] {
             return [file]
         }
-        // A provider file, including an unreadable or malformed one, is authoritative.
-        // Only an explicitly imported app-owned file may be used when it is absent.
-        if !providerFileExists,
-           let importedID, let readImported,
-           let imported = cache.record(sourceID: importedID, reload: reload, readSource: readImported),
-           let object = try? JSONSerialization.jsonObject(with: imported.data) as? [String: Any],
-           object["claudeAiOauth"] is [String: Any] {
-            return [imported]
+        if !providerFileExists, let service, let keychainID,
+           let record = cache.record(sourceID: keychainID, reload: reload, readSource: {
+               guard case let .success(data) = readKeychain(service),
+                     let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                     object["claudeAiOauth"] is [String: Any] else { return nil }
+               return data
+           }) {
+            return [record]
         }
         return []
     }
 
     static func hasCurrentSession() -> Bool {
         let source = sourceLocation(credentialPath: nil)
-        let importedID = "imported:\(source.service)"
         return hasCurrentSession(fileURL: source.fileURL, cache: cache) ||
-            FileManager.default.fileExists(atPath: SecureCredentialFileStore().fileURL(account: importedID).path)
+            cache.cachedRecord(sourceID: "keychain:\(source.service)") != nil
     }
 
     static func hasCurrentSession(fileURL: URL, cache: ClaudeCredentialCache) -> Bool {
@@ -1621,7 +1642,8 @@ enum ClaudeCredentialStore {
     /// Only the explicit Settings action calls this. Never import refresh tokens.
     static func importKeychainCredential(_ data: Data, credentialPath: String?,
                                          store: SecureCredentialFileStore = SecureCredentialFileStore(),
-                                         now: Date = Date()) throws {
+                                         now: Date = Date(),
+                                         cache credentialCache: ClaudeCredentialCache = ClaudeCredentialStore.cache) throws {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let oauth = root["claudeAiOauth"] as? [String: Any],
               let token = oauth["accessToken"] as? String, !token.isEmpty else {
@@ -1642,9 +1664,14 @@ enum ClaudeCredentialStore {
             if let value = oauth[key] as? String { minimal[key] = value }
         }
         let encoded = try JSONSerialization.data(withJSONObject: ["claudeAiOauth": minimal])
-        let importedID = "imported:\(providerKeychainService(credentialPath: credentialPath))"
+        let service = providerKeychainService(credentialPath: credentialPath)
+        let importedID = "imported:\(service)"
         try store.write(encoded, account: importedID)
-        cache.invalidate(sourceID: importedID)
+        // The successful CLI read can also satisfy the next refresh from memory.
+        // The saved snapshot itself is never used as a replacement for the source.
+        let keychainID = "keychain:\(service)"
+        credentialCache.invalidate(sourceID: keychainID)
+        _ = credentialCache.record(sourceID: keychainID, reload: true) { data }
     }
 
     static func credentialCandidates(credentialPath: String? = nil) -> [Data] {
@@ -1773,7 +1800,7 @@ actor ClaudeCredentialResolver {
     init(
         records: @escaping (String?, Bool) -> [ClaudeCredentialStore.CredentialRecord] = ClaudeCredentialStore.credentialRecords,
         // Claude Code itself can open a Keychain dialog, so background recovery
-        // only rereads the file. An explicit UI action can open its login.
+        // only rereads the credential sources. An explicit UI action can open its login.
         runCLI: @escaping (URL) async -> ClaudeCLIStatus = { _ in .unavailable },
         now: @escaping () -> Date = Date.init,
         attemptDefaults: UserDefaults? = nil
@@ -1844,6 +1871,7 @@ actor ClaudeCredentialResolver {
         // A rejected or expired cached token is never used as evidence of login.
         // Re-read the actual file/Keychain before asking Claude Code to refresh.
         let fresh = (forceRefresh || recovering) ? first : records(credentialPath, true)
+        if fresh.isEmpty { throw UsageAdapterError.keychainAccessRequired }
         lastRecoveryProbe[key] = now()
         if let token = usableToken(fresh, key: key, rejecting: rejected),
            !forceRefresh || (rejectedAccessToken != nil && token != rejectedAccessToken) {
@@ -1857,6 +1885,7 @@ actor ClaudeCredentialResolver {
             saveAttempt(now(), for: key)
             let status = await runCLI(ClaudeConfiguration.directory(credentialPath: credentialPath))
             let after = records(credentialPath, true)
+            if after.isEmpty { throw UsageAdapterError.keychainAccessRequired }
             lastRecoveryProbe[key] = now()
             if status == .loggedOut {
                 loggedOutFingerprints[key] = Set(after.map { $0.target.sourceFingerprint })

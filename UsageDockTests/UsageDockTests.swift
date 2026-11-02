@@ -458,19 +458,54 @@ final class ClaudeCredentialStoreTests: XCTestCase {
         try data.write(to: file)
         let records = await Task.detached {
             let cache = ClaudeCredentialCache(readOwned: { _ in nil })
-            return ClaudeCredentialStore.credentialRecords(fileURL: file, cache: cache)
+            return ClaudeCredentialStore.credentialRecords(fileURL: file, cache: cache, service: "fixture") { _ in
+                XCTFail("A present provider file must take precedence"); return .unavailable
+            }
         }.value
         XCTAssertEqual(records.map(\.data), [data])
         XCTAssertEqual(records.first?.target.account, "file:\(file.standardizedFileURL.path)")
     }
 
-    func testMissingCredentialFileDoesNotReadProviderKeychain() async {
+    func testMissingCredentialFileUsesCLIAndCachesOnlyInMemory() async {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let data = Data(#"{"claudeAiOauth":{"accessToken":"synthetic","expiresAt":4000000000000,"refreshToken":"synthetic-refresh"}}"#.utf8)
+        let records = await Task.detached {
+            let cache = ClaudeCredentialCache(readOwned: { _ in nil }, writeOwned: { _, _ in
+                XCTFail("Keychain output must not be persisted")
+            })
+            return ClaudeCredentialStore.credentialRecords(fileURL: file, cache: cache, service: "fixture") { service in
+                ClaudeKeychainProbe.check(service: service) { executable, arguments, timeout in
+                    XCTAssertEqual(executable.path, "/usr/bin/security")
+                    XCTAssertEqual(arguments, ["find-generic-password", "-s", "fixture", "-w"])
+                    XCTAssertEqual(timeout, 5)
+                    return .exited(status: 0, data: data)
+                }
+            }
+        }.value
+        XCTAssertEqual(records.map(\.data), [data])
+        XCTAssertEqual(records.first?.target.account, "keychain:fixture")
+    }
+
+    func testMalformedKeychainOutputIsUnavailable() async {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let records = await Task.detached {
-            let cache = ClaudeCredentialCache(readOwned: { _ in nil })
-            return ClaudeCredentialStore.credentialRecords(fileURL: file, cache: cache)
+            ClaudeCredentialStore.credentialRecords(fileURL: file, cache: ClaudeCredentialCache(readOwned: { _ in nil }),
+                                                     service: "fixture", readKeychain: { _ in .success(Data("not-json".utf8)) })
         }.value
         XCTAssertTrue(records.isEmpty)
+    }
+
+    func testBackgroundCLIJSONResolvesAnAccessToken() async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let data = Data(#"{"claudeAiOauth":{"accessToken":"synthetic-access","expiresAt":4000000000000,"refreshToken":"synthetic-refresh"}}"#.utf8)
+        let cache = ClaudeCredentialCache(readOwned: { _ in nil })
+        let resolver = ClaudeCredentialResolver(records: { _, reload in
+            ClaudeCredentialStore.credentialRecords(fileURL: file, cache: cache, reload: reload, service: "fixture") { service in
+                ClaudeKeychainProbe.check(service: service) { _, _, _ in .exited(status: 0, data: data) }
+            }
+        })
+        let token = try await resolver.accessToken(credentialPath: file.path)
+        XCTAssertEqual(token, "synthetic-access")
     }
 
     func testMalformedCredentialFileDoesNotReadProviderKeychain() async throws {
@@ -479,7 +514,9 @@ final class ClaudeCredentialStoreTests: XCTestCase {
         try Data("malformed fixture".utf8).write(to: file)
         let records = await Task.detached {
             let cache = ClaudeCredentialCache(readOwned: { _ in nil })
-            return ClaudeCredentialStore.credentialRecords(fileURL: file, cache: cache)
+            return ClaudeCredentialStore.credentialRecords(fileURL: file, cache: cache, service: "fixture") { _ in
+                XCTFail("A malformed provider file is still authoritative"); return .unavailable
+            }
         }.value
         XCTAssertTrue(records.isEmpty)
     }
@@ -493,7 +530,9 @@ final class ClaudeCredentialStoreTests: XCTestCase {
             return nil
         })
         func records() -> [ClaudeCredentialStore.CredentialRecord] {
-            ClaudeCredentialStore.credentialRecords(fileURL: file, cache: cache, reload: true)
+            ClaudeCredentialStore.credentialRecords(fileURL: file, cache: cache, reload: true, service: "fixture") { _ in
+                XCTFail("UI checks must not run the credential subprocess"); return .unavailable
+            }
         }
         XCTAssertFalse(ClaudeCredentialStore.hasCurrentSession(fileURL: file, cache: cache))
         XCTAssertTrue(records().isEmpty)
@@ -526,18 +565,39 @@ final class ClaudeCredentialStoreTests: XCTestCase {
         XCTAssertEqual(result?.data, Data(repeating: 0, count: 262_144))
     }
 
+    func testSecurityRunnerUsesNullInputAndDiscardsStderr() async {
+        let result = await Task.detached {
+            ProviderKeychainReader.run(URL(fileURLWithPath: "/bin/sh"),
+                ["-c", "if IFS= read -r line; then exit 9; fi; printf fixture; printf discarded >&2"], timeout: 3)
+        }.value
+        guard case let .exited(status, data) = result else { return XCTFail("Expected process exit") }
+        XCTAssertEqual(status, 0)
+        XCTAssertEqual(data, Data("fixture".utf8))
+    }
+
+    func testHostedTestsCannotLaunchTheRealSecurityBinary() async {
+        guard ProcessInfo.processInfo.environment["USAGEDOCK_TESTING"] == "1" else {
+            return XCTFail("The test scheme must install the security subprocess guard")
+        }
+        let result = await Task.detached {
+            ProviderKeychainReader.run(URL(fileURLWithPath: "/usr/bin/security"),
+                                       ["find-generic-password", "-s", "fixture", "-w"], timeout: 5)
+        }.value
+        guard case .unavailable = result else { return XCTFail("The test host must block the real binary") }
+    }
+
     func testSecurityRunnerTimesOutAndStopsAnUnresponsiveProcess() async throws {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: file) }
         let start = Date()
         let result = await Task.detached {
-            ProviderKeychainReader.runSecurity(
+            ProviderKeychainReader.run(
                 URL(fileURLWithPath: "/bin/sh"),
                 ["-c", "trap '' TERM; echo $$ > \"$1\"; exec /bin/sleep 30", "fixture", file.path],
                 timeout: 0.3
             )
         }.value
-        XCTAssertNil(result)
+        guard case .timedOut = result else { return XCTFail("Expected timeout") }
         XCTAssertLessThan(Date().timeIntervalSince(start), 2)
         let pidText = try String(contentsOf: file, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
         let pid = try XCTUnwrap(Int32(pidText))
@@ -549,12 +609,18 @@ final class ClaudeCredentialStoreTests: XCTestCase {
     }
 
     func testProfileKeychainServiceUsesNormalizedConfigDirectoryHashPrefix() {
+        XCTAssertEqual(ClaudeCredentialStore.providerKeychainService(
+            credentialPath: ClaudeConfiguration.defaultDirectory.appendingPathComponent(".credentials.json").path
+        ), "Claude Code-credentials")
         XCTAssertEqual(
             ClaudeCredentialStore.keychainServiceName(
                 configDirectory: "/tmp/UsageDock/Profiles/claude/test/.claude"
             ),
             "Claude Code-credentials-fb1ebbbb"
         )
+        XCTAssertEqual(ClaudeCredentialStore.providerKeychainService(
+            credentialPath: "/tmp/UsageDock/Profiles/claude/test/.claude/.credentials.json"
+        ), "Claude Code-credentials-fb1ebbbb")
     }
 
     func testForcedReloadBypassesCacheAndTracksSourceFingerprint() throws {
@@ -607,6 +673,23 @@ final class ClaudeCredentialResolverTests: XCTestCase {
             "claudeAiOauth": ["accessToken": access, "refreshToken": refresh, "expiresAt": expiry]
         ])
         return .init(data: data, target: .init(account: "fixture", sourceFingerprint: UUID().uuidString))
+    }
+
+    func testSourceBecomingUnavailableDuringExpiredTokenRecoveryShowsKeychainWarning() async throws {
+        let expired = try credential(access: "expired-fixture", expiry: 1)
+        var reads = 0
+        let resolver = ClaudeCredentialResolver(records: { _, _ in
+            reads += 1
+            return reads == 1 ? [expired] : []
+        }, runCLI: { _ in XCTFail("Unavailable source must not start recovery"); return .unavailable },
+        now: { Date(timeIntervalSince1970: 10_000) })
+        do {
+            _ = try await resolver.accessToken()
+            XCTFail("An unavailable fresh source must fail")
+        } catch UsageAdapterError.keychainAccessRequired {
+        } catch {
+            XCTFail("Expected a Keychain warning")
+        }
     }
 
     func testExpiredTokenRereadsThenRunsClaudeCLIAndUsesItsSource() async throws {

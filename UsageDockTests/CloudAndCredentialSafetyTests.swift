@@ -1,6 +1,4 @@
 import Foundation
-import LocalAuthentication
-import Security
 import XCTest
 @testable import UsageDock
 
@@ -238,8 +236,9 @@ final class SecureCredentialFileStoreTests: XCTestCase {
         let store = SecureCredentialFileStore(directory: directory)
         let credentialPath = "/fixture/claude/.credentials.json"
         let source = Data(#"{"claudeAiOauth":{"accessToken":"synthetic-access","refreshToken":"synthetic-refresh","expiresAt":4000000000000,"subscriptionType":"max"},"otherSecret":"synthetic-other"}"#.utf8)
+        let cache = ClaudeCredentialCache(readOwned: { _ in nil })
         try ClaudeCredentialStore.importKeychainCredential(source, credentialPath: credentialPath,
-                                                          store: store, now: Date(timeIntervalSince1970: 1000))
+                                                          store: store, now: Date(timeIntervalSince1970: 1000), cache: cache)
         let importedID = "imported:\(ClaudeCredentialStore.providerKeychainService(credentialPath: credentialPath))"
         let saved = try XCTUnwrap(store.read(account: importedID))
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: saved) as? [String: Any])
@@ -250,25 +249,36 @@ final class SecureCredentialFileStoreTests: XCTestCase {
         let mode = try FileManager.default.attributesOfItem(atPath: store.fileURL(account: importedID).path)[.posixPermissions] as? NSNumber
         XCTAssertEqual(mode?.intValue, 0o600)
 
-        let cache = ClaudeCredentialCache(readOwned: { _ in nil })
         let missing = directory.appendingPathComponent("missing-source")
-        let imported = await Task.detached {
-            ClaudeCredentialStore.credentialRecords(fileURL: missing, cache: cache, importedID: importedID,
-                                                     readImported: { store.read(account: importedID) })
+        let service = ClaudeCredentialStore.providerKeychainService(credentialPath: credentialPath)
+        let primed = await Task.detached {
+            ClaudeCredentialStore.credentialRecords(fileURL: missing, cache: cache, service: service, readKeychain: { _ in
+                XCTFail("The successful import should prime the in-memory cache"); return .unavailable
+            })
         }.value
-        XCTAssertEqual(imported.first?.data, saved)
+        XCTAssertEqual(primed.first?.data, source)
+        cache.invalidate(sourceID: "keychain:\(service)")
+        let imported = await Task.detached {
+            ClaudeCredentialStore.credentialRecords(fileURL: missing, cache: cache, service: service,
+                                                     readKeychain: { _ in .unavailable })
+        }.value
+        XCTAssertTrue(imported.isEmpty, "An old imported copy must not hide an unavailable source")
 
         let authoritative = Data(#"{"claudeAiOauth":{"accessToken":"source-wins"}}"#.utf8)
         try authoritative.write(to: missing)
         let sourceRecords = await Task.detached {
             ClaudeCredentialStore.credentialRecords(fileURL: missing, cache: cache, reload: true,
-                                                     importedID: importedID, readImported: { store.read(account: importedID) })
+                                                     service: "fixture", readKeychain: { _ in
+                XCTFail("Existing source is authoritative"); return .unavailable
+            })
         }.value
         XCTAssertEqual(sourceRecords.first?.data, authoritative)
         try Data("malformed".utf8).write(to: missing)
         let malformed = await Task.detached {
             ClaudeCredentialStore.credentialRecords(fileURL: missing, cache: cache, reload: true,
-                                                     importedID: importedID, readImported: { XCTFail("Existing source is authoritative"); return nil })
+                                                     service: "fixture", readKeychain: { _ in
+                XCTFail("Existing source is authoritative"); return .unavailable
+            })
         }.value
         XCTAssertTrue(malformed.isEmpty)
     }
@@ -302,22 +312,28 @@ final class SecureCredentialFileStoreTests: XCTestCase {
 
 @MainActor
 final class KeychainWarningTests: XCTestCase {
-    func testExplicitProbeDisablesInteractionWithoutCallingSecurity() {
-        let result = ClaudeKeychainProbe.check(service: "fixture") { query, _ in
-            let dictionary = query as NSDictionary
-            let context = dictionary[kSecUseAuthenticationContext] as? LAContext
-            XCTAssertEqual(context?.interactionNotAllowed, true)
-            XCTAssertEqual(dictionary[kSecAttrService] as? String, "fixture")
-            return errSecInteractionNotAllowed
+    func testProbeUsesReadOnlySecurityCommandAndFiveSecondTimeout() {
+        let data = Data("synthetic".utf8)
+        let result = ClaudeKeychainProbe.check(service: "Claude Code-credentials-fixture") { executable, arguments, timeout in
+            XCTAssertEqual(executable.path, "/usr/bin/security")
+            XCTAssertEqual(arguments, ["find-generic-password", "-s", "Claude Code-credentials-fixture", "-w"])
+            XCTAssertEqual(timeout, 5)
+            return .exited(status: 0, data: data)
         }
-        XCTAssertEqual(result.status, errSecInteractionNotAllowed)
-        XCTAssertNil(result.data)
+        XCTAssertEqual(result, .success(data))
     }
 
     func testInteractionStatusesAndRateLimit() {
-        XCTAssertTrue(ClaudeKeychainProbe.requiresInteraction(errSecInteractionNotAllowed))
-        XCTAssertTrue(ClaudeKeychainProbe.requiresInteraction(errSecAuthFailed))
-        XCTAssertFalse(ClaudeKeychainProbe.requiresInteraction(errSecItemNotFound))
+        for status: Int32 in [36, 51, 128] {
+            XCTAssertEqual(ClaudeKeychainProbe.check(service: "fixture") { _, _, _ in
+                .exited(status: status, data: Data())
+            }, .interactionRequired)
+        }
+        XCTAssertEqual(ClaudeKeychainProbe.check(service: "fixture") { _, _, _ in .timedOut }, .interactionRequired)
+        XCTAssertEqual(ClaudeKeychainProbe.check(service: "fixture") { _, _, _ in
+            .exited(status: 44, data: Data())
+        }, .unavailable)
+        XCTAssertEqual(ClaudeKeychainProbe.check(service: "fixture") { _, _, _ in .unavailable }, .unavailable)
         let suite = "KeychainWarningTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -346,8 +362,8 @@ final class KeychainWarningTests: XCTestCase {
         let store = UsageStore(defaults: defaults, claudeLoginOpener: opener, usageFetcher: { _ in
             throw UsageAdapterError.keychainAccessRequired
         }, keychainWarningNotifier: notifier, keychainProbe: { _ in
-            XCTFail("Background refresh must not query Keychain")
-            return .init(status: errSecAuthFailed, data: nil)
+            XCTFail("Background refresh must not use the explicit import callback")
+            return .unavailable
         })
         let account = UsageAccount(provider: .claude, name: "Claude", source: .profile, buckets: [])
         store.accounts = [account]
@@ -357,14 +373,53 @@ final class KeychainWarningTests: XCTestCase {
         XCTAssertNotNil(store.refreshFailureLabel(for: .account(id: account.id, provider: .claude)))
     }
 
+    func testBackgroundInteractionFailuresWarnAndShareNotificationRateLimit() async {
+        let suite = "KeychainWarningTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var notifications = 0
+        let notifier = KeychainWarningNotifier(defaults: defaults, requestAuthorization: { $0(true) }, deliver: { notifications += 1 })
+        let failures: [ProviderKeychainReader.Result] = [
+            .exited(status: 36, data: Data()), .exited(status: 51, data: Data()),
+            .exited(status: 128, data: Data()), .timedOut
+        ]
+        for failure in failures {
+            let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            let cache = ClaudeCredentialCache(readOwned: { _ in nil })
+            let resolver = ClaudeCredentialResolver(records: { _, reload in
+                ClaudeCredentialStore.credentialRecords(fileURL: file, cache: cache, reload: reload, service: "fixture") { service in
+                    ClaudeKeychainProbe.check(service: service) { _, _, _ in failure }
+                }
+            })
+            let opener = SafetyLoginOpener()
+            let store = UsageStore(defaults: defaults, claudeLoginOpener: opener, usageFetcher: { account in
+                _ = try await resolver.accessToken(credentialPath: file.path)
+                return account
+            }, keychainWarningNotifier: notifier)
+            let account = UsageAccount(provider: .claude, name: "Claude", source: .profile,
+                                       credentialPath: file.path, buckets: [])
+            store.accounts = [account]
+            await store.refreshProvider(.claude)
+            XCTAssertTrue(store.claudeKeychainWarningIDs.contains(account.id))
+            XCTAssertEqual(opener.calls, 0)
+        }
+        XCTAssertEqual(notifications, 1)
+    }
+
     func testExplicitProbeFailureNotifiesAndMarksOnlyThatAccount() async {
         let suite = "KeychainWarningTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         var notifications = 0
         let notifier = KeychainWarningNotifier(defaults: defaults, requestAuthorization: { $0(true) }, deliver: { notifications += 1 })
-        let store = UsageStore(defaults: defaults, keychainWarningNotifier: notifier,
-                               keychainProbe: { _ in .init(status: errSecAuthFailed, data: nil) })
+        let store = UsageStore(defaults: defaults, keychainWarningNotifier: notifier, keychainProbe: { service in
+            ClaudeKeychainProbe.check(service: service) { executable, arguments, timeout in
+                XCTAssertEqual(executable.path, "/usr/bin/security")
+                XCTAssertEqual(arguments, ["find-generic-password", "-s", service, "-w"])
+                XCTAssertEqual(timeout, 5)
+                return .exited(status: 36, data: Data())
+            }
+        })
         let account = UsageAccount(provider: .claude, name: "Claude", source: .profile,
                                    credentialPath: "/fixture/.claude/.credentials.json", buckets: [])
         store.accounts = [account]
@@ -380,7 +435,9 @@ final class KeychainWarningTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let fixture = Data("synthetic-data".utf8)
         var imports = 0
-        let store = UsageStore(defaults: defaults, keychainProbe: { _ in .init(status: errSecSuccess, data: fixture) },
+        let store = UsageStore(defaults: defaults, keychainProbe: { service in
+            ClaudeKeychainProbe.check(service: service) { _, _, _ in .exited(status: 0, data: fixture) }
+        },
                                importClaudeCredential: { data, path in
             XCTAssertEqual(data, fixture)
             XCTAssertNil(path)
@@ -397,7 +454,7 @@ final class KeychainWarningTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = UsageStore(defaults: defaults, keychainProbe: { _ in
             XCTFail("Missing profile must not query the default Keychain")
-            return .init(status: errSecSuccess, data: nil)
+            return .unavailable
         })
         let account = UsageAccount(provider: .claude, name: "Missing", source: .profile, buckets: [])
         store.accounts = [account]

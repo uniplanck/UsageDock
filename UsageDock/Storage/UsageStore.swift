@@ -1383,7 +1383,7 @@ final class UsageStore: ObservableObject {
         isRefreshing = true
         defer { isRefreshing = false }
 
-        // Discover file-backed logins outside view evaluation.
+        // Discover local logins outside view evaluation.
         hasClaudeLocalLogin = await Task.detached(priority: .utility) {
             !ClaudeCredentialStore.credentialRecords().isEmpty
         }.value
@@ -1747,7 +1747,7 @@ final class UsageStore: ObservableObject {
         defaults.set(true, forKey: Self.cloudMigrationKey)
     }
 
-    /// Invoked only by the Settings buttons; the probe's LAContext cannot show UI.
+    /// Invoked only by the Settings buttons; the same bounded CLI reader is used by refresh.
     func importClaudeKeychain(for account: UsageAccount, registerOnSuccess: Bool = false) async {
         guard account.provider == .claude else { return }
         let credentialPath = ClaudeConfiguration.credentialPath(for: account)
@@ -1763,7 +1763,7 @@ final class UsageStore: ObservableObject {
                   current.source == account.source,
                   ClaudeConfiguration.credentialPath(for: current) == credentialPath else { return }
         }
-        if ClaudeKeychainProbe.requiresInteraction(result.status) {
+        if case .interactionRequired = result {
             let message = "キーチェーンへのアクセスは対話が必要です。資格情報ファイルを確認してください。"
             if registerOnSuccess {
                 refreshStates[.claude] = .failed(message)
@@ -1772,7 +1772,7 @@ final class UsageStore: ObservableObject {
                 claudeKeychainCheckMessages[account.id] = message
             }
             keychainWarningNotifier.warn()
-        } else if result.status == errSecSuccess, let data = result.data {
+        } else if case let .success(data) = result {
             do {
                 try importClaudeCredential(data, credentialPath)
                 await ClaudeCredentialResolver.shared.credentialWasImported(credentialPath: credentialPath)

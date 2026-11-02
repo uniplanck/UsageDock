@@ -1,34 +1,29 @@
 import Foundation
-import LocalAuthentication
-import Security
 import UserNotifications
 
 enum ClaudeKeychainProbe {
-    struct Result {
-        let status: OSStatus
-        let data: Data?
+    enum Result: Equatable {
+        case success(Data)
+        case interactionRequired
+        case unavailable
     }
 
-    /// Called only by the explicit Settings button. Authentication UI is
-    /// forbidden even there; the caller can persist only a minimal access copy.
-    static func check(service: String,
-                      copyMatching: (CFDictionary, UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus = SecItemCopyMatching) -> Result {
-        let context = LAContext()
-        context.interactionNotAllowed = true
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecReturnData: true,
-            kSecMatchLimit: kSecMatchLimitOne,
-            kSecUseAuthenticationContext: context
-        ]
-        var item: CFTypeRef?
-        let status = copyMatching(query as CFDictionary, &item)
-        return Result(status: status, data: status == errSecSuccess ? item as? Data : nil)
-    }
-
-    static func requiresInteraction(_ status: OSStatus) -> Bool {
-        status == errSecInteractionNotAllowed || status == errSecAuthFailed
+    /// Use the same read-only CLI path for refresh and explicit import. The
+    /// runner is injectable so tests never need the real Keychain binary.
+    static func check(
+        service: String,
+        run: (URL, [String], TimeInterval) -> ProviderKeychainReader.Result = {
+            ProviderKeychainReader.run($0, $1, timeout: $2)
+        }
+    ) -> Result {
+        let result = run(URL(fileURLWithPath: "/usr/bin/security"),
+                         ["find-generic-password", "-s", service, "-w"], 5)
+        switch result {
+        case .exited(status: 0, data: let data): return .success(data)
+        case .exited(status: 36, data: _), .exited(status: 51, data: _),
+             .exited(status: 128, data: _), .timedOut: return .interactionRequired
+        case .exited, .unavailable: return .unavailable
+        }
     }
 }
 
