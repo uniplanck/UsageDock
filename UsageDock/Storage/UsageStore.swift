@@ -1,11 +1,13 @@
 import AppKit
 import Combine
 import Foundation
+import Security
 import WebKit
 
 @MainActor
 final class UsageStore: ObservableObject {
     private static let accountsKey = "UsageDock.accounts.v3"
+    private static let cloudMigrationKey = "UsageDock.kimiCloudMigration.v1"
     private static let fusionProvidersKey = "UsageDock.fusionProviders.v1"
     private static let presentationModeKey = "UsageDock.presentationMode.v1"
     private static let railScaleKey = "UsageDock.railScale.v1"
@@ -375,16 +377,25 @@ final class UsageStore: ObservableObject {
     @Published private var kimiDuplicateAccountIDs: [UUID: UUID] = [:]
     @Published private(set) var isRefreshing = false
     @Published private(set) var hasClaudeLocalLogin = false
+    @Published private(set) var claudeKeychainWarningIDs: Set<UUID> = []
+    @Published private(set) var claudeKeychainCheckMessages: [UUID: String] = [:]
     @Published var settingsBubblePreviewRequested = false
 
     private let defaults: UserDefaults
     private let appLocator: any ProviderAppLocating
     private let targetOpener: any ProviderTargetOpening
     private let claudeLoginOpener: any ClaudeLoginOpening
+    private let profileLoginLauncher: (ProviderID, Int) throws -> UsageAccount
     private let now: () -> Date
     private let usageFetcher: ((UsageAccount) async throws -> UsageAccount)?
     private let kimiUsageFetcher: ((String?) async throws -> KimiUsageFetch)?
     private let kimiIdentityReader: ((String?) -> Set<String>?)?
+    private let cloudConfigURL: URL?
+    private let cloudUsageFetcher: (URL) async throws -> CloudKimiSnapshot.Outcome
+    private let keychainWarningNotifier: KeychainWarningNotifier
+    private let keychainProbe: (String) -> ClaudeKeychainProbe.Result
+    private let importClaudeCredential: (Data, String?) throws -> Void
+    private var freshCloudAccountIDs: Set<UUID> = []
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var autoRefreshTask: Task<Void, Never>?
@@ -410,12 +421,29 @@ final class UsageStore: ObservableObject {
         now: @escaping () -> Date = Date.init,
         usageFetcher: ((UsageAccount) async throws -> UsageAccount)? = nil,
         kimiUsageFetcher: ((String?) async throws -> KimiUsageFetch)? = nil,
-        kimiIdentityReader: ((String?) -> Set<String>?)? = nil
+        kimiIdentityReader: ((String?) -> Set<String>?)? = nil,
+        cloudConfigURL: URL? = nil,
+        cloudUsageFetcher: ((URL) async throws -> CloudKimiSnapshot.Outcome)? = nil,
+        keychainWarningNotifier: KeychainWarningNotifier? = nil,
+        keychainProbe: ((String) -> ClaudeKeychainProbe.Result)? = nil,
+        importClaudeCredential: ((Data, String?) throws -> Void)? = nil,
+        profileLoginLauncher: ((ProviderID, Int) throws -> UsageAccount)? = nil
     ) {
         self.defaults = defaults
+        let isTesting = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        self.cloudConfigURL = cloudConfigURL ?? (isTesting ? nil : CloudKimiSnapshot.defaultConfigURL)
+        self.cloudUsageFetcher = cloudUsageFetcher ?? { try await CloudKimiSnapshot.fetch(configURL: $0) }
+        self.keychainWarningNotifier = keychainWarningNotifier ?? (isTesting
+            ? KeychainWarningNotifier(defaults: defaults, requestAuthorization: { _ in }, deliver: {})
+            : KeychainWarningNotifier(defaults: defaults))
+        self.keychainProbe = keychainProbe ?? { ClaudeKeychainProbe.check(service: $0) }
+        self.importClaudeCredential = importClaudeCredential ?? {
+            try ClaudeCredentialStore.importKeychainCredential($0, credentialPath: $1)
+        }
         self.appLocator = appLocator ?? WorkspaceProviderAppLocator()
         self.targetOpener = targetOpener ?? WorkspaceProviderTargetOpener()
         self.claudeLoginOpener = claudeLoginOpener ?? TerminalClaudeLoginOpener()
+        self.profileLoginLauncher = profileLoginLauncher ?? { try UsageProfileLoginLauncher.launch(provider: $0, ordinal: $1) }
         self.now = now
         self.usageFetcher = usageFetcher
         self.kimiUsageFetcher = kimiUsageFetcher
@@ -573,6 +601,8 @@ final class UsageStore: ObservableObject {
             accounts = []
         }
 
+        ensureCloudKimiAccount()
+
         normalizeDisplayAccountSelection()
         normalizeMenuBarAccountSelection()
         persistAccounts()
@@ -593,6 +623,15 @@ final class UsageStore: ObservableObject {
     }
 
     private func displayAccount(_ account: UsageAccount) -> UsageAccount {
+        if account.source == .cloudSnapshot && isAccountStale(account) {
+            var copy = account
+            copy.buckets = copy.buckets.map { bucket in
+                var value = bucket
+                if let reset = value.resetsAt, reset <= now() { value.resetsAt = nil }
+                return value
+            }
+            return copy
+        }
         guard isClaudeAuthenticationFailed(account) else { return account }
         var copy = account
         copy.buckets = copy.buckets.map { bucket in
@@ -613,7 +652,7 @@ final class UsageStore: ObservableObject {
     func displaySelectableAccounts() -> [UsageAccount] {
         runtimeAccounts.filter { account in
             guard account.isEnabled else { return false }
-            return UsageDockDistributionPolicy.isPublicLoginSource(account.source)
+            return UsageDockDistributionPolicy.isAccountVisible(account)
         }
     }
 
@@ -769,6 +808,12 @@ final class UsageStore: ObservableObject {
             if case .account(let id, _) = target { return account.id == id }
             return true
         }
+        if contributors.contains(where: { claudeKeychainWarningIDs.contains($0.id) }) {
+            return "⚠︎ キーチェーンを確認してください"
+        }
+        if contributors.contains(where: { $0.source == .cloudSnapshot && isAccountStale($0) }) {
+            return "クラウド未取得"
+        }
         let labels = contributors.compactMap { accountRefreshState(for: $0.id).failureLabel }
         let key = labels.first(where: { $0 == "Refresh failed – sign in again" }) ?? labels.first
         return key.map { appLanguage.localized($0) }
@@ -889,7 +934,8 @@ final class UsageStore: ObservableObject {
     private func updateKimiDuplicateAccounts() async {
         guard let kimiIdentityReader else { return }
         let candidates: [(id: UUID, path: String?)] = accounts.compactMap { account in
-            guard account.provider == .kimi, UsageDockDistributionPolicy.isAccountVisible(account) else { return nil }
+            guard account.provider == .kimi, account.source != .cloudSnapshot,
+                  UsageDockDistributionPolicy.isAccountVisible(account) else { return nil }
             do { return (account.id, try KimiCredentialResolver.credentialPath(for: account)) }
             catch { return nil }
         }
@@ -1155,7 +1201,7 @@ final class UsageStore: ObservableObject {
         }
         let ordinal = accounts.filter { $0.provider == provider && $0.source == .profile }.count + 1
         do {
-            let account = try UsageProfileLoginLauncher.launch(provider: provider, ordinal: ordinal)
+            let account = try profileLoginLauncher(provider, ordinal)
             if provider == .antigravity,
                let existing = accounts.firstIndex(where: { $0.provider == .antigravity && $0.source == .currentSession }) {
                 accounts[existing].isEnabled = true
@@ -1196,6 +1242,9 @@ final class UsageStore: ObservableObject {
         accounts.removeAll { $0.id == id }
         accountRefreshStates[id] = nil
         claudeAuthFailures.remove(id)
+        claudeKeychainWarningIDs.remove(id)
+        claudeKeychainCheckMessages[id] = nil
+        freshCloudAccountIDs.remove(id)
         multiplierDetectionStates[id] = nil
         if displayAccountIDs.contains(id) {
             displayAccountIDs.removeAll { $0 == id }
@@ -1329,12 +1378,12 @@ final class UsageStore: ObservableObject {
     }
 
     func refreshLiveUsage(manual: Bool = true) async {
+        ensureCloudKimiAccount()
         guard !isRefreshing else { return }
         isRefreshing = true
         defer { isRefreshing = false }
 
-        // Discover Keychain-only logins outside view evaluation, even before the
-        // first account is registered. Publishing the result enables the UI check.
+        // Discover file-backed logins outside view evaluation.
         hasClaudeLocalLogin = await Task.detached(priority: .utility) {
             !ClaudeCredentialStore.credentialRecords().isEmpty
         }.value
@@ -1352,6 +1401,10 @@ final class UsageStore: ObservableObject {
 
     func accountRefreshState(for accountID: UUID) -> AccountRefreshState {
         let state = accountRefreshStates[accountID] ?? .idle
+        if accounts.contains(where: { $0.id == accountID && $0.source == .cloudSnapshot }),
+           !freshCloudAccountIDs.contains(accountID) {
+            return .failed("クラウド未取得")
+        }
         if claudeAuthFailures.contains(accountID), state.requiresSignIn { return state }
         // A long backoff can cross the stale threshold without another request.
         if state != .refreshing,
@@ -1360,6 +1413,10 @@ final class UsageStore: ObservableObject {
             return .failure(error)
         }
         return state
+    }
+
+    func isAccountStale(_ account: UsageAccount) -> Bool {
+        accountRefreshState(for: account.id).isStale
     }
 
     func statusText(for provider: ProviderID) -> String {
@@ -1382,6 +1439,8 @@ final class UsageStore: ObservableObject {
     }
 
     func accountStatusText(for account: UsageAccount) -> String {
+        if account.source == .cloudSnapshot && isAccountStale(account) { return "クラウド未取得" }
+        if claudeKeychainWarningIDs.contains(account.id) { return "キーチェーンを確認してください" }
         if account.source == nil || account.source == .legacyUnsupported {
             return "Not connected"
         }
@@ -1446,7 +1505,17 @@ final class UsageStore: ObservableObject {
             do {
                 let fetched: UsageAccount
                 var webNotice: String?
-                if let usageFetcher {
+                if account.source == .cloudSnapshot {
+                    guard provider == .kimi, let configURL = cloudConfigURL else { throw CloudKimiSnapshot.Failure.unavailable }
+                    let outcome = try await cloudUsageFetcher(configURL)
+                    if !outcome.isFresh {
+                        if account.buckets.isEmpty, let index = accounts.firstIndex(where: { $0.id == accountID }) {
+                            accounts[index].buckets = outcome.buckets
+                        }
+                        throw CloudKimiSnapshot.Failure.unavailable
+                    }
+                    fetched = UsageAccount(provider: .kimi, name: "Vivace", buckets: outcome.buckets)
+                } else if let usageFetcher {
                     fetched = try await usageFetcher(account)
                 } else {
                     switch provider {
@@ -1511,14 +1580,24 @@ final class UsageStore: ObservableObject {
                     firstAttemptAt: startedAt, lastAttemptAt: startedAt, lastSuccessAt: now
                 )
                 claudeAuthFailures.remove(accountID)
+                claudeKeychainWarningIDs.remove(accountID)
+                if account.source == .cloudSnapshot { freshCloudAccountIDs.insert(accountID) }
                 if let webNotice {
                     accountRefreshStates[accountID] = .degraded(now, webNotice)
                 } else {
                     accountRefreshStates[accountID] = .live(now)
                 }
             } catch {
+                if account.source == .cloudSnapshot { freshCloudAccountIDs.remove(accountID) }
+                if case UsageAdapterError.keychainAccessRequired = error, account.provider == .claude {
+                    claudeKeychainWarningIDs.insert(accountID)
+                    keychainWarningNotifier.warn()
+                }
                 if recordRefreshFailure(error, for: accountID), account.provider == .claude {
                     autoOpenClaudeLoginIfNeeded(for: account)
+                }
+                if account.source == .cloudSnapshot || claudeKeychainWarningIDs.contains(accountID) {
+                    accountRefreshStates[accountID] = .failed(error.localizedDescription)
                 }
             }
         }
@@ -1638,9 +1717,93 @@ final class UsageStore: ObservableObject {
     }
 
     private static func migratedAccounts(_ existing: [UsageAccount]) -> [UsageAccount] {
-        // Persist only authenticated login-backed records. Older unsupported source values
-        // decode as legacyUnsupported and are discarded without affecting valid accounts.
+        // Older unsupported source values decode as legacyUnsupported and are
+        // discarded without affecting valid login or cloud accounts.
         existing.filter(UsageDockDistributionPolicy.isAccountVisible)
+    }
+
+    private func ensureCloudKimiAccount() {
+        guard let configURL = cloudConfigURL,
+              FileManager.default.fileExists(atPath: configURL.path),
+              !defaults.bool(forKey: Self.cloudMigrationKey) else { return }
+        var migrated = accounts
+        let existingCloud = migrated.firstIndex { $0.provider == .kimi && $0.source == .cloudSnapshot }
+        let oldVivace = migrated.firstIndex {
+            $0.provider == .kimi && $0.name.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare("Vivace") == .orderedSame
+        }
+        var cloud: UsageAccount
+        if let index = existingCloud ?? oldVivace {
+            cloud = migrated.remove(at: index)
+            cloud.name = "Vivace"
+            cloud.source = .cloudSnapshot
+            cloud.credentialPath = nil
+            cloud.profileHomePath = nil
+            cloud.buckets = cloud.buckets.filter { $0.quotaID == "kimi-300" || $0.quotaID == "kimi-weekly" }
+        } else {
+            cloud = UsageAccount(provider: .kimi, name: "Vivace", source: .cloudSnapshot, buckets: [])
+        }
+        migrated.insert(cloud, at: migrated.firstIndex(where: { $0.provider == .kimi }) ?? migrated.endIndex)
+        accounts = migrated
+        defaults.set(true, forKey: Self.cloudMigrationKey)
+    }
+
+    /// Invoked only by the Settings buttons; the probe's LAContext cannot show UI.
+    func importClaudeKeychain(for account: UsageAccount, registerOnSuccess: Bool = false) async {
+        guard account.provider == .claude else { return }
+        let credentialPath = ClaudeConfiguration.credentialPath(for: account)
+        if account.source == .profile && credentialPath == nil {
+            claudeKeychainCheckMessages[account.id] = "プロフィールの保存先を確認できません。"
+            return
+        }
+        let service = ClaudeCredentialStore.providerKeychainService(credentialPath: credentialPath)
+        let probe = keychainProbe
+        let result = await Task.detached(priority: .utility) { probe(service) }.value
+        if !registerOnSuccess {
+            guard let current = accounts.first(where: { $0.id == account.id }),
+                  current.source == account.source,
+                  ClaudeConfiguration.credentialPath(for: current) == credentialPath else { return }
+        }
+        if ClaudeKeychainProbe.requiresInteraction(result.status) {
+            let message = "キーチェーンへのアクセスは対話が必要です。資格情報ファイルを確認してください。"
+            if registerOnSuccess {
+                refreshStates[.claude] = .failed(message)
+            } else {
+                claudeKeychainWarningIDs.insert(account.id)
+                claudeKeychainCheckMessages[account.id] = message
+            }
+            keychainWarningNotifier.warn()
+        } else if result.status == errSecSuccess, let data = result.data {
+            do {
+                try importClaudeCredential(data, credentialPath)
+                await ClaudeCredentialResolver.shared.credentialWasImported(credentialPath: credentialPath)
+                var importedAccountID = account.id
+                if registerOnSuccess && !accounts.contains(where: { $0.provider == .claude && $0.source == .currentSession }) {
+                    accounts.append(account)
+                } else if registerOnSuccess, let existing = accounts.first(where: { $0.provider == .claude && $0.source == .currentSession }) {
+                    importedAccountID = existing.id
+                }
+                claudeKeychainWarningIDs.remove(importedAccountID)
+                claudeAuthFailures.remove(importedAccountID)
+                refreshHistory[importedAccountID] = nil
+                claudeKeychainCheckMessages[importedAccountID] = "取り込みました。更新して使用量を確認してください。"
+                refreshStates[.claude] = .idle
+            } catch {
+                let message = "有効な資格情報を保存できません。Claude Code でログインを確認してください。"
+                if registerOnSuccess { refreshStates[.claude] = .failed(message) }
+                else { claudeKeychainCheckMessages[account.id] = message }
+            }
+        } else {
+            let message = "キーチェーン項目を取得できません。資格情報ファイルを確認してください。"
+            if registerOnSuccess { refreshStates[.claude] = .failed(message) }
+            else { claudeKeychainCheckMessages[account.id] = message }
+        }
+    }
+
+    func importClaudeCurrentSession() async {
+        let existing = accounts.first { $0.provider == .claude && $0.source == .currentSession }
+        let account = existing ?? UsageAccount(provider: .claude, name: "Local Login", source: .currentSession,
+                                                planMultiplier: 1, multiplierMode: .manual, buckets: [])
+        await importClaudeKeychain(for: account, registerOnSuccess: existing == nil)
     }
 
     private func persistAccounts() {
@@ -1776,6 +1939,8 @@ enum DisplayAccountPolicy {
     ) -> DisplayAccountAuthState {
         guard account.isEnabled else { return .required }
         switch account.source {
+        case .cloudSnapshot:
+            return .valid
         case .currentSession, .profile:
             break
         case .legacyUnsupported, nil:

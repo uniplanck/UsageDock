@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AC0000000000000000000001 /* CloudKimiSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC0000000000000000000011 /* CloudKimiSnapshot.swift */; };
+		AC0000000000000000000002 /* ClaudeKeychainWarning.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC0000000000000000000012 /* ClaudeKeychainWarning.swift */; };
+		AC0000000000000000000003 /* SecureCredentialFileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC0000000000000000000013 /* SecureCredentialFileStore.swift */; };
+		AC0000000000000000000004 /* CloudAndCredentialSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC0000000000000000000014 /* CloudAndCredentialSafetyTests.swift */; };
 		A1F180000000000000000001 /* ResetCountdownFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F180000000000000000002 /* ResetCountdownFormatter.swift */; };
 		A1F180000000000000000003 /* ResetCountdownFormatterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F180000000000000000004 /* ResetCountdownFormatterTests.swift */; };
 		2946E77204F8EAFAD62A3AA4 /* SettingsWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E45B33B556BF9E1CDA647B25 /* SettingsWindowController.swift */; };
@@ -46,6 +50,10 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		AC0000000000000000000011 /* CloudKimiSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudKimiSnapshot.swift; sourceTree = "<group>"; };
+		AC0000000000000000000012 /* ClaudeKeychainWarning.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeKeychainWarning.swift; sourceTree = "<group>"; };
+		AC0000000000000000000013 /* SecureCredentialFileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureCredentialFileStore.swift; sourceTree = "<group>"; };
+		AC0000000000000000000014 /* CloudAndCredentialSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudAndCredentialSafetyTests.swift; sourceTree = "<group>"; };
 		A1F180000000000000000002 /* ResetCountdownFormatter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResetCountdownFormatter.swift; sourceTree = "<group>"; };
 		A1F180000000000000000004 /* ResetCountdownFormatterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResetCountdownFormatterTests.swift; sourceTree = "<group>"; };
 		0C7D4A83F9D54646B9A3FA3D /* RailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RailView.swift; sourceTree = "<group>"; };
@@ -104,6 +112,7 @@
 		281F4ED660885E32FF9B7A0E /* Storage */ = {
 			isa = PBXGroup;
 			children = (
+				AC0000000000000000000013 /* SecureCredentialFileStore.swift */,
 				E28006DC6285DC5F3407905A /* PlacementStore.swift */,
 				F7C66B45F92CA22A9B2E851E /* UsageStore.swift */,
 			);
@@ -113,6 +122,7 @@
 		45F36EB0F1D171BBD695AD79 /* UsageDockTests */ = {
 			isa = PBXGroup;
 			children = (
+				AC0000000000000000000014 /* CloudAndCredentialSafetyTests.swift */,
 				A1F180000000000000000004 /* ResetCountdownFormatterTests.swift */,
 				45987E59A5D44BD7D0841930 /* ProviderOpenTargetTests.swift */,
 				E6B7F6D8CE9C258C20073993 /* UsageDockTests.swift */,
@@ -154,6 +164,8 @@
 		C880AC56141FCD4F5F7A2AF5 /* Providers */ = {
 			isa = PBXGroup;
 			children = (
+				AC0000000000000000000011 /* CloudKimiSnapshot.swift */,
+				AC0000000000000000000012 /* ClaudeKeychainWarning.swift */,
 				C4E0A11B0C0D0E0F10111213 /* GrokWebCredits.swift */,
 				C4E0A11B0C0D0E0F10111214 /* GrokWebSession.swift */,
 				E9541F70F7A01071B8AA2068 /* LiveUsageAdapters.swift */,
@@ -277,6 +289,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AC0000000000000000000004 /* CloudAndCredentialSafetyTests.swift in Sources */,
 				A1F180000000000000000003 /* ResetCountdownFormatterTests.swift in Sources */,
 				783F082854674C7BEF87792B /* UsageDockTests.swift in Sources */,
 				B82FE277B084AE83B84EA3E1 /* ProviderOpenTargetTests.swift in Sources */,
@@ -287,6 +300,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AC0000000000000000000001 /* CloudKimiSnapshot.swift in Sources */,
+				AC0000000000000000000002 /* ClaudeKeychainWarning.swift in Sources */,
+				AC0000000000000000000003 /* SecureCredentialFileStore.swift in Sources */,
 				A1F180000000000000000001 /* ResetCountdownFormatter.swift in Sources */,
 				D51083D41F225E0C1EECA76E /* DockPanelController.swift in Sources */,
 				BE88A31695D8174E11896425 /* HoverDetailPanelController.swift in Sources */,

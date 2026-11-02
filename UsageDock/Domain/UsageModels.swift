@@ -133,6 +133,7 @@ struct UsageBucket: Identifiable, Codable, Hashable {
 enum UsageAccountSource: String, Codable, Hashable {
     case currentSession
     case profile
+    case cloudSnapshot
     case legacyUnsupported
 
     init(from decoder: Decoder) throws {
@@ -153,7 +154,7 @@ enum UsageDockDistributionPolicy {
     }
 
     static func isAccountVisible(_ account: UsageAccount) -> Bool {
-        isPublicLoginSource(account.source)
+        isPublicLoginSource(account.source) || (account.provider == .kimi && account.source == .cloudSnapshot)
     }
 }
 

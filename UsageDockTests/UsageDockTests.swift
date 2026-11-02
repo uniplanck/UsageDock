@@ -398,31 +398,6 @@ final class HTTPUsageResponseValidatorTests: XCTestCase {
 }
 
 final class ClaudeCredentialStoreTests: XCTestCase {
-    func testProviderReadUsesSecurityWithoutShellOrSecretArguments() throws {
-        let service = "Claude Code-credentials-profile with spaces;$(ignored)"
-        let payload = ProviderKeychainReader.payload(service: service) { executable, arguments in
-            XCTAssertEqual(executable.path, "/usr/bin/security")
-            XCTAssertEqual(arguments, ["find-generic-password", "-s", service, "-w"])
-            return (0, Data(" {\"fixture\":true}\n".utf8))
-        }
-        XCTAssertEqual(payload, Data(" {\"fixture\":true}".utf8))
-    }
-
-    func testProviderReadDiscardsFailureOutputAndEmptyPasswords() {
-        XCTAssertNil(ProviderKeychainReader.payload(service: "fixture") { _, _ in
-            (44, Data("sensitive failure output".utf8))
-        })
-        XCTAssertNil(ProviderKeychainReader.payload(service: "fixture") { _, _ in (0, Data([0x0A])) })
-        XCTAssertNil(ProviderKeychainReader.payload(service: "fixture") { _, _ in nil })
-    }
-
-    func testNativeQueriesOnlyTargetUsageDockAndDisableAuthenticationUI() {
-        let query = UsageDockClaudeKeychain.query(account: "keychain:Claude Code-credentials")
-        XCTAssertEqual(query[kSecAttrService] as? String, "com.uniplanck.UsageDock.ClaudeCredentials")
-        XCTAssertEqual(query[kSecAttrAccount] as? String, "keychain:Claude Code-credentials")
-        XCTAssertEqual(query[kSecUseAuthenticationUI] as? String, kSecUseAuthenticationUIFail as String)
-    }
-
     func testSourceReadMayReenterTheCacheWithoutDeadlock() async {
         let completed = expectation(description: "Reentrant source read returns")
         DispatchQueue.global().async {
@@ -483,39 +458,30 @@ final class ClaudeCredentialStoreTests: XCTestCase {
         try data.write(to: file)
         let records = await Task.detached {
             let cache = ClaudeCredentialCache(readOwned: { _ in nil })
-            return ClaudeCredentialStore.credentialRecords(fileURL: file, service: "fixture", cache: cache) { _ in
-                XCTFail("A usable credentials file must not prompt for provider Keychain")
-                return nil
-            }
+            return ClaudeCredentialStore.credentialRecords(fileURL: file, cache: cache)
         }.value
         XCTAssertEqual(records.map(\.data), [data])
         XCTAssertEqual(records.first?.target.account, "file:\(file.standardizedFileURL.path)")
     }
 
-    func testMissingCredentialFileFallsBackToProviderKeychain() async {
+    func testMissingCredentialFileDoesNotReadProviderKeychain() async {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let records = await Task.detached {
             let cache = ClaudeCredentialCache(readOwned: { _ in nil })
-            return ClaudeCredentialStore.credentialRecords(fileURL: file, service: "fixture", cache: cache) { service in
-                XCTAssertEqual(service, "fixture")
-                return Data("keychain-fixture".utf8)
-            }
+            return ClaudeCredentialStore.credentialRecords(fileURL: file, cache: cache)
         }.value
-        XCTAssertEqual(records.map(\.data), [Data("keychain-fixture".utf8)])
-        XCTAssertEqual(records.first?.target.account, "keychain:fixture")
+        XCTAssertTrue(records.isEmpty)
     }
 
-    func testMalformedCredentialFileFallsBackToProviderKeychain() async throws {
+    func testMalformedCredentialFileDoesNotReadProviderKeychain() async throws {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: file) }
         try Data("malformed fixture".utf8).write(to: file)
         let records = await Task.detached {
             let cache = ClaudeCredentialCache(readOwned: { _ in nil })
-            return ClaudeCredentialStore.credentialRecords(fileURL: file, service: "fixture", cache: cache) { _ in
-                Data("keychain-fixture".utf8)
-            }
+            return ClaudeCredentialStore.credentialRecords(fileURL: file, cache: cache)
         }.value
-        XCTAssertEqual(records.map(\.data), [Data("keychain-fixture".utf8)])
+        XCTAssertTrue(records.isEmpty)
     }
 
     @MainActor
@@ -527,25 +493,19 @@ final class ClaudeCredentialStoreTests: XCTestCase {
             return nil
         })
         func records() -> [ClaudeCredentialStore.CredentialRecord] {
-            ClaudeCredentialStore.credentialRecords(fileURL: file, service: "fixture", cache: cache, reload: true) { _ in
-                XCTFail("UI checks must not read provider Keychain")
-                return nil
-            }
+            ClaudeCredentialStore.credentialRecords(fileURL: file, cache: cache, reload: true)
         }
-        XCTAssertFalse(ClaudeCredentialStore.hasCurrentSession(fileURL: file, service: "fixture", cache: cache))
+        XCTAssertFalse(ClaudeCredentialStore.hasCurrentSession(fileURL: file, cache: cache))
         XCTAssertTrue(records().isEmpty)
         try Data("file-exists".utf8).write(to: file)
-        XCTAssertTrue(ClaudeCredentialStore.hasCurrentSession(fileURL: file, service: "fixture", cache: cache))
+        XCTAssertTrue(ClaudeCredentialStore.hasCurrentSession(fileURL: file, cache: cache))
         XCTAssertTrue(records().isEmpty) // Existence checks do not load file contents either.
         try FileManager.default.removeItem(at: file)
 
         let seeded = ClaudeCredentialCache(readOwned: { _ in nil })
         _ = seeded.record(sourceID: "keychain:fixture") { Data("cached".utf8) }
-        XCTAssertTrue(ClaudeCredentialStore.hasCurrentSession(fileURL: file, service: "fixture", cache: seeded))
-        XCTAssertEqual(
-            ClaudeCredentialStore.credentialRecords(fileURL: file, service: "fixture", cache: seeded).first?.data,
-            Data("cached".utf8)
-        )
+        XCTAssertFalse(ClaudeCredentialStore.hasCurrentSession(fileURL: file, cache: seeded))
+        XCTAssertTrue(ClaudeCredentialStore.credentialRecords(fileURL: file, cache: seeded).isEmpty)
     }
 
     @MainActor
@@ -634,10 +594,7 @@ final class ClaudeCredentialStoreTests: XCTestCase {
         let source = Data(#"{"claudeAiOauth":{"accessToken":"","refreshToken":""}}"#.utf8)
         try source.write(to: file)
         let records = await Task.detached {
-            ClaudeCredentialStore.credentialRecords(fileURL: file, service: "fixture", cache: ClaudeCredentialCache(readOwned: { _ in nil })) { _ in
-                XCTFail("A logged-out file is authoritative")
-                return nil
-            }
+            ClaudeCredentialStore.credentialRecords(fileURL: file, cache: ClaudeCredentialCache(readOwned: { _ in nil }))
         }.value
         XCTAssertEqual(records.first?.data, source)
     }
@@ -769,10 +726,7 @@ final class ClaudeCredentialResolverTests: XCTestCase {
         var date = Date(timeIntervalSince1970: 10_000)
         let cache = ClaudeCredentialCache(now: { date }, readOwned: { _ in nil })
         let resolver = ClaudeCredentialResolver(records: { _, reload in
-            ClaudeCredentialStore.credentialRecords(fileURL: file, service: "fixture", cache: cache, reload: reload) { _ in
-                XCTFail("A credentials file must not fall back to Keychain")
-                return nil
-            }
+            ClaudeCredentialStore.credentialRecords(fileURL: file, cache: cache, reload: reload)
         }, runCLI: { _ in .loggedOut }, now: { date })
         do { _ = try await resolver.accessToken(credentialPath: file.path); XCTFail("Expected auth expiry") }
         catch UsageAdapterError.authenticationExpired {} catch { XCTFail("Unexpected error") }

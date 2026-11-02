@@ -1307,6 +1307,7 @@ private struct GrokCredentialResolver {
 enum UsageAdapterError: LocalizedError {
     case credentialsUnavailable(String)
     case authenticationExpired(String)
+    case keychainAccessRequired
     case rateLimited(provider: ProviderID, retryAfter: TimeInterval?)
     case httpFailure(provider: ProviderID, statusCode: Int, message: String?)
     case invalidResponse(String)
@@ -1315,6 +1316,7 @@ enum UsageAdapterError: LocalizedError {
         switch self {
         case .credentialsUnavailable(let message): message
         case .authenticationExpired(let message): message
+        case .keychainAccessRequired: "Claude の資格情報ファイルを確認できません。キーチェーンのみのログインは設定で確認してください。"
         case .rateLimited(let provider, _):
             "\(provider.displayName) usage is rate limited. Showing last known usage."
         case .httpFailure(let provider, let statusCode, let message):
@@ -1324,23 +1326,8 @@ enum UsageAdapterError: LocalizedError {
     }
 }
 
-/// Provider-owned items are read by the stable Apple-signed tool that created them.
-/// Password bytes stay in a pipe; neither output nor errors are logged.
+/// Bounded subprocess I/O used by explicitly invoked or injected commands.
 enum ProviderKeychainReader {
-    static func payload(
-        service: String,
-        run: (URL, [String]) -> (status: Int32, data: Data)? = { runSecurity($0, $1) }
-    ) -> Data? {
-        guard let result = run(
-            URL(fileURLWithPath: "/usr/bin/security"),
-            ["find-generic-password", "-s", service, "-w"]
-        ), result.status == 0 else { return nil }
-        var data = result.data
-        // security appends a newline to the password. Preserve the password itself.
-        if data.last == 0x0A { data.removeLast() }
-        return data.isEmpty ? nil : data
-    }
-
     static func runSecurity(
         _ executable: URL,
         _ arguments: [String],
@@ -1420,32 +1407,6 @@ enum ProviderKeychainReader {
     }
 }
 
-/// Legacy UsageDock cache entries are read only and accepted only when they
-/// exactly match their fingerprinted provider source.
-enum UsageDockClaudeKeychain {
-    static let service = "com.uniplanck.UsageDock.ClaudeCredentials"
-
-    static func query(account: String) -> [CFString: Any] {
-        [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecAttrAccount: account,
-            kSecUseAuthenticationUI: kSecUseAuthenticationUIFail
-        ]
-    }
-
-    static func read(account: String) -> Data? {
-        guard !Thread.isMainThread else { return nil }
-        var query = query(account: account)
-        query[kSecReturnData] = true
-        query[kSecMatchLimit] = kSecMatchLimitOne
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
-        return result as? Data
-    }
-
-}
-
 // Cache state is locked. Injected I/O callbacks must support concurrent sources.
 final class ClaudeCredentialCache: @unchecked Sendable {
     private struct Envelope: Codable {
@@ -1471,13 +1432,18 @@ final class ClaudeCredentialCache: @unchecked Sendable {
     private var pending: [String: PendingRead] = [:]
     private let now: () -> Date
     private let readOwned: (String) -> Data?
+    private let writeOwned: (String, Data) -> Void
 
     init(
         now: @escaping () -> Date = Date.init,
-        readOwned: @escaping (String) -> Data? = UsageDockClaudeKeychain.read
+        readOwned: ((String) -> Data?)? = nil,
+        writeOwned: ((String, Data) -> Void)? = nil
     ) {
         self.now = now
-        self.readOwned = readOwned
+        let store = SecureCredentialFileStore()
+        self.readOwned = readOwned ?? { store.read(account: $0) }
+        // Injected readers do not silently write to the real user's directory.
+        self.writeOwned = writeOwned ?? (readOwned == nil ? { account, data in try? store.write(data, account: account) } : { _, _ in })
     }
 
     func record(
@@ -1514,7 +1480,7 @@ final class ClaudeCredentialCache: @unchecked Sendable {
         let previous = entries[sourceID]
         lock.unlock()
 
-        // No caller-supplied or Keychain work runs while holding the cache lock.
+        // No caller-supplied or file I/O runs while holding the cache lock.
         let record = readSource().map { sourceData in
             makeRecord(sourceData: sourceData, sourceID: sourceID, previous: previous?.record)
         }
@@ -1533,6 +1499,12 @@ final class ClaudeCredentialCache: @unchecked Sendable {
         return entries[sourceID]?.record
     }
 
+    func invalidate(sourceID: String) {
+        lock.lock()
+        entries[sourceID] = nil
+        lock.unlock()
+    }
+
     private func makeRecord(
         sourceData: Data,
         sourceID: String,
@@ -1545,7 +1517,7 @@ final class ClaudeCredentialCache: @unchecked Sendable {
         let data: Data
         if let previous, previous.target == target {
             data = previous.data
-        } else if let saved = readOwned(sourceID),
+        } else if sourceID.hasPrefix("file:"), let saved = readOwned(sourceID),
                   let envelope = try? JSONDecoder().decode(Envelope.self, from: saved),
                   envelope.sourceFingerprint == target.sourceFingerprint,
                   envelope.data == sourceData {
@@ -1553,6 +1525,12 @@ final class ClaudeCredentialCache: @unchecked Sendable {
         } else {
             // A Claude Code token rotation / re-login takes precedence over our cache.
             data = sourceData
+        }
+        if sourceID.hasPrefix("file:"),
+           let object = try? JSONSerialization.jsonObject(with: sourceData) as? [String: Any],
+           object["claudeAiOauth"] is [String: Any],
+           let envelope = try? JSONEncoder().encode(Envelope(sourceFingerprint: target.sourceFingerprint, data: sourceData)) {
+            writeOwned(sourceID, envelope)
         }
         return ClaudeCredentialStore.CredentialRecord(data: data, target: target)
     }
@@ -1574,41 +1552,56 @@ enum ClaudeCredentialStore {
 
     static func credentialRecords(credentialPath: String? = nil, reload: Bool = false) -> [CredentialRecord] {
         let source = sourceLocation(credentialPath: credentialPath)
-        return credentialRecords(fileURL: source.fileURL, service: source.service, cache: cache, reload: reload)
+        let importedID = "imported:\(source.service)"
+        let store = SecureCredentialFileStore()
+        return credentialRecords(fileURL: source.fileURL, cache: cache, reload: reload,
+                                 importedID: importedID, readImported: { store.read(account: importedID) })
     }
 
     static func credentialRecords(
         fileURL: URL,
-        service: String,
         cache: ClaudeCredentialCache,
         reload: Bool = false,
-        readKeychain: (String) -> Data? = { ProviderKeychainReader.payload(service: $0) }
+        importedID: String? = nil,
+        readImported: (() -> Data?)? = nil
     ) -> [CredentialRecord] {
         let fileID = "file:\(fileURL.standardizedFileURL.path)"
-        let keychainID = "keychain:\(service)"
+        let providerFileExists = FileManager.default.fileExists(atPath: fileURL.path)
         // Defensive boundary for synchronous consumers, including plan metadata.
-        // Body evaluation may observe cached data but must never read either Keychain.
+        // Body evaluation may observe cached data but must never read credentials.
         if Thread.isMainThread {
-            return [cache.cachedRecord(sourceID: fileID) ?? cache.cachedRecord(sourceID: keychainID)].compactMap { $0 }
+            let cached = providerFileExists ? cache.cachedRecord(sourceID: fileID)
+                : importedID.flatMap { cache.cachedRecord(sourceID: $0) }
+            return [cached].compactMap { $0 }
         }
-        // Do not eagerly evaluate a Keychain fallback when a credentials file exists.
-        if let file = cache.record(sourceID: fileID, reload: reload, readSource: { try? Data(contentsOf: fileURL) }),
+        // The provider file takes precedence over an explicitly imported copy.
+        if providerFileExists,
+           let file = cache.record(sourceID: fileID, reload: reload, readSource: { try? Data(contentsOf: fileURL) }),
            let object = try? JSONSerialization.jsonObject(with: file.data) as? [String: Any],
            object["claudeAiOauth"] is [String: Any] {
             return [file]
         }
-        return [cache.record(sourceID: keychainID, reload: reload) { readKeychain(service) }].compactMap { $0 }
+        // A provider file, including an unreadable or malformed one, is authoritative.
+        // Only an explicitly imported app-owned file may be used when it is absent.
+        if !providerFileExists,
+           let importedID, let readImported,
+           let imported = cache.record(sourceID: importedID, reload: reload, readSource: readImported),
+           let object = try? JSONSerialization.jsonObject(with: imported.data) as? [String: Any],
+           object["claudeAiOauth"] is [String: Any] {
+            return [imported]
+        }
+        return []
     }
 
     static func hasCurrentSession() -> Bool {
         let source = sourceLocation(credentialPath: nil)
-        return hasCurrentSession(fileURL: source.fileURL, service: source.service, cache: cache)
+        let importedID = "imported:\(source.service)"
+        return hasCurrentSession(fileURL: source.fileURL, cache: cache) ||
+            FileManager.default.fileExists(atPath: SecureCredentialFileStore().fileURL(account: importedID).path)
     }
 
-    static func hasCurrentSession(fileURL: URL, service: String, cache: ClaudeCredentialCache) -> Bool {
-        cache.cachedRecord(sourceID: "file:\(fileURL.standardizedFileURL.path)") != nil ||
-            cache.cachedRecord(sourceID: "keychain:\(service)") != nil ||
-            FileManager.default.fileExists(atPath: fileURL.path)
+    static func hasCurrentSession(fileURL: URL, cache: ClaudeCredentialCache) -> Bool {
+        FileManager.default.fileExists(atPath: fileURL.path)
     }
 
     private static func sourceLocation(credentialPath: String?) -> (fileURL: URL, service: String) {
@@ -1619,6 +1612,39 @@ enum ClaudeCredentialStore {
             ? "Claude Code-credentials"
             : keychainServiceName(configDirectory: directory.path)
         return (fileURL, service)
+    }
+
+    static func providerKeychainService(credentialPath: String?) -> String {
+        sourceLocation(credentialPath: credentialPath).service
+    }
+
+    /// Only the explicit Settings action calls this. Never import refresh tokens.
+    static func importKeychainCredential(_ data: Data, credentialPath: String?,
+                                         store: SecureCredentialFileStore = SecureCredentialFileStore(),
+                                         now: Date = Date()) throws {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let oauth = root["claudeAiOauth"] as? [String: Any],
+              let token = oauth["accessToken"] as? String, !token.isEmpty else {
+            throw UsageAdapterError.credentialsUnavailable("Claude credential is unavailable.")
+        }
+        let expiry: Double?
+        switch oauth["expiresAt"] {
+        case let number as NSNumber: expiry = number.doubleValue
+        case let value as String: expiry = Double(value)
+        default: expiry = nil
+        }
+        guard let expiry, expiry.isFinite, expiry > 0,
+              (expiry > 100_000_000_000 ? expiry / 1000 : expiry) > now.timeIntervalSince1970 else {
+            throw UsageAdapterError.credentialsUnavailable("Claude credential is expired or has no expiry.")
+        }
+        var minimal: [String: Any] = ["accessToken": token, "expiresAt": expiry]
+        for key in ["subscriptionType", "rateLimitTier"] {
+            if let value = oauth[key] as? String { minimal[key] = value }
+        }
+        let encoded = try JSONSerialization.data(withJSONObject: ["claudeAiOauth": minimal])
+        let importedID = "imported:\(providerKeychainService(credentialPath: credentialPath))"
+        try store.write(encoded, account: importedID)
+        cache.invalidate(sourceID: importedID)
     }
 
     static func credentialCandidates(credentialPath: String? = nil) -> [Data] {
@@ -1746,7 +1772,9 @@ actor ClaudeCredentialResolver {
 
     init(
         records: @escaping (String?, Bool) -> [ClaudeCredentialStore.CredentialRecord] = ClaudeCredentialStore.credentialRecords,
-        runCLI: @escaping (URL) async -> ClaudeCLIStatus = { await ClaudeCLIRefreshRunner().refresh(configDirectory: $0) },
+        // Claude Code itself can open a Keychain dialog, so background recovery
+        // only rereads the file. An explicit UI action can open its login.
+        runCLI: @escaping (URL) async -> ClaudeCLIStatus = { _ in .unavailable },
         now: @escaping () -> Date = Date.init,
         attemptDefaults: UserDefaults? = nil
     ) {
@@ -1780,6 +1808,12 @@ actor ClaudeCredentialResolver {
         return try await task.value
     }
 
+    func credentialWasImported(credentialPath: String?) {
+        let key = ClaudeConfiguration.directory(credentialPath: credentialPath).path
+        needsRecovery.remove(key)
+        lastRecoveryProbe[key] = nil
+    }
+
     private func resolve(key: String, credentialPath: String?, forceRefresh: Bool, rejectedAccessToken: String?) async throws -> String {
         if let rejectedAccessToken { rejectedTokens[key] = rejectedAccessToken }
         var rejected = rejectedTokens[key]
@@ -1790,6 +1824,7 @@ actor ClaudeCredentialResolver {
 
         let recovering = needsRecovery.contains(key)
         let first = records(credentialPath, forceRefresh || recovering)
+        if first.isEmpty { throw UsageAdapterError.keychainAccessRequired }
         if forceRefresh || recovering { lastRecoveryProbe[key] = now() }
         if let token = usableToken(first, key: key, rejecting: rejected),
            !forceRefresh || rejectedAccessToken.map({ token != $0 }) == true {
@@ -2025,6 +2060,7 @@ struct KimiCredentialResolver {
     }
 
     static func credentialPath(for account: UsageAccount) throws -> String? {
+        guard account.source != .cloudSnapshot else { throw CloudKimiSnapshot.Failure.unavailable }
         if account.source == .currentSession { return nil }
         if let path = account.credentialPath, !path.isEmpty { return path }
         if let home = account.profileHomePath, !home.isEmpty {
