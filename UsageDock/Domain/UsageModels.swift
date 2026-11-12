@@ -278,8 +278,14 @@ enum RailQuotaSource: RawRepresentable, Codable, CaseIterable, Hashable, Identif
         try container.encode(rawValue)
     }
 
-    static func options(buckets: [UsageBucket], selection: Self?, allowNone: Bool) -> [Self] {
+    static func options(buckets: [UsageBucket], selection: Self?, allowNone: Bool, provider: ProviderID? = nil) -> [Self] {
         var options = allCases.filter { allowNone || $0 != .none }
+        var buckets = buckets
+        if provider == .claude {
+            // Claude has no 5h window: offer its fable and 1w quotas instead.
+            options.removeAll { $0 == .fiveHour }
+            buckets = ClaudeQuotaDisplay.ordered(buckets, kind: \.kind, model: \.model)
+        }
         for bucket in buckets {
             let source = Self.bucket(quotaID: bucket.quotaID)
             if !options.contains(source) { options.append(source) }
@@ -299,6 +305,33 @@ enum RailQuotaSource: RawRepresentable, Codable, CaseIterable, Hashable, Identif
         case .fiveHour: "5h"
         case .weekly: "1w"
         case .bucket(let quotaID): quotaID
+        }
+    }
+}
+
+/// Claude Ultra has no 5h window. Claude shows only its Fable weekly window
+/// (as "fable") and then the general 1w window, even when the API still
+/// reports five_hour. Parsed and stored buckets stay untouched.
+enum ClaudeQuotaDisplay {
+    /// 0 = fable, 1 = 1w, nil = not shown for Claude.
+    static func position(kind: UsageWindowKind, model: String?) -> Int? {
+        if kind == .modelSpecific, model?.lowercased().contains("fable") == true { return 0 }
+        if kind == .weekly { return 1 }
+        return nil
+    }
+
+    static func label(_ label: String, kind: UsageWindowKind, model: String?) -> String {
+        position(kind: kind, model: model) == 0 ? "fable" : label
+    }
+
+    /// Shown windows only: fable first, then 1w, each keeping its input order.
+    static func ordered<Item>(
+        _ items: [Item],
+        kind: KeyPath<Item, UsageWindowKind>,
+        model: KeyPath<Item, String?>
+    ) -> [Item] {
+        [0, 1].flatMap { rank in
+            items.filter { position(kind: $0[keyPath: kind], model: $0[keyPath: model]) == rank }
         }
     }
 }

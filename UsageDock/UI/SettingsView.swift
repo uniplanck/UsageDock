@@ -1758,19 +1758,19 @@ struct AccountEditor: View {
                     .padding(.leading, 30)
             }
 
-            if !account.buckets.isEmpty {
+            if !quotaRows.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Quota rows")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
 
-                    ForEach($account.buckets) { $bucket in
+                    ForEach(quotaRows, id: \.wrappedValue.id) { $bucket in
                         HStack(spacing: 8) {
                             Toggle("", isOn: $bucket.isEnabled)
                                 .labelsHidden()
                                 .controlSize(.mini)
 
-                            QuotaNameLabel(name: bucket.label)
+                            QuotaNameLabel(name: quotaName(bucket))
                                 .font(.caption.weight(.medium))
                                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -1787,7 +1787,7 @@ struct AccountEditor: View {
                                 Image(systemName: "chevron.up")
                             }
                             .buttonStyle(.borderless)
-                            .disabled(account.buckets.first?.id == bucket.id)
+                            .disabled(hasFixedQuotaOrder || account.buckets.first?.id == bucket.id)
 
                             Button {
                                 moveBucket(bucket.id, direction: 1)
@@ -1795,7 +1795,7 @@ struct AccountEditor: View {
                                 Image(systemName: "chevron.down")
                             }
                             .buttonStyle(.borderless)
-                            .disabled(account.buckets.last?.id == bucket.id)
+                            .disabled(hasFixedQuotaOrder || account.buckets.last?.id == bucket.id)
                         }
                         .padding(.horizontal, 9)
                         .padding(.vertical, 6)
@@ -1839,7 +1839,12 @@ struct AccountEditor: View {
                 .foregroundStyle(.secondary)
             Picker(LocalizedStringKey(title), selection: selection) {
                 Text("Global").tag(Optional<RailQuotaSource>.none)
-                ForEach(RailQuotaSource.options(buckets: account.buckets, selection: selection.wrappedValue, allowNone: allowNone)) { source in
+                ForEach(RailQuotaSource.options(
+                    buckets: account.buckets,
+                    selection: selection.wrappedValue,
+                    allowNone: allowNone,
+                    provider: account.provider
+                )) { source in
                     accountQuotaLabel(source).tag(Optional<RailQuotaSource>.some(source))
                 }
             }
@@ -1855,8 +1860,24 @@ struct AccountEditor: View {
         guard let bucket = account.buckets.first(where: { $0.quotaID == quotaID }) else {
             return Text("Unavailable quota: \(quotaID)")
         }
-        let label = Text(LocalizedStringKey(bucket.label))
+        let label = Text(LocalizedStringKey(quotaName(bucket)))
         return bucket.isEnabled ? label : Text("\(label) (hidden)")
+    }
+
+    /// Claude rows match its display: fable, then 1w, without 5h (see ClaudeQuotaDisplay).
+    private var quotaRows: [Binding<UsageBucket>] {
+        let rows = Array($account.buckets)
+        guard account.provider == .claude else { return rows }
+        return ClaudeQuotaDisplay.ordered(rows, kind: \.wrappedValue.kind, model: \.wrappedValue.model)
+    }
+
+    private var hasFixedQuotaOrder: Bool {
+        account.provider == .claude
+    }
+
+    private func quotaName(_ bucket: UsageBucket) -> String {
+        guard account.provider == .claude else { return bucket.label }
+        return ClaudeQuotaDisplay.label(bucket.label, kind: bucket.kind, model: bucket.model)
     }
 
     private var multiplierControls: some View {
