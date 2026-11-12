@@ -2865,6 +2865,67 @@ final class LiveUsageAdapterParsingTests: XCTestCase {
         XCTAssertEqual(buckets.first(where: { $0.model == "Fable" })?.resolvedPercentUsed ?? -1, 0.28, accuracy: 0.0001)
     }
 
+    func testClaudeUltraLegacyUsageParsesWeeklyAndFableWithoutFiveHour() throws {
+        let payloads: [[String: Any]] = [
+            [
+                "seven_day": ["utilization": 21.0, "resets_at": "2026-11-18T01:00:00Z"],
+                "seven_day_fable": ["utilization": 7.0, "resets_at": "2026-11-17T01:00:00Z"]
+            ],
+            // Ultra may report the windows it does not have as null.
+            [
+                "five_hour": NSNull(),
+                "seven_day": ["utilization": 21.0, "resets_at": "2026-11-18T01:00:00Z"],
+                "seven_day_fable": ["utilization": 7.0, "resets_at": "2026-11-17T01:00:00Z"],
+                "seven_day_opus": NSNull()
+            ]
+        ]
+
+        for payload in payloads {
+            let buckets = try ClaudeUsageAdapter.parseUsage(data: jsonData(payload))
+            XCTAssertEqual(buckets.count, 2)
+            XCTAssertFalse(buckets.contains { $0.kind == .fiveHour })
+
+            let weekly = try XCTUnwrap(buckets.first(where: { $0.kind == .weekly }))
+            XCTAssertEqual(weekly.label, "1w")
+            XCTAssertEqual(weekly.resolvedPercentUsed ?? -1, 0.21, accuracy: 0.0001)
+            XCTAssertEqual(weekly.resetsAt, ISO8601DateFormatter().date(from: "2026-11-18T01:00:00Z"))
+
+            let fable = try XCTUnwrap(buckets.first(where: { $0.model == "Fable" }))
+            XCTAssertEqual(fable.kind, .modelSpecific)
+            XCTAssertEqual(fable.label, "Fable")
+            XCTAssertEqual(fable.resolvedPercentUsed ?? -1, 0.07, accuracy: 0.0001)
+            XCTAssertEqual(fable.resetsAt, ISO8601DateFormatter().date(from: "2026-11-17T01:00:00Z"))
+        }
+    }
+
+    func testClaudeUltraLimitsArrayParsesWeeklyAndScopedFableWithoutSession() throws {
+        let data = try jsonData([
+            "limits": [
+                ["kind": "weekly", "group": "weekly", "percent": 21.0, "resets_at": "2026-11-18T01:00:00Z"],
+                [
+                    "kind": "weekly_scoped",
+                    "group": "weekly",
+                    "percent": 7.0,
+                    "resets_at": "2026-11-17T01:00:00Z",
+                    "scope": ["model": ["display_name": "Fable"]]
+                ]
+            ]
+        ])
+
+        let buckets = try ClaudeUsageAdapter.parseUsage(data: data)
+        XCTAssertEqual(buckets.count, 2)
+        XCTAssertFalse(buckets.contains { $0.kind == .fiveHour })
+
+        let weekly = try XCTUnwrap(buckets.first(where: { $0.kind == .weekly }))
+        XCTAssertEqual(weekly.label, "1w")
+        XCTAssertEqual(weekly.resolvedPercentUsed ?? -1, 0.21, accuracy: 0.0001)
+
+        let fable = try XCTUnwrap(buckets.first(where: { $0.model == "Fable" }))
+        XCTAssertEqual(fable.kind, .modelSpecific)
+        XCTAssertEqual(fable.resolvedPercentUsed ?? -1, 0.07, accuracy: 0.0001)
+        XCTAssertNotEqual(fable.quotaID, weekly.quotaID)
+    }
+
     func testClaudeLimitsPercentAlwaysUsesZeroToHundredScale() throws {
         let cases: [(raw: Double, expected: Double)] = [
             (1, 0.01), (0, 0), (13, 0.13), (100, 1), (0.5, 0.005), (150, 1), (-1, 0)
@@ -4035,6 +4096,226 @@ final class KimiUsageAdapterFetchTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
     }
 
+}
+
+@MainActor
+final class ClaudeUltraDisplayTests: XCTestCase {
+    private let now = Date(timeIntervalSince1970: 1_794_441_600) // 2026-11-12T00:00:00Z
+
+    private func date(_ value: String) -> Date {
+        ISO8601DateFormatter().date(from: value)!
+    }
+
+    private func jsonData(_ value: Any) throws -> Data {
+        try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+    }
+
+    /// The API may still report five_hour; parsing keeps it, the display hides it.
+    private func legacyBuckets() throws -> [UsageBucket] {
+        try ClaudeUsageAdapter.parseUsage(data: jsonData([
+            "five_hour": ["utilization": 53.0, "resets_at": "2026-11-12T03:00:00Z"],
+            "seven_day": ["utilization": 21.0, "resets_at": "2026-11-18T01:00:00Z"],
+            "seven_day_fable": ["utilization": 7.0, "resets_at": "2026-11-17T01:00:00Z"]
+        ]))
+    }
+
+    private func limitsBuckets() throws -> [UsageBucket] {
+        try ClaudeUsageAdapter.parseUsage(data: jsonData([
+            "limits": [
+                ["kind": "session", "group": "session", "percent": 53.0, "resets_at": "2026-11-12T03:00:00Z"],
+                ["kind": "weekly", "group": "weekly", "percent": 21.0, "resets_at": "2026-11-18T01:00:00Z"],
+                [
+                    "kind": "weekly_scoped",
+                    "group": "weekly",
+                    "percent": 7.0,
+                    "resets_at": "2026-11-17T01:00:00Z",
+                    "scope": ["model": ["display_name": "Fable"]]
+                ]
+            ]
+        ]))
+    }
+
+    func testClaudeDisplayShowsOnlyFableThenWeeklyEvenWhenAPIReportsFiveHour() throws {
+        let fixtures = try [legacyBuckets(), limitsBuckets()]
+        for buckets in fixtures {
+            XCTAssertTrue(buckets.contains { $0.kind == .fiveHour })
+            let suiteName = "UsageDockTests.ClaudeUltraDisplay.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suiteName)!
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+            let store = UsageStore(defaults: defaults)
+            let account = UsageAccount(provider: .claude, name: "Claude Ultra", source: .profile, buckets: buckets)
+            store.accounts = [account]
+            let target = RailDisplayTarget.account(id: account.id, provider: .claude)
+
+            let summary = store.summary(for: target, now: now)
+            XCTAssertEqual(summary.aggregates.map(\.label), ["fable", "1w"])
+            XCTAssertEqual(summary.aggregates.map(\.kind), [.modelSpecific, .weekly])
+            XCTAssertEqual(summary.aggregates.map(\.resetsAt), [date("2026-11-17T01:00:00Z"), date("2026-11-18T01:00:00Z")])
+            // The hidden 5h (53%) must not leak into the provider pressure.
+            XCTAssertEqual(summary.pressurePercent ?? -1, 0.21, accuracy: 0.0001)
+            XCTAssertEqual(store.summary(for: .claude, now: now).aggregates.map(\.label), ["fable", "1w"])
+            XCTAssertEqual(
+                store.summaries(now: now).first(where: { $0.provider == .claude })?.aggregates.map(\.label),
+                ["fable", "1w"]
+            )
+            XCTAssertEqual(store.railDisplayPercent(for: target, source: .automatic, now: now) ?? -1, 0.21, accuracy: 0.0001)
+            XCTAssertEqual(store.railResetDate(for: target, source: .automatic, now: now), date("2026-11-18T01:00:00Z"))
+
+            // Two rows use the same compact hover height as Kimi and fit inside it.
+            XCTAssertEqual(HoverDetailMetrics.height(rowCount: summary.aggregates.count), 194)
+            let content = ProviderDetailView(target: target, edge: .right, usageStore: store).content
+                .frame(width: 340)
+                .fixedSize(horizontal: false, vertical: true)
+            XCTAssertLessThanOrEqual(NSHostingView(rootView: content).fittingSize.height + 22,
+                                     HoverDetailMetrics.height(rowCount: summary.aggregates.count) + 0.5)
+
+            // Stored data keeps every parsed window, including 5h.
+            XCTAssertEqual(store.accounts.first?.buckets.map(\.quotaID), buckets.map(\.quotaID))
+        }
+    }
+
+    func testClaudeFusionKeepsFableFirstWhenAccountsListWindowsDifferently() {
+        let suiteName = "UsageDockTests.ClaudeUltraFusion.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = UsageStore(defaults: defaults)
+        store.accounts = [
+            UsageAccount(provider: .claude, name: "Older plan", source: .profile, buckets: [
+                UsageBucket(quotaID: "claude-five-hour", label: "5h", kind: .fiveHour, percentUsed: 0.9),
+                UsageBucket(quotaID: "claude-seven-day", label: "1w", kind: .weekly, percentUsed: 0.4)
+            ]),
+            UsageAccount(provider: .claude, name: "Ultra", source: .profile, buckets: [
+                UsageBucket(quotaID: "claude-seven-day", label: "1w", kind: .weekly, percentUsed: 0.2),
+                UsageBucket(quotaID: "claude-seven-day-fable", label: "Fable", kind: .modelSpecific,
+                            model: "Fable", percentUsed: 0.1)
+            ])
+        ]
+        store.setFusionEnabled(true, for: .claude)
+
+        let summary = store.summary(for: .provider(.claude), now: now)
+        XCTAssertEqual(summary.aggregates.map(\.label), ["fable", "1w"])
+        XCTAssertEqual(summary.aggregates.map(\.accountCount), [1, 2])
+        XCTAssertEqual(summary.pressurePercent ?? -1, 0.3, accuracy: 0.0001)
+        XCTAssertEqual(store.railTargets(), [.provider(.claude)])
+    }
+
+    func testClaudeFiveHourRailSourceFallsBackToFableThenWeeklyThenAuto() throws {
+        let suiteName = "UsageDockTests.ClaudeUltraRail.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let buckets = try legacyBuckets()
+        let fiveHourID = try XCTUnwrap(buckets.first(where: { $0.kind == .fiveHour })?.quotaID)
+        let weeklyID = try XCTUnwrap(buckets.first(where: { $0.kind == .weekly })?.quotaID)
+        let fableID = try XCTUnwrap(buckets.first(where: { $0.model == "Fable" })?.quotaID)
+        var account = UsageAccount(
+            provider: .claude,
+            name: "Claude Ultra",
+            source: .profile,
+            railTimeSource: .fiveHour,
+            buckets: buckets
+        )
+        let store = UsageStore(defaults: defaults)
+        store.accounts = [account]
+        store.railPercentSource = .fiveHour
+        let target = RailDisplayTarget.account(id: account.id, provider: .claude)
+
+        // Global and per-account 5h choices, by window or by name, use fable.
+        XCTAssertEqual(store.railPercentSource(for: target), .fiveHour)
+        XCTAssertEqual(store.railTimeSource(for: target), .fiveHour)
+        for source in [RailQuotaSource.fiveHour, .bucket(quotaID: fiveHourID)] {
+            let aggregate = try XCTUnwrap(store.railAggregate(for: target, source: source, now: now))
+            XCTAssertEqual(aggregate.quotaID, fableID)
+            XCTAssertEqual(aggregate.label, "fable")
+            XCTAssertEqual(store.railDisplayPercent(for: target, source: source, now: now) ?? -1, 0.07, accuracy: 0.0001)
+            XCTAssertEqual(store.railResetDate(for: target, source: source, now: now), date("2026-11-17T01:00:00Z"))
+        }
+        XCTAssertEqual(store.railResetDate(for: target, source: store.railTimeSource(for: target), now: now),
+                       date("2026-11-17T01:00:00Z"))
+        store.presentationMode = .remaining
+        XCTAssertEqual(store.railDisplayPercent(for: target, source: .fiveHour, now: now) ?? -1, 0.93, accuracy: 0.0001)
+        store.presentationMode = .used
+        XCTAssertEqual(store.railAggregate(for: target, source: .weekly, now: now)?.quotaID, weeklyID)
+        XCTAssertEqual(store.railAggregate(for: target, source: .bucket(quotaID: fableID), now: now)?.quotaID, fableID)
+
+        // Without fable (hidden here), 5h falls back to 1w.
+        account.buckets = buckets.map { bucket in
+            var copy = bucket
+            copy.isEnabled = bucket.quotaID != fableID
+            return copy
+        }
+        store.accounts = [account]
+        XCTAssertEqual(store.railAggregate(for: target, source: .fiveHour, now: now)?.quotaID, weeklyID)
+        XCTAssertEqual(store.railDisplayPercent(for: target, source: .fiveHour, now: now) ?? -1, 0.21, accuracy: 0.0001)
+        XCTAssertEqual(store.railResetDate(for: target, source: .fiveHour, now: now), date("2026-11-18T01:00:00Z"))
+
+        // With neither, it behaves like Auto and never shows the hidden 5h value.
+        account.buckets = buckets.filter { $0.kind == .fiveHour }
+        store.accounts = [account]
+        XCTAssertNil(store.railAggregate(for: target, source: .fiveHour, now: now))
+        XCTAssertEqual(store.railDisplayPercent(for: target, source: .fiveHour, now: now),
+                       store.railDisplayPercent(for: target, source: .automatic, now: now))
+        XCTAssertNil(store.railDisplayPercent(for: target, source: .fiveHour, now: now))
+        XCTAssertNil(store.railResetDate(for: target, source: .fiveHour, now: now))
+    }
+
+    func testClaudeQuotaOptionsOfferFableAndWeeklyButNotFiveHour() throws {
+        let buckets = try legacyBuckets()
+        let fiveHourID = try XCTUnwrap(buckets.first(where: { $0.kind == .fiveHour })?.quotaID)
+        let weeklyID = try XCTUnwrap(buckets.first(where: { $0.kind == .weekly })?.quotaID)
+        let fableID = try XCTUnwrap(buckets.first(where: { $0.model == "Fable" })?.quotaID)
+
+        let options = RailQuotaSource.options(buckets: buckets, selection: nil, allowNone: true, provider: .claude)
+        XCTAssertEqual(options, [.none, .automatic, .weekly, .bucket(quotaID: fableID), .bucket(quotaID: weeklyID)])
+        XCTAssertFalse(options.contains(.fiveHour))
+        XCTAssertFalse(options.contains(.bucket(quotaID: fiveHourID)))
+    }
+
+    func testKimiAndCodexKeepFiveHourRowsOrderAndRailSource() throws {
+        let suiteName = "UsageDockTests.ClaudeUltraOtherProviders.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let kimi = UsageAccount(provider: .kimi, name: "Allegro", source: .currentSession, buckets: [
+            UsageBucket(quotaID: "kimi-300", label: "5h Code", kind: .fiveHour, percentUsed: 0.12,
+                        resetsAt: now.addingTimeInterval(7_200)),
+            UsageBucket(quotaID: "kimi-weekly", label: "1w Code", kind: .weekly, percentUsed: 0.3,
+                        resetsAt: now.addingTimeInterval(86_400))
+        ])
+        let codexBuckets = try CodexUsageAdapter.parseUsage(data: jsonData([
+            "rate_limit": [
+                "primary_window": ["used_percent": 40, "limit_window_seconds": 18000, "reset_at": 1794452400],
+                "secondary_window": ["used_percent": 20, "limit_window_seconds": 604800, "reset_at": 1794963600]
+            ]
+        ]))
+        let codex = UsageAccount(provider: .codex, name: "Codex", source: .currentSession, buckets: codexBuckets)
+        let store = UsageStore(defaults: defaults)
+        store.accounts = [kimi, codex]
+        store.railPercentSource = .fiveHour
+
+        let expectations: [(account: UsageAccount, labels: [String], fiveHourID: String, percent: Double)] = [
+            (kimi, ["5h Code", "1w Code"], "kimi-300", 0.12),
+            (codex, ["5h", "1w"], "codex-general-18000", 0.4)
+        ]
+        for item in expectations {
+            let target = RailDisplayTarget.account(id: item.account.id, provider: item.account.provider)
+            let summary = store.summary(for: target, now: now)
+            XCTAssertEqual(summary.aggregates.map(\.label), item.labels)
+            XCTAssertEqual(summary.aggregates.first?.kind, .fiveHour)
+            XCTAssertEqual(HoverDetailMetrics.height(rowCount: summary.aggregates.count), 194)
+            for source in [RailQuotaSource.fiveHour, .bucket(quotaID: item.fiveHourID)] {
+                XCTAssertEqual(store.railAggregate(for: target, source: source, now: now)?.quotaID, item.fiveHourID)
+                XCTAssertEqual(store.railDisplayPercent(for: target, source: source, now: now) ?? -1, item.percent, accuracy: 0.0001)
+            }
+            XCTAssertEqual(store.railPercentSource(for: target), .fiveHour)
+            let options = RailQuotaSource.options(
+                buckets: item.account.buckets,
+                selection: nil,
+                allowNone: false,
+                provider: item.account.provider
+            )
+            XCTAssertTrue(options.contains(.fiveHour))
+            XCTAssertTrue(options.contains(.bucket(quotaID: item.fiveHourID)))
+        }
+    }
 }
 
 @MainActor

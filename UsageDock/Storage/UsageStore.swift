@@ -691,7 +691,7 @@ final class UsageStore: ObservableObject {
         menuBarAccounts().map { account in
             let authState = displayAuthenticationState(for: account)
             let state = accountRefreshState(for: account.id)
-            let summary = UsageAggregator.summary(for: account.provider, accounts: [displayAccount(account)], now: now)
+            let summary = displaySummary(for: account.provider, accounts: [displayAccount(account)], now: now)
             let percent = authState == .valid || state.isStale ? displayPercent(summary.pressurePercent) : nil
             return MenuBarUsageItem(
                 id: account.id,
@@ -761,11 +761,12 @@ final class UsageStore: ObservableObject {
     }
 
     func summaries(now: Date = Date()) -> [ProviderUsageSummary] {
-        UsageAggregator.summaries(accounts: runtimeAccounts.map(displayAccount), now: now)
+        let accounts = runtimeAccounts.map(displayAccount)
+        return ProviderID.allCases.map { displaySummary(for: $0, accounts: accounts, now: now) }
     }
 
     func summary(for provider: ProviderID, now: Date = Date()) -> ProviderUsageSummary {
-        UsageAggregator.summary(for: provider, accounts: runtimeAccounts.map(displayAccount), now: now)
+        displaySummary(for: provider, accounts: runtimeAccounts.map(displayAccount), now: now)
     }
 
     func summary(for target: RailDisplayTarget, now: Date = Date()) -> ProviderUsageSummary {
@@ -774,8 +775,32 @@ final class UsageStore: ObservableObject {
             return summary(for: provider, now: now)
         case .account(let id, let provider):
             let scoped = runtimeAccounts.filter { $0.id == id && $0.isEnabled }.map(displayAccount)
-            return UsageAggregator.summary(for: provider, accounts: scoped, now: now)
+            return displaySummary(for: provider, accounts: scoped, now: now)
         }
+    }
+
+    /// Claude Ultra has no 5h window, so Claude rows are only fable, then 1w
+    /// (see ClaudeQuotaDisplay). Other providers aggregate unchanged.
+    private func displaySummary(for provider: ProviderID, accounts: [UsageAccount], now: Date) -> ProviderUsageSummary {
+        guard provider == .claude else {
+            return UsageAggregator.summary(for: provider, accounts: accounts, now: now)
+        }
+        let claudeAccounts: [UsageAccount] = accounts.filter { $0.provider == .claude }.map { account in
+            var shown = account
+            shown.buckets = ClaudeQuotaDisplay.ordered(account.buckets, kind: \.kind, model: \.model).map { bucket in
+                var relabeled = bucket
+                relabeled.label = ClaudeQuotaDisplay.label(bucket.label, kind: bucket.kind, model: bucket.model)
+                return relabeled
+            }
+            return shown
+        }
+        let summary = UsageAggregator.summary(for: .claude, accounts: claudeAccounts, now: now)
+        // Fused accounts can list their windows in different orders.
+        return ProviderUsageSummary(
+            provider: .claude,
+            aggregates: ClaudeQuotaDisplay.ordered(summary.aggregates, kind: \.kind, model: \.model),
+            pressurePercent: summary.pressurePercent
+        )
     }
 
     func railTargets() -> [RailDisplayTarget] {
@@ -831,7 +856,7 @@ final class UsageStore: ObservableObject {
 
     func railAggregate(for target: RailDisplayTarget, source: RailQuotaSource, now: Date = Date()) -> UsageAggregate? {
         let aggregates = summary(for: target, now: now).aggregates
-        switch source {
+        switch effectiveRailSource(source, for: target, now: now) {
         case .none, .automatic:
             return nil
         case .bucket(let quotaID):
@@ -846,6 +871,23 @@ final class UsageStore: ObservableObject {
                     return label == "1w" || label.contains("weekly") || label.contains("7d")
                 })
         }
+    }
+
+    /// Claude no longer shows 5h (or any window besides fable and 1w). A rail
+    /// slot still set to one uses fable, then 1w, then Auto instead of going blank.
+    private func effectiveRailSource(_ source: RailQuotaSource, for target: RailDisplayTarget, now: Date) -> RailQuotaSource {
+        guard target.provider == .claude else { return source }
+        switch source {
+        case .none, .automatic, .weekly:
+            return source
+        case .fiveHour:
+            break
+        case .bucket(let quotaID):
+            let stored = runtimeAccounts.filter { $0.provider == .claude }.flatMap(\.buckets).first { $0.quotaID == quotaID }
+            guard let stored, ClaudeQuotaDisplay.position(kind: stored.kind, model: stored.model) == nil else { return source }
+        }
+        // Claude summaries list fable first, then 1w.
+        return summary(for: target, now: now).aggregates.first.map { RailQuotaSource.bucket(quotaID: $0.quotaID) } ?? .automatic
     }
 
     func railPercentSource(for target: RailDisplayTarget) -> RailQuotaSource {
@@ -873,12 +915,14 @@ final class UsageStore: ObservableObject {
     }
 
     func railDisplayPercent(for target: RailDisplayTarget, source: RailQuotaSource, now: Date = Date()) -> Double? {
+        let source = effectiveRailSource(source, for: target, now: now)
         if source == .none { return nil }
         if source == .automatic { return displayPercent(summary(for: target, now: now).pressurePercent) }
         return displayPercent(railAggregate(for: target, source: source, now: now)?.percentUsed)
     }
 
     func railResetDate(for target: RailDisplayTarget, source: RailQuotaSource, now: Date = Date()) -> Date? {
+        let source = effectiveRailSource(source, for: target, now: now)
         if source == .none { return nil }
         if source == .automatic {
             return summary(for: target, now: now).aggregates
