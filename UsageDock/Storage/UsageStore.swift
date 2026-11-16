@@ -1238,6 +1238,34 @@ final class UsageStore: ObservableObject {
         return account.id
     }
 
+    /// Adds another Grok account with its own grok.com website-data store.
+    /// Existing Grok accounts and their cookies are left untouched.
+    @discardableResult
+    func addGrokWebAccount() -> UUID {
+        let names = Set(accounts.filter { $0.provider == .grok }.map(\.name))
+        var ordinal = names.isEmpty ? 1 : 2
+        while names.contains(ordinal == 1 ? "Grok Web" : "Grok Web \(ordinal)") { ordinal += 1 }
+        let account = UsageAccount(
+            provider: .grok,
+            name: ordinal == 1 ? "Grok Web" : "Grok Web \(ordinal)",
+            source: .profile,
+            grokWebSessionID: UUID().uuidString,
+            buckets: []
+        )
+        accounts.append(account)
+        return account.id
+    }
+
+    func addGrokWebAccountAndSignIn() {
+        presentGrokWebLogin(for: addGrokWebAccount())
+    }
+
+    /// The CLI login is shared by the machine, so only the current-login
+    /// account or a CLI profile with its own auth file may read it.
+    static func grokAllowsCLIFallback(_ account: UsageAccount) -> Bool {
+        account.source == .currentSession || account.credentialPath != nil
+    }
+
     func launchLoginProfile(provider: ProviderID) -> Bool {
         guard provider.supportsProfileLogin else {
             refreshStates[provider] = .failed("Direct \(provider.displayName) profile login is not available in UsageDock yet.")
@@ -1489,6 +1517,9 @@ final class UsageStore: ObservableObject {
             return "Not connected"
         }
         if account.source == .profile, case .idle = accountRefreshState(for: account.id) {
+            if account.provider == .grok, !Self.grokAllowsCLIFallback(account) {
+                return "Web login · sign in on grok.com, then Refresh"
+            }
             return "UsageDock profile · finish login in Terminal, then Refresh"
         }
 
@@ -1604,7 +1635,8 @@ final class UsageStore: ObservableObject {
                     case .grok:
                         let outcome = try await GrokUsageAdapter(
                             credentialPath: account.source == .currentSession ? nil : account.credentialPath,
-                            webSessionID: account.grokWebSessionID
+                            webSessionID: account.grokWebSessionID,
+                            allowsCLIFallback: Self.grokAllowsCLIFallback(account)
                         ).fetchOutcome()
                         webNotice = outcome.notice
                         fetched = UsageAccount(provider: .grok, name: account.name, buckets: outcome.buckets)

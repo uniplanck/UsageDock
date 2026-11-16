@@ -867,10 +867,14 @@ struct GrokUsageAdapter: UsageProviderAdapter {
     let provider: ProviderID = .grok
     let credentialPath: String?
     let webSessionID: String?
+    /// False for a web-only account: the shared CLI login belongs to another
+    /// Grok account, so its billing must not stand in for this one.
+    let allowsCLIFallback: Bool
 
-    init(credentialPath: String? = nil, webSessionID: String? = nil) {
+    init(credentialPath: String? = nil, webSessionID: String? = nil, allowsCLIFallback: Bool = true) {
         self.credentialPath = credentialPath
         self.webSessionID = webSessionID
+        self.allowsCLIFallback = allowsCLIFallback
     }
 
     func fetchAccounts() async throws -> [UsageAccount] {
@@ -896,10 +900,15 @@ struct GrokUsageAdapter: UsageProviderAdapter {
             case .usage(let reading):
                 return GrokUsageFetch(buckets: GrokWebCredits.buckets(from: reading), notice: nil)
             case .needsReLogin(let message):
+                guard allowsCLIFallback else { throw UsageAdapterError.authenticationExpired(message) }
                 notice = "\(message) Showing the CLI billing reading until then."
             case .undecodable(let message), .unavailable(let message):
+                guard allowsCLIFallback else { throw UsageAdapterError.invalidResponse(message) }
                 notice = "\(message) Showing the CLI billing reading until then."
             }
+        }
+        guard allowsCLIFallback else {
+            throw UsageAdapterError.credentialsUnavailable("Sign in on grok.com for this Grok account, then refresh UsageDock.")
         }
 
         do {

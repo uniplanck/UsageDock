@@ -5645,3 +5645,103 @@ final class RailMotionRuntimeTests: XCTestCase {
         XCTAssertEqual(final.wetting, 1, accuracy: 0.01)
     }
 }
+
+@MainActor
+final class GrokSecondAccountTests: XCTestCase {
+    private func makeDefaults() -> (UserDefaults, String) {
+        let suite = "UsageDockTests.GrokSecondAccount.\(UUID().uuidString)"
+        return (UserDefaults(suiteName: suite)!, suite)
+    }
+
+    func testAddGrokWebAccountKeepsExistingLoginAndUsesNewSession() throws {
+        let (defaults, suite) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = UsageStore(defaults: defaults)
+        let existing = UsageAccount(
+            provider: .grok,
+            name: "Grok Web",
+            source: .currentSession,
+            grokWebSessionID: "6f1c2a40-1111-2222-3333-444455556666",
+            buckets: []
+        )
+        store.accounts = [existing]
+
+        let secondID = store.addGrokWebAccount()
+        let thirdID = store.addGrokWebAccount()
+
+        XCTAssertEqual(store.accounts.first, existing)
+        let second = try XCTUnwrap(store.accounts.first { $0.id == secondID })
+        let third = try XCTUnwrap(store.accounts.first { $0.id == thirdID })
+        XCTAssertEqual(second.name, "Grok Web 2")
+        XCTAssertEqual(third.name, "Grok Web 3")
+        XCTAssertEqual(second.provider, .grok)
+        XCTAssertEqual(second.source, .profile)
+        let sessions = [existing, second, third].compactMap { $0.grokWebSessionID.flatMap(UUID.init(uuidString:)) }
+        XCTAssertEqual(Set(sessions).count, 3)
+        XCTAssertEqual(store.visibleAccounts(for: .grok).map(\.id), [existing.id, secondID, thirdID])
+
+        // Names only need to stay unique, so a renamed slot may be reused.
+        store.accounts[1].name = "yamaon.biz"
+        let reusedID = store.addGrokWebAccount()
+        XCTAssertEqual(store.accounts.first { $0.id == reusedID }?.name, "Grok Web 2")
+    }
+
+    func testFirstAddedGrokAccountUsesPlainName() {
+        let (defaults, suite) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = UsageStore(defaults: defaults)
+        store.addGrokWebAccount()
+        XCTAssertEqual(store.accounts.map(\.name), ["Grok Web"])
+    }
+
+    func testTwoGrokAccountsRefreshAndDisplaySeparately() async throws {
+        let (defaults, suite) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let firstID = UUID()
+        let store = UsageStore(defaults: defaults, usageFetcher: { account in
+            var fetched = account
+            fetched.buckets = [
+                UsageBucket(quotaID: "grok-weekly", label: "1w", kind: .weekly,
+                            percentUsed: account.id == firstID ? 0.2 : 0.7, resetsAt: nil)
+            ]
+            return fetched
+        })
+        store.accounts = [UsageAccount(
+            id: firstID, provider: .grok, name: "Grok Web", source: .currentSession,
+            grokWebSessionID: UUID().uuidString, buckets: []
+        )]
+        let secondID = store.addGrokWebAccount()
+
+        await store.refreshProvider(.grok, manual: true)
+
+        let targets = store.railTargets()
+        XCTAssertEqual(targets, [
+            .account(id: firstID, provider: .grok),
+            .account(id: secondID, provider: .grok)
+        ])
+        let percents = targets.map { store.summary(for: $0).aggregates.first?.percentUsed }
+        XCTAssertEqual(percents, [0.2, 0.7])
+        XCTAssertEqual(targets.compactMap { store.account(for: $0)?.name }, ["Grok Web", "Grok Web 2"])
+    }
+
+    func testWebOnlyGrokAccountNeverReadsSharedCLIBilling() async {
+        let webOnly = UsageAccount(provider: .grok, name: "Grok Web 2", source: .profile,
+                                   grokWebSessionID: UUID().uuidString, buckets: [])
+        XCTAssertFalse(UsageStore.grokAllowsCLIFallback(webOnly))
+        XCTAssertTrue(UsageStore.grokAllowsCLIFallback(
+            UsageAccount(provider: .grok, name: "Grok Web", source: .currentSession, buckets: [])
+        ))
+        XCTAssertTrue(UsageStore.grokAllowsCLIFallback(
+            UsageAccount(provider: .grok, name: "CLI", source: .profile, credentialPath: "/tmp/auth.json", buckets: [])
+        ))
+
+        do {
+            _ = try await GrokUsageAdapter(webSessionID: nil, allowsCLIFallback: false).fetchOutcome()
+            XCTFail("web-only Grok account fell back to CLI billing")
+        } catch UsageAdapterError.credentialsUnavailable(let message) {
+            XCTAssertTrue(message.contains("grok.com"))
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+}

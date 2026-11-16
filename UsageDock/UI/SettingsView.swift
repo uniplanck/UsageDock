@@ -1415,6 +1415,13 @@ private struct ProviderSettingsSection: View {
                             Label("Sign in on grok.com", systemImage: "globe")
                         }
                         .help("Opens grok.com in an isolated UsageDock window. The session cookies stay in that window's data store. Settings → Usage is preferred over the CLI billing percentage.")
+
+                        Button {
+                            usageStore.addGrokWebAccountAndSignIn()
+                        } label: {
+                            Label("Grok アカウントを追加", systemImage: "person.crop.circle.badge.plus")
+                        }
+                        .help("別の grok.com ログイン用に新しいアカウントを作り、専用のデータストアでサインイン窓を開きます。既存の Grok アカウントとログインはそのまま残ります。")
                     }
 
                     if provider.supportsLiveUsage {
