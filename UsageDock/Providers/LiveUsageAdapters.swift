@@ -861,6 +861,7 @@ struct KimiUsageAdapter: UsageProviderAdapter {
 struct GrokUsageFetch {
     var buckets: [UsageBucket]
     var notice: String?
+    var requiresSignIn: Bool = false
 }
 
 struct GrokUsageAdapter: UsageProviderAdapter {
@@ -894,6 +895,7 @@ struct GrokUsageAdapter: UsageProviderAdapter {
     /// An undecodable web body never becomes 0%.
     func fetchOutcome() async throws -> GrokUsageFetch {
         var notice: String?
+        var requiresSignIn = false
         if let webSessionID, let sessionID = UUID(uuidString: webSessionID) {
             let payload = await GrokWebSession.fetchCredits(sessionID: sessionID)
             switch payload.interpretation {
@@ -901,6 +903,7 @@ struct GrokUsageAdapter: UsageProviderAdapter {
                 return GrokUsageFetch(buckets: GrokWebCredits.buckets(from: reading), notice: nil)
             case .needsReLogin(let message):
                 guard allowsCLIFallback else { throw UsageAdapterError.authenticationExpired(message) }
+                requiresSignIn = true
                 notice = "\(message) Showing the CLI billing reading until then."
             case .undecodable(let message), .unavailable(let message):
                 guard allowsCLIFallback else { throw UsageAdapterError.invalidResponse(message) }
@@ -912,7 +915,7 @@ struct GrokUsageAdapter: UsageProviderAdapter {
         }
 
         do {
-            return GrokUsageFetch(buckets: try await fetchCLIBuckets(), notice: notice)
+            return GrokUsageFetch(buckets: try await fetchCLIBuckets(), notice: notice, requiresSignIn: requiresSignIn)
         } catch {
             if let notice {
                 throw UsageAdapterError.authenticationExpired("\(notice) CLI billing also failed: \(error.localizedDescription)")
