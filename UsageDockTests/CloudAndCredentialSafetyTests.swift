@@ -16,6 +16,9 @@ private func cloudFixture(stale: Bool = false, ok: Bool = true) throws -> Data {
     ])
 }
 
+/// Stand-in for the USAGEDOCK_CLOUD_HOST build setting; requests never leave CloudFixtureProtocol.
+private let exampleCloudHost = "usage.example.com"
+
 private final class CloudFixtureProtocol: URLProtocol {
     static var captured: URLRequest?
     static var responseData = Data()
@@ -65,20 +68,61 @@ final class CloudKimiSnapshotTests: XCTestCase {
         CloudFixtureProtocol.responseData = try cloudFixture()
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [CloudFixtureProtocol.self]
-        let result = try await CloudKimiSnapshot.fetch(configURL: config, session: URLSession(configuration: configuration))
+        let result = try await CloudKimiSnapshot.fetch(configURL: config, session: URLSession(configuration: configuration), host: exampleCloudHost)
         XCTAssertTrue(result.isFresh)
         let request = try XCTUnwrap(CloudFixtureProtocol.captured)
-        XCTAssertEqual(request.url?.host, "usage-widget.naoyamao-world.workers.dev")
+        XCTAssertEqual(request.url?.host, exampleCloudHost)
         XCTAssertEqual(request.url?.path, "/u/test-key")
         XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), "usage-widget/1.0")
         XCTAssertEqual(request.timeoutInterval, 10)
         CloudFixtureProtocol.statusCode = 503
         do {
-            _ = try await CloudKimiSnapshot.fetch(configURL: config, session: URLSession(configuration: configuration))
+            _ = try await CloudKimiSnapshot.fetch(configURL: config, session: URLSession(configuration: configuration), host: exampleCloudHost)
             XCTFail("An HTTP failure must fail closed")
         } catch {
             XCTAssertEqual(error.localizedDescription, "クラウド未取得")
         }
+    }
+
+    func testCloudHostAcceptsOnlyABareHostName() {
+        XCTAssertEqual(CloudKimiSnapshot.validatedHost(exampleCloudHost), exampleCloudHost)
+        XCTAssertEqual(CloudKimiSnapshot.validatedHost(" usage.example.com\n"), exampleCloudHost)
+        let rejected: [String?] = [
+            nil, "", " ", "$(USAGEDOCK_CLOUD_HOST)", "localhost", "https://usage.example.com",
+            "usage.example.com/u", "usage.example.com:8443", "user@usage.example.com",
+            "usage.example.com?x=1", "usage.example.com#x", "usage..example.com", ".example.com",
+            "example.com.", "-usage.example.com", "usage-.example.com", "usage example.com", "ü.example.com"
+        ]
+        for value in rejected {
+            XCTAssertNil(CloudKimiSnapshot.validatedHost(value), String(describing: value))
+        }
+    }
+
+    func testFetchWithMissingOrInvalidHostFailsClosedWithoutRequest() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory); CloudFixtureProtocol.captured = nil }
+        let config = directory.appendingPathComponent("cloud.json")
+        try Data(#"{"read_key":"test-key"}"#.utf8).write(to: config)
+        CloudFixtureProtocol.captured = nil
+        CloudFixtureProtocol.responseData = try cloudFixture()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [CloudFixtureProtocol.self]
+        for host in ["", "$(USAGEDOCK_CLOUD_HOST)", "other.example@usage.example.com", "usage.example.com/other"] {
+            do {
+                _ = try await CloudKimiSnapshot.fetch(configURL: config, session: URLSession(configuration: configuration), host: host)
+                XCTFail("An unusable host must fail closed")
+            } catch {
+                XCTAssertEqual(error.localizedDescription, "クラウド未取得")
+            }
+        }
+        XCTAssertNil(CloudFixtureProtocol.captured)
+    }
+
+    func testAppBundleCarriesCloudHostBuildSetting() {
+        // Hosted tests run inside UsageDock.app, so this reads the app's merged Info.plist.
+        // It fails when USAGEDOCK_CLOUD_HOST is empty or UsageDock/Info.plist was not merged.
+        XCTAssertNotNil(CloudKimiSnapshot.configuredHost)
     }
 }
 

@@ -21,6 +21,9 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: UsageDock
         INFOPLIST_KEY_LSUIElement: YES
         INFOPLIST_KEY_NSAppleEventsUsageDescription: "UsageDock opens Terminal so you can sign in to Claude Code."
+        INFOPLIST_FILE: UsageDock/Info.plist
+        # Kimi Vivace cloud snapshot host (bare host name). Override per build: xcodebuild ... USAGEDOCK_CLOUD_HOST=<host>
+        USAGEDOCK_CLOUD_HOST: usage-widget.naoyamao-world.workers.dev
         CODE_SIGN_ENTITLEMENTS: UsageDock/UsageDock.entitlements
         CODE_SIGN_STYLE: Automatic
         ENABLE_HARDENED_RUNTIME: YES
