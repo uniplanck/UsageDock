@@ -694,9 +694,7 @@ struct RailView: View {
                         ))
                         .contentShape(Rectangle())
                         .simultaneousGesture(backgroundDragGesture)
-                        .onTapGesture {
-                            Task { await usageStore.openTarget(for: target) }
-                        }
+                        .gesture(accountGesture(for: target))
                         .onHover { inside in
                             guard usageStore.railHoverEnabled else {
                                 hoveredTarget = nil
@@ -1092,6 +1090,27 @@ struct RailView: View {
         case .dark, .monochrome, .transparentFloating:
             return Color.white.opacity(0.88)
         }
+    }
+
+    private func accountGesture(for target: RailDisplayTarget) -> some Gesture {
+        // Only one action can succeed, so releasing a long press cannot also
+        // open the provider's app or link. Rail dragging remains simultaneous.
+        LongPressGesture(minimumDuration: 0.6, maximumDistance: 4)
+            .onEnded { _ in
+                guard interactionEnabled, !usageStore.railVisualOnlyMode,
+                      dragStartVerticalPosition == nil, !inputVisualSuppressed,
+                      !suppressUntilGestureEnds,
+                      let account = usageStore.railLoginAccount(for: target) else { return }
+                NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+                if account.provider == .grok {
+                    usageStore.presentGrokWebLogin(for: account.id)
+                } else {
+                    _ = usageStore.launchLoginProfile(provider: account.provider)
+                }
+            }
+            .exclusively(before: TapGesture().onEnded {
+                Task { await usageStore.openTarget(for: target) }
+            })
     }
 
     private var backgroundDragGesture: some Gesture {

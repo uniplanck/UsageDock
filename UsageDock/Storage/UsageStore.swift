@@ -826,6 +826,13 @@ final class UsageStore: ObservableObject {
         return runtimeAccounts.first { $0.id == id }
     }
 
+    func railLoginAccount(for target: RailDisplayTarget) -> UsageAccount? {
+        visibleAccounts(for: target.provider).first { account in
+            if case .account(let id, _) = target, account.id != id { return false }
+            return RailLoginPolicy.requiresLogin(account: account, refreshState: accountRefreshState(for: account.id))
+        }
+    }
+
     /// Fusion values are stale if any contributing account failed to refresh.
     func refreshFailureLabel(for target: RailDisplayTarget) -> String? {
         let contributors = runtimeAccounts.filter { account in
@@ -1532,7 +1539,7 @@ final class UsageStore: ObservableObject {
             return "Live · \(Self.timeFormatter.string(from: date))"
         case .rateLimited:
             return appLanguage.localized("Rate limited · showing last known usage")
-        case .degraded(let date, let message):
+        case .degraded(let date, let message, _):
             return "\(message) · \(Self.timeFormatter.string(from: date))"
         case .failed:
             return appLanguage.localized(accountRefreshState(for: account.id).failureLabel ?? "Refresh failed")
@@ -1580,6 +1587,7 @@ final class UsageStore: ObservableObject {
             do {
                 let fetched: UsageAccount
                 var webNotice: String?
+                var webLoginRequired = false
                 if account.source == .cloudSnapshot {
                     guard provider == .kimi, let configURL = cloudConfigURL else { throw CloudKimiSnapshot.Failure.unavailable }
                     let outcome = try await cloudUsageFetcher(configURL)
@@ -1639,6 +1647,7 @@ final class UsageStore: ObservableObject {
                             allowsCLIFallback: Self.grokAllowsCLIFallback(account)
                         ).fetchOutcome()
                         webNotice = outcome.notice
+                        webLoginRequired = outcome.requiresSignIn
                         fetched = UsageAccount(provider: .grok, name: account.name, buckets: outcome.buckets)
                     case .cursor:
                         throw UsageAdapterError.credentialsUnavailable("\(provider.displayName) login and live quota integration is not available yet.")
@@ -1659,7 +1668,7 @@ final class UsageStore: ObservableObject {
                 claudeKeychainWarningIDs.remove(accountID)
                 if account.source == .cloudSnapshot { freshCloudAccountIDs.insert(accountID) }
                 if let webNotice {
-                    accountRefreshStates[accountID] = .degraded(now, webNotice)
+                    accountRefreshStates[accountID] = .degraded(now, webNotice, requiresSignIn: webLoginRequired)
                 } else {
                     accountRefreshStates[accountID] = .live(now)
                 }
@@ -1683,10 +1692,10 @@ final class UsageStore: ObservableObject {
         for accountID in accountIDs {
             guard let account = accounts.first(where: { $0.id == accountID }) else { continue }
             switch accountRefreshState(for: accountID) {
-            case .live(let date), .degraded(let date, _):
+            case .live(let date), .degraded(let date, _, _):
                 successes += 1
                 lastSuccessAt = max(lastSuccessAt ?? date, date)
-                if case .degraded(_, let notice) = accountRefreshState(for: accountID) { notices.append(notice) }
+                if case .degraded(_, let notice, _) = accountRefreshState(for: accountID) { notices.append(notice) }
             case .rateLimited(let lastSuccess, _):
                 successes += 1
                 if let lastSuccess {
@@ -1972,7 +1981,7 @@ enum AccountRefreshState: Equatable {
     case refreshing
     case live(Date)
     case rateLimited(lastSuccess: Date?, retryAt: Date)
-    case degraded(Date, String)
+    case degraded(Date, String, requiresSignIn: Bool = false)
     case failed(String, requiresSignIn: Bool = false)
 
     static func failure(_ error: Error) -> Self {
@@ -1992,13 +2001,25 @@ enum AccountRefreshState: Equatable {
     }
 
     var requiresSignIn: Bool {
-        if case .failed(_, let required) = self { return required }
-        return false
+        switch self {
+        case .failed(_, let required), .degraded(_, _, let required): return required
+        default: return false
+        }
     }
 
     var failureLabel: String? {
         guard case .failed(_, let requiresSignIn) = self else { return nil }
         return requiresSignIn ? "Refresh failed – sign in again" : "Refresh failed"
+    }
+}
+
+enum RailLoginPolicy {
+    static func requiresLogin(account: UsageAccount, refreshState: AccountRefreshState) -> Bool {
+        guard account.isEnabled, account.provider.supportsProfileLogin,
+              account.source != .cloudSnapshot else { return false }
+        // An empty, unrefreshed login has not authenticated yet. Cached usage
+        // alone must not make a restored account require another login.
+        return refreshState.requiresSignIn || (refreshState == .idle && account.buckets.isEmpty)
     }
 }
 

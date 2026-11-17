@@ -1347,6 +1347,114 @@ final class UsageDisplayRegressionTests: XCTestCase {
     }
 }
 
+final class RailLoginPolicyTests: XCTestCase {
+    private let now = Date(timeIntervalSince1970: 1_000_000)
+    private let bucket = UsageBucket(quotaID: "weekly", label: "1w", kind: .weekly, percentUsed: 0.4)
+
+    func testAuthenticationErrorsAllowLoginEvenWithCachedUsage() {
+        for provider in ProviderID.allCases where provider.supportsProfileLogin {
+            let account = UsageAccount(provider: provider, name: "Fixture", source: .profile, buckets: [bucket])
+            for error in [UsageAdapterError.authenticationExpired("expired"), .credentialsUnavailable("missing")] {
+                XCTAssertTrue(RailLoginPolicy.requiresLogin(account: account, refreshState: .failure(error)), provider.rawValue)
+            }
+        }
+    }
+
+    func testUnrefreshedEmptyLoginsAllowLoginButRestoredUsageDoesNot() {
+        for source in [UsageAccountSource.profile, .currentSession] {
+            var account = UsageAccount(provider: .grok, name: "Fixture", source: source, buckets: [])
+            XCTAssertTrue(RailLoginPolicy.requiresLogin(account: account, refreshState: .idle))
+            account.buckets = [bucket]
+            XCTAssertFalse(RailLoginPolicy.requiresLogin(account: account, refreshState: .idle))
+        }
+    }
+
+    func testHealthyRefreshingRateLimitedAndNetworkFailureStatesDoNotAllowLogin() {
+        let states: [AccountRefreshState] = [
+            .refreshing, .live(now),
+            .rateLimited(lastSuccess: nil, retryAt: now.addingTimeInterval(300)),
+            .degraded(now, "temporary network failure"),
+            .failure(UsageAdapterError.invalidResponse("network failure"))
+        ]
+        for buckets in [[], [bucket]] {
+            let account = UsageAccount(provider: .grok, name: "Fixture", source: .profile, buckets: buckets)
+            for state in states {
+                XCTAssertFalse(RailLoginPolicy.requiresLogin(account: account, refreshState: state), "\(state)")
+            }
+        }
+    }
+
+    func testGrokWebLoginExpiryAllowsLoginWhileCLIBillingRemainsAvailable() {
+        let account = UsageAccount(provider: .grok, name: "Fixture", source: .currentSession, buckets: [bucket])
+        let state = AccountRefreshState.degraded(now, "Web login expired; showing CLI billing", requiresSignIn: true)
+        XCTAssertTrue(state.requiresSignIn)
+        XCTAssertTrue(RailLoginPolicy.requiresLogin(account: account, refreshState: state))
+        XCTAssertFalse(state.isStale)
+    }
+
+    func testDisabledCloudAndUnsupportedAccountsDoNotAllowLocalLogin() {
+        let accounts = [
+            UsageAccount(provider: .claude, name: "Disabled", isEnabled: false, source: .profile, buckets: []),
+            UsageAccount(provider: .kimi, name: "Cloud", source: .cloudSnapshot, buckets: []),
+            UsageAccount(provider: .cursor, name: "Unsupported", source: .currentSession, buckets: [])
+        ]
+        for account in accounts {
+            for state in [AccountRefreshState.idle, .failure(UsageAdapterError.authenticationExpired("expired"))] {
+                XCTAssertFalse(RailLoginPolicy.requiresLogin(account: account, refreshState: state))
+            }
+        }
+    }
+}
+
+@MainActor
+final class RailLoginAccountTests: XCTestCase {
+    func testSelectsOnlyThePressedGrokAccountAndFailedFusionContributor() async {
+        let suite = "UsageDockTests.RailLogin.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let first = UsageAccount(provider: .grok, name: "First", source: .profile, buckets: [])
+        let second = UsageAccount(provider: .grok, name: "Second", source: .profile, buckets: [])
+        let store = UsageStore(defaults: defaults, usageFetcher: { account in
+            if account.id == second.id { throw UsageAdapterError.authenticationExpired("expired web login") }
+            return account
+        })
+        store.accounts = [first, second]
+        await store.refreshProvider(.grok)
+
+        XCTAssertNil(store.railLoginAccount(for: .account(id: first.id, provider: .grok)))
+        XCTAssertEqual(store.railLoginAccount(for: .account(id: second.id, provider: .grok))?.id, second.id)
+        XCTAssertNil(store.railLoginAccount(for: .account(id: second.id, provider: .claude)))
+        XCTAssertNil(store.railLoginAccount(for: .account(id: UUID(), provider: .grok)))
+        store.setFusionEnabled(true, for: .grok)
+        XCTAssertEqual(store.railTargets(), [.provider(.grok)])
+        XCTAssertEqual(store.railLoginAccount(for: .provider(.grok))?.id, second.id)
+        store.accounts[1].isEnabled = false
+        XCTAssertNil(store.railLoginAccount(for: .provider(.grok)))
+    }
+
+    func testSuccessfulRefreshStopsOfferingLogin() async {
+        let suite = "UsageDockTests.RailLoginRecovery.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var now = Date(timeIntervalSince1970: 1_000_000)
+        var requiresLogin = true
+        let account = UsageAccount(provider: .codex, name: "Fixture", source: .profile, buckets: [])
+        let store = UsageStore(defaults: defaults, now: { now }, usageFetcher: { account in
+            if requiresLogin { throw UsageAdapterError.credentialsUnavailable("missing") }
+            return account
+        })
+        store.accounts = [account]
+        let target = RailDisplayTarget.account(id: account.id, provider: .codex)
+        await store.refreshProvider(.codex)
+        XCTAssertEqual(store.railLoginAccount(for: target)?.id, account.id)
+
+        requiresLogin = false
+        now.addTimeInterval(61)
+        await store.refreshProvider(.codex)
+        XCTAssertNil(store.railLoginAccount(for: target))
+    }
+}
+
 final class AccountRefreshStateDisplayTests: XCTestCase {
     func testAuthenticationFailuresAreMarkedStaleAndRequireSignIn() {
         let errors: [Error] = [
