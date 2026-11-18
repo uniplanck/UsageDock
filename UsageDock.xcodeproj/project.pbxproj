@@ -350,6 +350,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = UsageDock/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = UsageDock;
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "UsageDock opens Terminal so you can sign in to Claude Code.";
@@ -361,6 +362,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.uniplanck.UsageDock;
 				PRODUCT_NAME = UsageDock;
 				SDKROOT = macosx;
+				USAGEDOCK_CLOUD_HOST = "usage-widget.naoyamao-world.workers.dev";
 			};
 			name = Release;
 		};
@@ -452,6 +454,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = UsageDock/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = UsageDock;
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "UsageDock opens Terminal so you can sign in to Claude Code.";
@@ -463,6 +466,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.uniplanck.UsageDock;
 				PRODUCT_NAME = UsageDock;
 				SDKROOT = macosx;
+				USAGEDOCK_CLOUD_HOST = "usage-widget.naoyamao-world.workers.dev";
 			};
 			name = Debug;
 		};

@@ -4,8 +4,14 @@ import Foundation
 /// persisted in account metadata or included in error messages.
 struct CloudKimiSnapshot {
     static let providerKey = "kimi_vivace"
+    /// Info.plist key filled from the `USAGEDOCK_CLOUD_HOST` build setting (see project.yml).
+    static let hostInfoPlistKey = "UsageDockCloudHost"
     static var defaultConfigURL: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".usage-widget/cloud.json")
+    }
+    /// Worker host baked into this build, or nil when the build setting is missing or malformed.
+    static var configuredHost: String? {
+        validatedHost(Bundle.main.object(forInfoDictionaryKey: hostInfoPlistKey) as? String)
     }
 
     struct Outcome {
@@ -38,6 +44,22 @@ struct CloudKimiSnapshot {
         let resets_at: Double?
     }
 
+    /// Accepts only a bare DNS host name (ASCII letters, digits, hyphens and dots, at least two
+    /// labels), so the read key is never sent with another scheme, port, path or user info.
+    static func validatedHost(_ value: String?) -> String? {
+        guard let host = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !host.isEmpty, host.utf8.count <= 253 else { return nil }
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.count >= 2 else { return nil }
+        for label in labels {
+            guard !label.isEmpty, label.utf8.count <= 63, label.first != "-", label.last != "-",
+                  label.unicodeScalars.allSatisfy({ hostLabelScalars.contains($0) }) else { return nil }
+        }
+        return host
+    }
+    private static let hostLabelScalars = CharacterSet(charactersIn:
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")
+
     static func parse(_ data: Data) throws -> Outcome {
         guard let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data),
               snapshot.version == 1, snapshot.updated_epoch.isFinite, snapshot.updated_epoch > 0,
@@ -60,12 +82,14 @@ struct CloudKimiSnapshot {
         ], fetchedAt: Date(timeIntervalSince1970: provider.fetched_at), isFresh: provider.ok && !provider.stale)
     }
 
-    static func fetch(configURL: URL, session: URLSession? = nil) async throws -> Outcome {
-        guard let data = try? Data(contentsOf: configURL),
+    static func fetch(configURL: URL, session: URLSession? = nil,
+                      host: String? = CloudKimiSnapshot.configuredHost) async throws -> Outcome {
+        guard let cloudHost = validatedHost(host),
+              let data = try? Data(contentsOf: configURL),
               let key = try? JSONDecoder().decode(Config.self, from: data).read_key,
               !key.isEmpty,
               let escaped = key.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#"))),
-              let url = URL(string: "https://usage-widget.naoyamao-world.workers.dev/u/" + escaped) else {
+              let url = URL(string: "https://" + cloudHost + "/u/" + escaped) else {
             throw Failure.unavailable
         }
         let configuration = URLSessionConfiguration.ephemeral
