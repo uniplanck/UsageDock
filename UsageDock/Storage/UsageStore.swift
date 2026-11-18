@@ -605,8 +605,13 @@ final class UsageStore: ObservableObject {
             (provider, savedURLs[provider.rawValue] ?? provider.defaultWebURL)
         })
 
-        let decoded = defaults.data(forKey: Self.accountsKey)
-            .flatMap { try? decoder.decode([UsageAccount].self, from: $0) } ?? []
+        let decoded: [UsageAccount]
+        if let data = defaults.data(forKey: Self.accountsKey),
+           let parsed = try? decoder.decode([UsageAccount].self, from: data) {
+            decoded = parsed
+        } else {
+            decoded = []
+        }
         let migrated = AntigravityProfiles.assignSlots(
             to: Self.migratedAccounts(decoded), directory: profilesDirectory,
             recoverKnownProfile: !defaults.bool(forKey: AntigravityProfiles.recoveryKey)
