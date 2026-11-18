@@ -339,15 +339,24 @@ enum ClaudeQuotaDisplay {
 }
 
 enum AntigravityQuotaDisplay {
-    private static let quotaIDs = [
-        "antigravity-gemini-models-fiveHour",
-        "antigravity-gemini-models-weekly",
-        "antigravity-claude-and-gpt-models-fiveHour",
-        "antigravity-claude-and-gpt-models-weekly"
+    struct Window: Identifiable {
+        let id: String
+        let family: String
+        let kind: UsageWindowKind
+
+        var duration: String { kind == .fiveHour ? "5h" : "1w" }
+        var label: String { "\(family) · \(duration)" }
+    }
+
+    static let windows = [
+        Window(id: "antigravity-gemini-models-fiveHour", family: "Gemini", kind: .fiveHour),
+        Window(id: "antigravity-gemini-models-weekly", family: "Gemini", kind: .weekly),
+        Window(id: "antigravity-claude-and-gpt-models-fiveHour", family: "Claude and GPT", kind: .fiveHour),
+        Window(id: "antigravity-claude-and-gpt-models-weekly", family: "Claude and GPT", kind: .weekly)
     ]
 
     static func ordered<Item>(_ rows: [Item], quotaID: KeyPath<Item, String>) -> [Item] {
-        quotaIDs.compactMap { id in rows.first { $0[keyPath: quotaID] == id } }
+        windows.compactMap { window in rows.first { $0[keyPath: quotaID] == window.id } }
     }
 }
 
@@ -409,17 +418,20 @@ enum RailEdgeColorMode: String, Codable, CaseIterable, Identifiable {
 enum RailDisplayTarget: Hashable, Identifiable {
     case provider(ProviderID)
     case account(id: UUID, provider: ProviderID)
+    case antigravityGroup
 
     var id: String {
         switch self {
         case .provider(let provider): "provider:\(provider.rawValue)"
         case .account(let id, _): "account:\(id.uuidString)"
+        case .antigravityGroup: "antigravity:group"
         }
     }
 
     var provider: ProviderID {
         switch self {
         case .provider(let provider), .account(_, let provider): provider
+        case .antigravityGroup: .antigravity
         }
     }
 }
@@ -435,6 +447,7 @@ struct UsageAccount: Identifiable, Codable, Hashable {
     var multiplierMode: MultiplierMode?
     var accentHex: String?
     var profileHomePath: String?
+    var antigravitySlot: Int?
     var webURL: String?
     var railPercentSource: RailQuotaSource?
     var railOuterRingSource: RailQuotaSource?
@@ -456,6 +469,7 @@ struct UsageAccount: Identifiable, Codable, Hashable {
         multiplierMode: MultiplierMode? = nil,
         accentHex: String? = nil,
         profileHomePath: String? = nil,
+        antigravitySlot: Int? = nil,
         webURL: String? = nil,
         railPercentSource: RailQuotaSource? = nil,
         railOuterRingSource: RailQuotaSource? = nil,
@@ -474,6 +488,7 @@ struct UsageAccount: Identifiable, Codable, Hashable {
         self.multiplierMode = multiplierMode
         self.accentHex = accentHex
         self.profileHomePath = profileHomePath
+        self.antigravitySlot = antigravitySlot
         self.webURL = webURL
         self.railPercentSource = railPercentSource
         self.railOuterRingSource = railOuterRingSource
@@ -486,6 +501,12 @@ struct UsageAccount: Identifiable, Codable, Hashable {
     var normalizedPlanMultiplier: Int? {
         guard let planMultiplier, planMultiplier > 0 else { return nil }
         return min(planMultiplier, 999)
+    }
+
+    var antigravityProfileSlot: Int? {
+        guard provider == .antigravity, source == .profile,
+              let antigravitySlot, (0...5).contains(antigravitySlot) else { return nil }
+        return antigravitySlot
     }
 }
 

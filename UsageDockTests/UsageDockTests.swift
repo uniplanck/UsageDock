@@ -2277,7 +2277,8 @@ final class AntigravityRailQuotaTests: XCTestCase {
         let account = UsageAccount(
             provider: .antigravity,
             name: "Antigravity",
-            source: .currentSession,
+            source: .profile,
+            antigravitySlot: 0,
             railPercentSource: .bucket(quotaID: "antigravity-claude-and-gpt-models-fiveHour"),
             railOuterRingSource: .bucket(quotaID: "antigravity-gemini-models-weekly"),
             railInnerRingSource: .bucket(quotaID: "antigravity-claude-and-gpt-models-weekly"),
@@ -5819,7 +5820,7 @@ final class AntigravitySecondAccountTests: XCTestCase {
         let thirdID = try store.addAntigravityAccount()
 
         XCTAssertEqual(store.accounts.first, native)
-        XCTAssertEqual(store.accounts.map(\.name), ["Local Login", "Antigravity 2", "Antigravity 3"])
+        XCTAssertEqual(store.accounts.map(\.name), ["Local Login", "agy-0", "agy-1"])
         for id in [secondID, thirdID] {
             let account = try XCTUnwrap(store.accounts.first { $0.id == id })
             XCTAssertEqual(account.source, .profile)
@@ -5827,8 +5828,11 @@ final class AntigravitySecondAccountTests: XCTestCase {
         }
 
         store.accounts[1].name = "Google AI Ultra"
-        let reusedID = try store.addAntigravityAccount()
-        XCTAssertEqual(store.accounts.first { $0.id == reusedID }?.name, "Antigravity 2")
+        store.moveAccount(secondID, direction: 1)
+        let nextID = try store.addAntigravityAccount()
+        XCTAssertEqual(store.accounts.first { $0.id == secondID }?.antigravityProfileSlot, 0)
+        XCTAssertEqual(store.accounts.first { $0.id == thirdID }?.antigravityProfileSlot, 1)
+        XCTAssertEqual(store.accounts.first { $0.id == nextID }?.name, "agy-2")
     }
 
     func testSecondAntigravityAccountNeedsItsOwnLogin() async throws {
@@ -5846,7 +5850,7 @@ final class AntigravitySecondAccountTests: XCTestCase {
                         kind: .fiveHour, percentUsed: 0.4)
         ])
         let profile = UsageAccount(provider: .antigravity, name: "Antigravity 2", source: .profile,
-                                   profileHomePath: home.path, buckets: [])
+                                   profileHomePath: home.path, antigravitySlot: 0, buckets: [])
         var nativeFetches = 0
         var profileFetches = 0
         let store = UsageStore(defaults: defaults, now: { Date(timeIntervalSince1970: 1_000_000) }, usageFetcher: { account in
@@ -5879,7 +5883,7 @@ final class AntigravitySecondAccountTests: XCTestCase {
             XCTAssertTrue(store.accountRefreshState(for: profile.id).requiresSignIn)
             XCTAssertTrue(store.summary(for: profileTarget).aggregates.isEmpty)
             XCTAssertEqual(store.summary(for: nativeTarget).pressurePercent, 0.4)
-            XCTAssertEqual(store.railTargets(), [nativeTarget, profileTarget])
+            XCTAssertEqual(store.railTargets(), [profileTarget, .antigravityGroup])
             XCTAssertEqual(store.railLoginAccount(for: profileTarget)?.id, profile.id)
             XCTAssertNil(store.railLoginAccount(for: nativeTarget))
         }
@@ -5901,6 +5905,216 @@ final class AntigravitySecondAccountTests: XCTestCase {
             return XCTFail("An Antigravity profile requires its own home")
         }
         XCTAssertTrue(message.contains("profile directory"))
+    }
+
+    func testKnownSlotZeroMigratesFromEitherRegistrationOrDirectory() throws {
+        let knownID = try XCTUnwrap(UUID(uuidString: "4134060A-D473-4894-A637-79C2B1CFFD95"))
+        for hasRegistration in [false, true] {
+            let suite = "UsageDockTests.AntigravityMigration.\(UUID())"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(suite)
+            let knownHome = directory.appendingPathComponent(knownID.uuidString)
+            defer {
+                defaults.removePersistentDomain(forName: suite)
+                try? FileManager.default.removeItem(at: directory)
+            }
+            var native = UsageAccount(provider: .antigravity, name: "Default agy", source: .currentSession, buckets: [])
+            native.antigravitySlot = 5
+            let legacy = UsageAccount(provider: .antigravity, name: "Older numbered profile", source: .profile, buckets: [])
+            var saved = [native, legacy]
+            if hasRegistration {
+                saved.append(UsageAccount(id: knownID, provider: .antigravity, name: "Unfinished login",
+                                          source: .profile, buckets: []))
+            } else {
+                try FileManager.default.createDirectory(at: knownHome, withIntermediateDirectories: true)
+            }
+            defaults.set(try JSONEncoder().encode(saved), forKey: "UsageDock.accounts.v3")
+            defaults.set([native.id.uuidString], forKey: "UsageDock.displayAccountIDs.v1")
+            defaults.set(native.id.uuidString, forKey: "UsageDock.activeDisplayAccountID.v1")
+
+            let store = UsageStore(defaults: defaults, antigravityProfilesDirectory: directory)
+            let recovered = try XCTUnwrap(store.accounts.first { $0.id == knownID })
+            XCTAssertEqual(recovered.antigravityProfileSlot, 0)
+            XCTAssertEqual(recovered.profileHomePath, knownHome.path)
+            XCTAssertNil(store.accounts.first { $0.id == native.id }?.antigravitySlot)
+            XCTAssertTrue(store.visibleAccounts(for: .antigravity).contains { $0.id == native.id && $0.isEnabled })
+            XCTAssertTrue(store.displaySelectableAccounts().isEmpty)
+            XCTAssertEqual(store.railTargets(), [.account(id: knownID, provider: .antigravity), .antigravityGroup])
+            XCTAssertEqual(store.railLoginAccount(for: .antigravityGroup)?.id, legacy.id)
+            let table = directory.appendingPathComponent("slots.tsv")
+            XCTAssertEqual(try String(contentsOf: table, encoding: .utf8), "0\t\(knownID.uuidString)\n1\t\(legacy.id.uuidString)\n")
+
+            store.accounts.reverse()
+            store.accounts[0].name = "Renamed"
+            let restored = UsageStore(defaults: defaults, antigravityProfilesDirectory: directory)
+            XCTAssertEqual(restored.accounts.first { $0.id == knownID }?.antigravitySlot, 0)
+            XCTAssertEqual(restored.accounts.first { $0.id == legacy.id }?.antigravitySlot, 1)
+            restored.removeAccount(id: knownID)
+            XCTAssertFalse(UsageStore(defaults: defaults, antigravityProfilesDirectory: directory)
+                .accounts.contains { $0.id == knownID })
+        }
+    }
+
+    func testGroupUsesObservedPercentagesAndExcludesUnusableWindows() async throws {
+        let suite = "UsageDockTests.AntigravityGroup.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let date = Date(timeIntervalSince1970: 2_000_000)
+        let ids = [
+            "antigravity-gemini-models-fiveHour",
+            "antigravity-gemini-models-weekly",
+            "antigravity-claude-and-gpt-models-fiveHour",
+            "antigravity-claude-and-gpt-models-weekly"
+        ]
+        let used = [0.1, 0.2, 0.4, 0.5, 0.7, 0.9]
+        var slotFiveSignedIn = false
+        let store = UsageStore(defaults: defaults, now: { date }, usageFetcher: { account in
+            let slot = account.antigravityProfileSlot ?? 0
+            if slot == 5 && !slotFiveSignedIn { throw UsageAdapterError.authenticationExpired("Sign in") }
+            var fetched = account
+            fetched.buckets = [
+                UsageBucket(quotaID: ids[1], label: "1w", kind: .weekly, percentUsed: 0.1, resetsAt: date),
+                UsageBucket(quotaID: ids[0], label: "5h", kind: .fiveHour, percentUsed: used[slot]),
+                UsageBucket(quotaID: ids[3], label: "1w", kind: .weekly, percentUsed: 0.3)
+            ]
+            return fetched
+        })
+        let native = UsageAccount(provider: .antigravity, name: "Default agy", source: .currentSession, buckets: [])
+        store.accounts = [native]
+        XCTAssertTrue(store.railTargets().isEmpty)
+        let slotIDs = try (0...5).map { _ in try store.addAntigravityAccount() }
+        XCTAssertThrowsError(try store.addAntigravityAccount())
+        await store.refreshProvider(.antigravity)
+
+        let target = RailDisplayTarget.antigravityGroup
+        let group = store.antigravityGroupUsage(now: date)
+        let totals = group.summary.aggregates
+        XCTAssertEqual(totals.map(\.quotaID), ids)
+        XCTAssertEqual(totals.map(\.accountCount), [4, 0, 0, 4])
+        XCTAssertEqual(AntigravityGroupUsage.totalText(totals[0], mode: .used), "観測分 180 / 500% · 4/5件")
+        XCTAssertEqual(AntigravityGroupUsage.totalText(totals[0], mode: .remaining), "観測分 220 / 500% · 4/5件")
+        XCTAssertEqual(AntigravityGroupUsage.totalText(totals[1], mode: .used), "—")
+        XCTAssertEqual(AntigravityGroupUsage.totalText(totals[2], mode: .remaining), "—")
+        XCTAssertEqual(group.rows.map(\.slot), [1, 2, 3, 4, 5])
+        XCTAssertEqual(group.rows[0].cells[1].text(mode: .used), "再取得待ち")
+        XCTAssertEqual(group.rows[0].cells[2].text(mode: .used), "未取得")
+        XCTAssertEqual(group.rows[4].cells[0].text(mode: .used), "要ログイン")
+        XCTAssertEqual(store.railLoginAccount(for: target)?.id, slotIDs[5])
+        XCTAssertEqual(store.railDisplayPercent(for: target, source: .fiveHour, now: date) ?? -1, 0.36, accuracy: 0.0001)
+        store.presentationMode = .remaining
+        XCTAssertEqual(store.railDisplayPercent(for: target, source: .fiveHour, now: date) ?? -1, 0.44, accuracy: 0.0001)
+        XCTAssertNil(store.railDisplayPercent(for: target, source: .weekly, now: date))
+        let solo = RailDisplayTarget.account(id: slotIDs[0], provider: .antigravity)
+        XCTAssertEqual(store.railTargets(), [solo, target])
+        XCTAssertEqual(store.railInnerRingSource(for: target), .weekly)
+        XCTAssertEqual(store.displayMultiplier(for: solo), 5)
+        XCTAssertEqual(store.railDisplayPercent(for: solo, source: .fiveHour, now: date) ?? -1, 0.9, accuracy: 0.0001)
+
+        let expired = store.antigravityGroupUsage(now: date.addingTimeInterval(AntigravityGroupUsage.cacheLifetime))
+        XCTAssertTrue(expired.summary.aggregates.allSatisfy { $0.accountCount == 0 })
+        XCTAssertEqual(expired.rows[0].cells[0].text(mode: .used), "期限切れ")
+        let restored = UsageStore(defaults: defaults)
+        XCTAssertTrue(restored.antigravityGroupUsage(now: date).summary.aggregates.allSatisfy { $0.accountCount == 0 })
+
+        slotFiveSignedIn = true
+        await store.refreshProvider(.antigravity, loginAccountID: slotIDs[5])
+        let completeWindow = try XCTUnwrap(store.summary(for: target, now: date).aggregates.first)
+        XCTAssertEqual(completeWindow.accountCount, 5)
+        XCTAssertEqual(AntigravityGroupUsage.totalText(completeWindow, mode: .used), "270 / 500%")
+        store.recordRefreshFailure(UsageAdapterError.authenticationExpired("Sign in"), for: slotIDs[5])
+        XCTAssertEqual(store.summary(for: target, now: date).aggregates.first?.accountCount, 4)
+    }
+}
+
+final class AntigravityWrapperTests: XCTestCase {
+    func testInstalledWrappersAndProfileLoginWithStubbedCLIAndBrowser() throws {
+        let helper = try XCTUnwrap(Bundle.main.url(forResource: "agy-profile", withExtension: "pl"))
+        let installer = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("scripts/install-agy-wrappers.sh")
+        let temporaryDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let script = #"""
+        set -euo pipefail
+        export HOME="$3/Home With Spaces"
+        bash "$2"
+        bash "$2"
+        bin="$HOME/.local/bin"
+        profiles="$HOME/Library/Application Support/UsageDock/Profiles/antigravity"
+        mkdir -p "$profiles"
+        for slot in {0..5}; do
+            printf '%s\tAAAAAAAA-BBBB-CCCC-DDDD-%012d\n' "$slot" "$slot"
+        done > "$profiles/slots.tsv"
+        cat > "$bin/agy" <<'STUB'
+        #!/bin/bash
+        set -euo pipefail
+        [[ "$HOME" == "$EXPECTED_PROFILE" ]]
+        [[ "$ANTIGRAVITY_GEMINI_DIR" == "$HOME/.gemini/antigravity-cli" ]]
+        [[ "$ANTIGRAVITY_APP_DATA_DIR" == "$HOME/.gemini/antigravity-app" ]]
+        [[ -d "$ANTIGRAVITY_GEMINI_DIR" && -d "$ANTIGRAVITY_APP_DATA_DIR" ]]
+        if [[ "$#" == 0 ]]; then exit 0; fi
+        case "$1" in
+            --version) [[ "$#" == 1 ]] ;;
+            acp)
+                shift
+                [[ "$1" == --gemini-dir && "$2" == "$ANTIGRAVITY_GEMINI_DIR" ]]
+                [[ "$3" == --app-data-dir && "$4" == "$ANTIGRAVITY_APP_DATA_DIR" ]]
+                shift 4
+                if [[ "$1" == --login ]]; then
+                    [[ "$#" == 3 && "$2" == --log-file && "$3" == /dev/null ]]
+                    printf '%s' 'https://accounts.google.com/o/oauth2/'
+                    sleep 0.05
+                    printf '%s\n' 'example'
+                    read -r input
+                    [[ "$input" == 'fixture input' ]]
+                else
+                    [[ "$#" == 1 && "$1" == --help ]]
+                fi
+                ;;
+            *) exit 2 ;;
+        esac
+        STUB
+        chmod +x "$bin/agy"
+        for slot in {0..5}; do
+            export EXPECTED_PROFILE="$(printf '%s/AAAAAAAA-BBBB-CCCC-DDDD-%012d' "$profiles" "$slot")"
+            "$bin/agy-$slot" --version
+        done
+        export EXPECTED_PROFILE="$profiles/AAAAAAAA-BBBB-CCCC-DDDD-000000000002"
+        "$bin/agy-2"
+        "$bin/agy-2" acp --help
+        cmp -s "$1" "$bin/.usagedock-agy-profile"
+
+        for fallback in 0 1; do
+            result="$(printf '%s\n' 'fixture input' | /usr/bin/perl -e '
+                my ($helper, $fallback, $profile) = splice @ARGV, 0, 3;
+                require $helper;
+                my $expected = "https://accounts.google.com/o/oauth2/example";
+                my $calls = 0;
+                my $status = main(sub {
+                    ++$calls;
+                    die "Browser inherited the isolated HOME" if $ENV{HOME} eq $profile;
+                    if ($calls == 1) {
+                        die "Chrome bundle ID or URL mismatch" unless @_ == 3 &&
+                            $_[0] eq "-b" && $_[1] eq "com.google.Chrome" && $_[2] eq $expected;
+                        return !$fallback;
+                    }
+                    die "Default handler mismatch" unless @_ == 1 && $_[0] eq $expected;
+                    return 1;
+                }, "--profile-home", $profile, @ARGV);
+                die "Unexpected browser call count" unless $calls == 1 + $fallback;
+                exit $status;
+            ' "$1" "$fallback" "$EXPECTED_PROFILE" acp --login)"
+            [[ "$result" == 'https://accounts.google.com/o/oauth2/example' ]]
+        done
+        [[ "$(find "$profiles" -type f)" == "$profiles/slots.tsv" ]]
+        """#
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["-c", script, "test-agy", helper.path, installer.path, temporaryDirectory.path]
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
     }
 }
 
