@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		A67000000000000000000001 /* agy-profile.pl in Resources */ = {isa = PBXBuildFile; fileRef = A67000000000000000000002 /* agy-profile.pl */; };
 		AC0000000000000000000001 /* CloudKimiSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC0000000000000000000011 /* CloudKimiSnapshot.swift */; };
 		AC0000000000000000000002 /* ClaudeKeychainWarning.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC0000000000000000000012 /* ClaudeKeychainWarning.swift */; };
 		AC0000000000000000000003 /* SecureCredentialFileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC0000000000000000000013 /* SecureCredentialFileStore.swift */; };
@@ -51,7 +50,6 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		A67000000000000000000002 /* agy-profile.pl */ = {isa = PBXFileReference; lastKnownFileType = text.script.perl; name = "agy-profile.pl"; path = "Resources/agy-profile.pl"; sourceTree = "<group>"; };
 		AC0000000000000000000011 /* CloudKimiSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudKimiSnapshot.swift; sourceTree = "<group>"; };
 		AC0000000000000000000012 /* ClaudeKeychainWarning.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeKeychainWarning.swift; sourceTree = "<group>"; };
 		AC0000000000000000000013 /* SecureCredentialFileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureCredentialFileStore.swift; sourceTree = "<group>"; };
@@ -189,7 +187,6 @@
 			isa = PBXGroup;
 			children = (
 				2BD4EC3A7A8A388C1C56CD25 /* Assets.xcassets */,
-				A67000000000000000000002 /* agy-profile.pl */,
 				A1F17D770000000000000005 /* Localizable.strings */,
 				6F4FD67040600DC464B52E99 /* UsageDockApp.swift */,
 				1F7AE6CA04FCB03393604692 /* Domain */,
@@ -281,7 +278,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				3FBC18EE7D6B0BFA440209E9 /* Assets.xcassets in Resources */,
-				A67000000000000000000001 /* agy-profile.pl in Resources */,
 				A1F17D770000000000000003 /* Localizable.strings in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

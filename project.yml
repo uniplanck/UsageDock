@@ -13,10 +13,6 @@ targets:
     platform: macOS
     sources:
       - path: UsageDock
-        excludes:
-          - Resources
-      - path: UsageDock/Resources/agy-profile.pl
-        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.uniplanck.UsageDock

@@ -1348,13 +1348,7 @@ private struct ProviderSettingsSection: View {
             if isExpanded {
                 VStack(alignment: .leading, spacing: 18) {
                 statusRow
-                if provider == .antigravity {
-                    Text("agy-0 は単独表示、agy-1〜agy-5 は合算表示")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    displayOptions
-                }
+                displayOptions
                 aggregateSummary
 
                 Divider()
@@ -1421,10 +1415,8 @@ private struct ProviderSettingsSection: View {
                         Button {
                             usageStore.addAntigravityAccountAndSignIn()
                         } label: {
-                            let label = usageStore.nextAntigravitySlot.map { "agy-\($0) を追加" } ?? "agy-0〜agy-5 登録済み"
-                            Label(label, systemImage: "person.crop.circle.badge.plus")
+                            Label("Antigravity アカウントを追加", systemImage: "person.crop.circle.badge.plus")
                         }
-                        .disabled(usageStore.nextAntigravitySlot == nil)
                         .help("専用のプロフィールを作り、別の Google アカウントでサインインするために agy を Terminal で開きます。")
                     }
 
@@ -1548,9 +1540,7 @@ private struct ProviderSettingsSection: View {
 
     private var aggregateSummary: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
-            let isAntigravity = provider == .antigravity
-            let target: RailDisplayTarget = isAntigravity ? .antigravityGroup : .provider(provider)
-            let summary = usageStore.summary(for: target, now: context.date)
+            let summary = usageStore.summary(for: provider, now: context.date)
             VStack(alignment: .leading, spacing: 8) {
                 Text("Combined quota windows · \(usageStore.presentationMode.label)")
                     .font(.subheadline.weight(.semibold))
@@ -1561,9 +1551,7 @@ private struct ProviderSettingsSection: View {
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(summary.aggregates) { aggregate in
-                        let displayed = isAntigravity
-                            ? AntigravityGroupUsage.fraction(aggregate, mode: usageStore.presentationMode)
-                            : usageStore.displayPercent(aggregate.percentUsed)
+                        let displayed = usageStore.displayPercent(aggregate.percentUsed)
                         HStack(spacing: 12) {
                             QuotaNameLabel(name: aggregate.label)
                                 .frame(width: 145, alignment: .leading)
@@ -1571,22 +1559,16 @@ private struct ProviderSettingsSection: View {
                             ProgressView(value: displayed ?? 0)
                                 .frame(maxWidth: .infinity)
 
-                            if isAntigravity {
-                                Text(AntigravityGroupUsage.totalText(aggregate, mode: usageStore.presentationMode))
-                                    .font(.caption.monospacedDigit())
-                                    .frame(width: 145, alignment: .trailing)
-                            } else {
-                                Text(percentText(displayed))
-                                    .font(.callout.monospacedDigit())
-                                    .frame(width: 48, alignment: .trailing)
+                            Text(percentText(displayed))
+                                .font(.callout.monospacedDigit())
+                                .frame(width: 48, alignment: .trailing)
 
-                                Text(qualityText(aggregate.quality))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 92, alignment: .leading)
-                            }
+                            Text(qualityText(aggregate.quality))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(width: 92, alignment: .leading)
                         }
-                        .opacity(usageStore.refreshFailureLabel(for: target) == nil ? 1 : 0.55)
+                        .opacity(usageStore.refreshFailureLabel(for: .provider(provider)) == nil ? 1 : 0.55)
                     }
                 }
             }
@@ -1675,7 +1657,7 @@ struct AccountEditor: View {
             HStack(spacing: 10) {
                 Toggle("", isOn: $account.isEnabled)
                     .labelsHidden()
-                    .help(account.provider == .antigravity ? "Enable usage refresh for this account" : "Show this account on the rail and include it in Fusion")
+                    .help("Show this account on the rail and include it in Fusion")
 
                 if account.source == .cloudSnapshot {
                     Text("Vivace").frame(maxWidth: 210, alignment: .leading)
@@ -1793,10 +1775,8 @@ struct AccountEditor: View {
             }
             .padding(.leading, 30)
 
-            if account.provider != .antigravity || account.antigravityProfileSlot == 0 {
-                railDisplayControls
-                    .padding(.leading, 30)
-            }
+            railDisplayControls
+                .padding(.leading, 30)
 
             if supportsMultiplier {
                 multiplierControls
@@ -2003,12 +1983,6 @@ struct AccountEditor: View {
     }
 
     private var sourceLabel: String {
-        if let slot = account.antigravityProfileSlot {
-            return slot == 0 ? "agy-0 · Ultra 5x" : "agy-\(slot)"
-        }
-        if account.provider == .antigravity && account.source == .currentSession {
-            return "agy · 既定"
-        }
         if account.provider == .grok, account.grokWebSessionID != nil {
             switch account.source {
             case .currentSession: return "Web login"
