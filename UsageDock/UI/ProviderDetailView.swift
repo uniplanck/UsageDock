@@ -48,15 +48,9 @@ struct ProviderDetailView: View {
                 }
                 .shadow(color: .black.opacity(theme == .light ? 0.18 : 0.38), radius: 20, y: 7)
 
-            TimelineView(.periodic(from: .now, by: 30)) { context in
-                Group {
-                    if target == .antigravityGroup {
-                        antigravityGroupContent(usageStore.antigravityGroupUsage(now: context.date))
-                    } else {
-                        content
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            TimelineView(.periodic(from: .now, by: 30)) { _ in
+                content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
             .padding(.leading, edge == .left ? CGFloat(usageStore.bubblePointerDepth) + 14 : 16)
             .padding(.trailing, edge == .right ? CGFloat(usageStore.bubblePointerDepth) + 14 : 16)
@@ -93,77 +87,6 @@ struct ProviderDetailView: View {
         }
     }
 
-    private func antigravityGroupContent(_ group: AntigravityGroupUsage) -> some View {
-        let mode = usageStore.presentationMode
-        let windows = AntigravityQuotaDisplay.windows
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text(usageStore.displayName(for: target))
-                    .font(.headline)
-                Spacer()
-                Text(mode.label)
-                    .font(.caption.weight(.medium))
-            }
-            .foregroundStyle(ProviderBrand.primaryText(theme: theme))
-
-            VStack(spacing: 6) {
-                ForEach(group.summary.aggregates) { window in
-                    VStack(spacing: 4) {
-                        HStack {
-                            Text(window.label)
-                            Spacer()
-                            Text(AntigravityGroupUsage.totalText(window, mode: mode))
-                                .monospacedDigit()
-                        }
-                        UsageProgressBar(
-                            provider: provider, value: AntigravityGroupUsage.fraction(window, mode: mode),
-                            accentHex: accentHex, theme: theme
-                        )
-                    }
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(ProviderBrand.primaryText(theme: theme))
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 6)
-                    .background(ProviderBrand.surface(theme: theme), in: RoundedRectangle(cornerRadius: 8))
-                }
-            }
-
-            Grid(alignment: .leading, horizontalSpacing: 5, verticalSpacing: 7) {
-                GridRow {
-                    Text("Account")
-                    ForEach(windows) { window in
-                        Text("\(window.family)\n\(window.duration)")
-                            .multilineTextAlignment(.center)
-                            .frame(maxWidth: .infinity)
-                    }
-                }
-                .fontWeight(.semibold)
-                .foregroundStyle(ProviderBrand.secondaryText(theme: theme))
-
-                ForEach(group.rows) { row in
-                    GridRow {
-                        Text("agy-\(row.slot)")
-                            .help(row.accountName ?? "未登録")
-                            .foregroundStyle(ProviderBrand.primaryText(theme: theme))
-                        ForEach(row.cells.indices, id: \.self) { index in
-                            let cell = row.cells[index]
-                            Text(cell.text(mode: mode))
-                                .monospacedDigit()
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.8)
-                                .frame(maxWidth: .infinity)
-                                .foregroundStyle(cell.percentUsed == nil
-                                    ? ProviderBrand.secondaryText(theme: theme) : ProviderBrand.primaryText(theme: theme))
-                        }
-                    }
-                }
-            }
-            .font(.caption)
-            .padding(9)
-            .background(ProviderBrand.surface(theme: theme), in: RoundedRectangle(cornerRadius: 8))
-        }
-    }
-
     private var header: some View {
         HStack(spacing: 11) {
             ZStack {
@@ -182,7 +105,7 @@ struct ProviderDetailView: View {
                     Text(provider.displayName)
                     if let account {
                         Text("·")
-                        Text(account.antigravityProfileSlot == 0 ? account.name : sourceLabel(account.source))
+                        Text(sourceLabel(account.source))
                     } else if usageStore.fusionEnabled(for: provider) {
                         Text("· Fusion")
                     }
@@ -278,10 +201,7 @@ struct ProviderDetailView: View {
 
             Spacer()
 
-            if account?.antigravityProfileSlot == 0 {
-                Text("Ultra 5x")
-                    .font(.system(size: 9.5, weight: .bold, design: .rounded))
-            } else if let multiplier = usageStore.displayMultiplier(for: target) {
+            if let multiplier = usageStore.displayMultiplier(for: target) {
                 Text("×\(multiplier)")
                     .font(.system(size: 9.5, weight: .bold, design: .rounded))
                     .monospacedDigit()
