@@ -2718,8 +2718,14 @@ struct ProviderUsageTile: View {
 
     private var outerProgress: Double { min(max(outerRingPercent ?? 0, 0), 1) }
     private var innerProgress: Double { min(max(innerRingPercent ?? 0, 0), 1) }
-    private var percentText: String { displayPercent.map { "\(Int(($0 * 100).rounded()))%" } ?? "--" }
-    private var isAccount: Bool { if case .account = target { return true }; return false }
+    private var percentText: String {
+        if target == .antigravityGroup { return AntigravityGroupUsage.percentText(displayPercent) }
+        return displayPercent.map { "\(Int(($0 * 100).rounded()))%" } ?? "--"
+    }
+    private var showsTargetName: Bool {
+        if case .account = target { return true }
+        return target == .antigravityGroup
+    }
     private var effectiveRing: Bool { showRing && (showOuterRing || showInnerRing) }
     private var iconFrameSize: CGFloat { max(showRing ? 50 : 34, iconSize + (showRing ? 20 : 10)) * scale }
 
@@ -2823,7 +2829,7 @@ struct ProviderUsageTile: View {
                     .shadow(color: ProviderBrand.contrastShadow(theme: theme, enabled: autoContrast), radius: autoContrast ? 1.0 : 0)
             }
 
-            if isAccount && showTitle {
+            if showsTargetName && showTitle {
                 Text(displayName)
                     .font(.system(size: accountLabelFontSize * scale, weight: .medium, design: .rounded))
                     .foregroundStyle(ProviderBrand.secondaryText(theme: theme))
@@ -2843,7 +2849,7 @@ struct ProviderUsageTile: View {
         .scaleEffect(isHovered ? 1.025 : 1)
         .animation(.easeOut(duration: 0.13), value: isHovered)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(isAccount ? "\(summary.provider.displayName), \(displayName)" : summary.provider.displayName)
+        .accessibilityLabel(showsTargetName ? "\(summary.provider.displayName), \(displayName)" : summary.provider.displayName)
         .accessibilityValue(["\(presentationMode.label) \(percentText)", failureLabel].compactMap { $0 }.joined(separator: ", "))
     }
 

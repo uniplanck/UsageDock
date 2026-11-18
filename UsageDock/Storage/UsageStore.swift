@@ -86,7 +86,12 @@ final class UsageStore: ObservableObject {
     private static let menuBarShowPercentageKey = "UsageDock.menuBarShowPercentage.v1"
 
     @Published var accounts: [UsageAccount] {
-        didSet { persistAccounts() }
+        didSet {
+            persistAccounts()
+            if AntigravityProfiles.slotTable(for: oldValue) != AntigravityProfiles.slotTable(for: accounts) {
+                publishAntigravitySlots()
+            }
+        }
     }
     @Published private(set) var fusionProviders: Set<ProviderID> {
         didSet { persistFusionProviders() }
@@ -386,6 +391,7 @@ final class UsageStore: ObservableObject {
     private let targetOpener: any ProviderTargetOpening
     private let claudeLoginOpener: any ClaudeLoginOpening
     private let profileLoginLauncher: (ProviderID, Int) throws -> UsageAccount
+    private let antigravityProfilesDirectory: URL?
     private let now: () -> Date
     private let usageFetcher: ((UsageAccount) async throws -> UsageAccount)?
     private let kimiUsageFetcher: ((String?) async throws -> KimiUsageFetch)?
@@ -428,10 +434,14 @@ final class UsageStore: ObservableObject {
         keychainWarningNotifier: KeychainWarningNotifier? = nil,
         keychainProbe: ((String) -> ClaudeKeychainProbe.Result)? = nil,
         importClaudeCredential: ((Data, String?) throws -> Void)? = nil,
-        profileLoginLauncher: ((ProviderID, Int) throws -> UsageAccount)? = nil
+        profileLoginLauncher: ((ProviderID, Int) throws -> UsageAccount)? = nil,
+        antigravityProfilesDirectory: URL? = nil
     ) {
         self.defaults = defaults
         let isTesting = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        let profilesDirectory = antigravityProfilesDirectory
+            ?? (isTesting ? nil : (try? AntigravityProfiles.defaultDirectory()))
+        self.antigravityProfilesDirectory = profilesDirectory
         self.cloudConfigURL = cloudConfigURL ?? (isTesting ? nil : CloudKimiSnapshot.defaultConfigURL)
         self.cloudUsageFetcher = cloudUsageFetcher ?? { try await CloudKimiSnapshot.fetch(configURL: $0) }
         self.keychainWarningNotifier = keychainWarningNotifier ?? (isTesting
@@ -595,11 +605,15 @@ final class UsageStore: ObservableObject {
             (provider, savedURLs[provider.rawValue] ?? provider.defaultWebURL)
         })
 
-        if let data = defaults.data(forKey: Self.accountsKey),
-           let decoded = try? decoder.decode([UsageAccount].self, from: data) {
-            accounts = Self.migratedAccounts(decoded)
-        } else {
-            accounts = []
+        let decoded = defaults.data(forKey: Self.accountsKey)
+            .flatMap { try? decoder.decode([UsageAccount].self, from: $0) } ?? []
+        let migrated = AntigravityProfiles.assignSlots(
+            to: Self.migratedAccounts(decoded), directory: profilesDirectory,
+            recoverKnownProfile: !defaults.bool(forKey: AntigravityProfiles.recoveryKey)
+        )
+        accounts = migrated
+        if migrated.contains(where: { $0.id == AntigravityProfiles.knownSlotZeroID && $0.antigravityProfileSlot != nil }) {
+            defaults.set(true, forKey: AntigravityProfiles.recoveryKey)
         }
 
         ensureCloudKimiAccount()
@@ -607,6 +621,7 @@ final class UsageStore: ObservableObject {
         normalizeDisplayAccountSelection()
         normalizeMenuBarAccountSelection()
         persistAccounts()
+        publishAntigravitySlots()
         persistDisplayAccountSelection()
         persistMenuBarPreferences()
     }
@@ -651,10 +666,7 @@ final class UsageStore: ObservableObject {
     }
 
     func displaySelectableAccounts() -> [UsageAccount] {
-        runtimeAccounts.filter { account in
-            guard account.isEnabled else { return false }
-            return UsageDockDistributionPolicy.isAccountVisible(account)
-        }
+        runtimeAccounts.filter { $0.isEnabled && $0.provider != .antigravity }
     }
 
     func displayAccountCandidates() -> [UsageAccount] {
@@ -664,7 +676,7 @@ final class UsageStore: ObservableObject {
     }
 
     func menuBarSelectableAccounts() -> [UsageAccount] {
-        displaySelectableAccounts()
+        runtimeAccounts.filter(\.isEnabled)
     }
 
     func menuBarAccounts() -> [UsageAccount] {
@@ -777,6 +789,54 @@ final class UsageStore: ObservableObject {
         case .account(let id, let provider):
             let scoped = runtimeAccounts.filter { $0.id == id && $0.isEnabled }.map(displayAccount)
             return displaySummary(for: provider, accounts: scoped, now: now)
+        case .antigravityGroup:
+            return antigravityGroupUsage(now: now).summary
+        }
+    }
+
+    func antigravityGroupUsage(now: Date = Date()) -> AntigravityGroupUsage {
+        let profiles = visibleAccounts(for: .antigravity)
+        let rows = AntigravityGroupUsage.slots.map { slot in
+            let account = profiles.first { $0.antigravityProfileSlot == slot }
+            return AntigravityGroupUsage.Row(
+                slot: slot, accountName: account?.name,
+                cells: antigravityGroupCells(for: account, now: now)
+            )
+        }
+        return AntigravityGroupUsage(rows: rows)
+    }
+
+    private func antigravityGroupCells(for account: UsageAccount?, now: Date) -> [AntigravityGroupUsage.Cell] {
+        let windows = AntigravityQuotaDisplay.windows
+        func missing(_ state: String) -> [AntigravityGroupUsage.Cell] {
+            Array(repeating: .missing(state), count: windows.count)
+        }
+        guard let account else { return missing("未登録") }
+        guard account.isEnabled else { return missing("無効") }
+        let state = accountRefreshState(for: account.id)
+        if RailLoginPolicy.requiresLogin(account: account, refreshState: state) {
+            return missing("要ログイン")
+        }
+        if state.isStale { return missing("取得失敗") }
+        guard let success = refreshHistory[account.id]?.lastSuccessAt else {
+            switch state {
+            case .refreshing: return missing("取得中")
+            case .rateLimited: return missing("取得制限中")
+            case .degraded: return missing("取得失敗")
+            default: return missing("取得待ち")
+            }
+        }
+        guard now.timeIntervalSince(success) < AntigravityGroupUsage.cacheLifetime else {
+            return missing("期限切れ")
+        }
+        return windows.map { window in
+            guard let bucket = account.buckets.first(where: { $0.quotaID == window.id }) else {
+                return .missing("未取得")
+            }
+            guard bucket.isEnabled else { return .missing("非表示") }
+            if let reset = bucket.resetsAt, reset <= now { return .missing("再取得待ち") }
+            guard let used = bucket.percentUsed, used.isFinite else { return .missing("未取得") }
+            return .observed(min(max(used, 0), 1))
         }
     }
 
@@ -820,6 +880,11 @@ final class UsageStore: ObservableObject {
 
         return providerOrder.flatMap { provider -> [RailDisplayTarget] in
             let enabled = runtimeAccounts.filter { $0.provider == provider && $0.isEnabled }
+            if provider == .antigravity {
+                guard enabled.contains(where: { $0.antigravityProfileSlot != nil }) else { return [] }
+                let solo = enabled.filter { $0.antigravityProfileSlot == 0 }
+                return solo.map { .account(id: $0.id, provider: provider) } + [.antigravityGroup]
+            }
             guard !enabled.isEmpty else { return [] }
             if fusionEnabled(for: provider) {
                 return [.provider(provider)]
@@ -834,7 +899,14 @@ final class UsageStore: ObservableObject {
     }
 
     func railLoginAccount(for target: RailDisplayTarget) -> UsageAccount? {
-        visibleAccounts(for: target.provider).first { account in
+        let candidates = visibleAccounts(for: target.provider)
+        let scoped = target.provider == .antigravity
+            ? candidates.filter { account in
+                guard let slot = account.antigravityProfileSlot else { return false }
+                return target == .antigravityGroup ? AntigravityGroupUsage.slots.contains(slot) : slot == 0
+            }.sorted { ($0.antigravityProfileSlot ?? 0) < ($1.antigravityProfileSlot ?? 0) }
+            : candidates
+        return scoped.first { account in
             if case .account(let id, _) = target, account.id != id { return false }
             return RailLoginPolicy.requiresLogin(account: account, refreshState: accountRefreshState(for: account.id))
         }
@@ -842,6 +914,7 @@ final class UsageStore: ObservableObject {
 
     /// Fusion values are stale if any contributing account failed to refresh.
     func refreshFailureLabel(for target: RailDisplayTarget) -> String? {
+        if target == .antigravityGroup { return nil }
         let contributors = runtimeAccounts.filter { account in
             guard account.isEnabled, account.provider == target.provider else { return false }
             if case .account(let id, _) = target { return account.id == id }
@@ -865,7 +938,7 @@ final class UsageStore: ObservableObject {
     }
 
     func displayPercent(for target: RailDisplayTarget) -> Double? {
-        displayPercent(summary(for: target).pressurePercent)
+        railDisplayPercent(for: target, source: .automatic)
     }
 
     func railAggregate(for target: RailDisplayTarget, source: RailQuotaSource, now: Date = Date()) -> UsageAggregate? {
@@ -921,7 +994,12 @@ final class UsageStore: ObservableObject {
     }
 
     func railInnerRingSource(for target: RailDisplayTarget) -> RailQuotaSource {
-        account(for: target)?.railInnerRingSource ?? railInnerRingSource
+        if let override = account(for: target)?.railInnerRingSource { return override }
+        if defaults.object(forKey: Self.railInnerRingSourceKey) == nil,
+           target == .antigravityGroup || account(for: target)?.antigravityProfileSlot == 0 {
+            return .weekly
+        }
+        return railInnerRingSource
     }
 
     func railTimeSource(for target: RailDisplayTarget) -> RailQuotaSource {
@@ -931,6 +1009,12 @@ final class UsageStore: ObservableObject {
     func railDisplayPercent(for target: RailDisplayTarget, source: RailQuotaSource, now: Date = Date()) -> Double? {
         let source = effectiveRailSource(source, for: target, now: now)
         if source == .none { return nil }
+        if target == .antigravityGroup {
+            let aggregate = source == .automatic
+                ? summary(for: target, now: now).aggregates.max(by: { ($0.percentUsed ?? -1) < ($1.percentUsed ?? -1) })
+                : railAggregate(for: target, source: source, now: now)
+            return aggregate.flatMap { AntigravityGroupUsage.fraction($0, mode: presentationMode) }
+        }
         if source == .automatic { return displayPercent(summary(for: target, now: now).pressurePercent) }
         return displayPercent(railAggregate(for: target, source: source, now: now)?.percentUsed)
     }
@@ -974,7 +1058,9 @@ final class UsageStore: ObservableObject {
     }
 
     func displayName(for target: RailDisplayTarget) -> String {
+        if target == .antigravityGroup { return "agy-1…5" }
         guard let account = account(for: target) else { return target.provider.displayName }
+        if account.antigravityProfileSlot == 0 { return "agy-0" }
         return account.name
     }
 
@@ -1209,7 +1295,10 @@ final class UsageStore: ObservableObject {
     func displayMultiplier(for target: RailDisplayTarget) -> Int? {
         switch target {
         case .provider(let provider): return displayMultiplier(for: provider)
-        case .account: return account(for: target)?.normalizedPlanMultiplier
+        case .account:
+            let account = account(for: target)
+            return account?.antigravityProfileSlot == 0 ? 5 : account?.normalizedPlanMultiplier
+        case .antigravityGroup: return nil
         }
     }
 
@@ -1282,16 +1371,22 @@ final class UsageStore: ObservableObject {
 
     @discardableResult
     func addAntigravityAccount() throws -> UUID {
-        let names = Set(accounts.filter { $0.provider == .antigravity }.map(\.name))
-        var ordinal = names.isEmpty ? 1 : 2
-        while names.contains("Antigravity \(ordinal)") { ordinal += 1 }
+        guard let slot = nextAntigravitySlot else {
+            throw UsageProfileLoginError.launchFailed("agy-0〜agy-5 はすべて登録済みです。")
+        }
         let id = UUID()
-        let home = try UsageProfileLoginLauncher.profileHome(provider: .antigravity, id: id)
+        let directory = try antigravityProfilesDirectory ?? AntigravityProfiles.defaultDirectory()
+        let home = directory.appendingPathComponent(id.uuidString, isDirectory: true)
         accounts.append(UsageAccount(
-            id: id, provider: .antigravity, name: "Antigravity \(ordinal)", source: .profile,
-            profileHomePath: home.path, buckets: []
+            id: id, provider: .antigravity, name: "agy-\(slot)", source: .profile,
+            profileHomePath: home.path, antigravitySlot: slot, buckets: []
         ))
         return id
+    }
+
+    var nextAntigravitySlot: Int? {
+        let occupied = Set(accounts.compactMap(\.antigravityProfileSlot))
+        return (0...5).first { !occupied.contains($0) }
     }
 
     func addAntigravityAccountAndSignIn() {
@@ -1454,6 +1549,7 @@ final class UsageStore: ObservableObject {
     }
 
     func setFusionEnabled(_ enabled: Bool, for provider: ProviderID) {
+        guard provider != .antigravity else { return }
         if enabled {
             fusionProviders.insert(provider)
         } else {
@@ -1462,7 +1558,7 @@ final class UsageStore: ObservableObject {
     }
 
     func fusionEnabled(for provider: ProviderID) -> Bool {
-        fusionProviders.contains(provider)
+        provider != .antigravity && fusionProviders.contains(provider)
     }
 
     func displayMultiplier(for provider: ProviderID) -> Int? {
@@ -1796,6 +1892,10 @@ final class UsageStore: ObservableObject {
         var history = refreshHistory[accountID] ?? AccountRefreshHistory(firstAttemptAt: date)
         history.lastError = error
         let authFailure = AccountRefreshState.failure(error).requiresSignIn
+        if authFailure, let slot = accounts.first(where: { $0.id == accountID })?.antigravityProfileSlot,
+           AntigravityGroupUsage.slots.contains(slot) {
+            history.lastSuccessAt = nil
+        }
         let isClaude = accounts.contains { $0.id == accountID && $0.provider == .claude }
         let enteredAuthFailure = isClaude && authFailure && claudeAuthFailures.insert(accountID).inserted
         let previousState = accountRefreshStates[accountID]
@@ -1937,6 +2037,15 @@ final class UsageStore: ObservableObject {
     private func persistAccounts() {
         guard let data = try? encoder.encode(accounts) else { return }
         defaults.set(data, forKey: Self.accountsKey)
+    }
+
+    private func publishAntigravitySlots() {
+        guard let directory = antigravityProfilesDirectory else { return }
+        do {
+            try AntigravityProfiles.writeSlotTable(for: accounts, in: directory)
+        } catch {
+            refreshStates[.antigravity] = .failed("agy のスロット対応表を保存できませんでした。")
+        }
     }
 
     private func normalizeDisplayAccountSelection() {
@@ -2106,6 +2215,73 @@ enum MultiplierDetectionState: Equatable {
     case unavailable(String)
 }
 
+private enum AntigravityProfiles {
+    static let knownSlotZeroID = UUID(uuidString: "4134060A-D473-4894-A637-79C2B1CFFD95")!
+    static let recoveryKey = "UsageDock.antigravity.recoveredSlotZero.v1"
+
+    static func defaultDirectory() throws -> URL {
+        try UsageProfileLoginLauncher.profileHome(provider: .antigravity, id: knownSlotZeroID)
+            .deletingLastPathComponent()
+    }
+
+    static func assignSlots(
+        to existing: [UsageAccount], directory: URL?, recoverKnownProfile: Bool
+    ) -> [UsageAccount] {
+        var accounts = existing
+        let knownHome = directory?.appendingPathComponent(knownSlotZeroID.uuidString, isDirectory: true)
+        if recoverKnownProfile, !accounts.contains(where: { $0.id == knownSlotZeroID }),
+           let knownHome {
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: knownHome.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                accounts.append(UsageAccount(
+                    id: knownSlotZeroID, provider: .antigravity, name: "agy-0", source: .profile,
+                    profileHomePath: knownHome.path, buckets: []
+                ))
+            }
+        }
+
+        var occupied = Set<Int>()
+        let profiles = accounts.indices.filter { accounts[$0].provider == .antigravity && accounts[$0].source == .profile }
+        let knownProfile = profiles.first { accounts[$0].id == knownSlotZeroID }
+        if let knownProfile {
+            accounts[knownProfile].antigravitySlot = 0
+            occupied.insert(0)
+        }
+        for index in accounts.indices where index != knownProfile {
+            if let slot = accounts[index].antigravityProfileSlot, occupied.insert(slot).inserted {
+                continue
+            }
+            accounts[index].antigravitySlot = nil
+        }
+        for index in profiles {
+            if accounts[index].antigravitySlot == nil, let slot = (0...5).first(where: { !occupied.contains($0) }) {
+                accounts[index].antigravitySlot = slot
+                occupied.insert(slot)
+            }
+            if accounts[index].antigravitySlot != nil, let directory {
+                accounts[index].profileHomePath = directory
+                    .appendingPathComponent(accounts[index].id.uuidString, isDirectory: true).path
+            }
+        }
+        return accounts
+    }
+
+    static func slotTable(for accounts: [UsageAccount]) -> String {
+        (0...5).compactMap { slot in
+            accounts.first { $0.antigravityProfileSlot == slot }.map { "\(slot)\t\($0.id.uuidString)\n" }
+        }.joined()
+    }
+
+    static func writeSlotTable(for accounts: [UsageAccount], in directory: URL) throws {
+        let table = slotTable(for: accounts)
+        let url = directory.appendingPathComponent("slots.tsv")
+        if table.isEmpty, !FileManager.default.fileExists(atPath: url.path) { return }
+        if (try? String(contentsOf: url, encoding: .utf8)) == table { return }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try table.write(to: url, atomically: true, encoding: .utf8)
+    }
+}
+
 private enum UsageProfileLoginError: LocalizedError {
     case launchFailed(String)
 
@@ -2166,11 +2342,14 @@ private enum UsageProfileLoginLauncher {
 
     static func openAntigravityLogin(for account: UsageAccount) throws {
         let environment = try AntigravityUsageAdapter.profileEnvironment(for: account)
-        let home = environment["HOME"].map { URL(fileURLWithPath: $0, isDirectory: true) }
-            ?? FileManager.default.homeDirectoryForCurrentUser
-        try openTerminal(provider: .antigravity, command: terminalCommand(
-            provider: .antigravity, profileHome: home, antigravityEnvironment: environment
-        ))
+        guard let helper = Bundle.main.url(forResource: "agy-profile", withExtension: "pl") else {
+            throw UsageProfileLoginError.launchFailed("Antigravity login helper is unavailable.")
+        }
+        let profile = environment["HOME"].map { "--profile-home \(shellQuote($0))" } ?? "--current-session"
+        try openTerminal(
+            provider: .antigravity,
+            command: "/usr/bin/perl \(shellQuote(helper.path)) \(profile) acp --login"
+        )
     }
 
     private static func openTerminal(provider: ProviderID, command: String) throws {
@@ -2202,9 +2381,7 @@ private enum UsageProfileLoginLauncher {
         }
     }
 
-    private static func terminalCommand(
-        provider: ProviderID, profileHome: URL, antigravityEnvironment: [String: String] = [:]
-    ) -> String {
+    private static func terminalCommand(provider: ProviderID, profileHome: URL) -> String {
         let home = shellQuote(profileHome.path)
         let missing: String
         let availabilityCheck: String
@@ -2221,21 +2398,6 @@ private enum UsageProfileLoginLauncher {
             availabilityCheck = "command -v codex >/dev/null 2>&1"
             let config = shellQuote(profileHome.appendingPathComponent(".codex").path)
             command = "HOME=\(home) CODEX_HOME=\(config) codex login"
-        case .antigravity:
-            missing = "Antigravity CLI (agy) not found. Install the official Antigravity CLI, then retry."
-            let assignments = antigravityEnvironment.sorted { $0.key < $1.key }
-                .map { shellQuote("\($0.key)=\($0.value)") }.joined(separator: " ")
-            let prefix = assignments.isEmpty ? "" : "/usr/bin/env \(assignments) "
-            if let home = antigravityEnvironment["HOME"],
-               let executable = AntigravityUsageAdapter.executableURL(profileHomePath: home) {
-                let agy = shellQuote(executable.path)
-                availabilityCheck = "test -x \(agy)"
-                command = "\(prefix)\(agy)"
-            } else {
-                let bundledCandidate = shellQuote(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/agy").path)
-                availabilityCheck = "command -v agy >/dev/null 2>&1 || test -x \(bundledCandidate)"
-                command = "AGY=$(command -v agy 2>/dev/null || true); if [ -z \"$AGY\" ]; then AGY=\(bundledCandidate); fi; \(prefix)\"$AGY\""
-            }
         case .kimi:
             missing = "Kimi CLI not found. Install Kimi Code, then retry."
             availabilityCheck = "command -v kimi >/dev/null 2>&1 || command -v kimi-code >/dev/null 2>&1"
@@ -2246,7 +2408,7 @@ private enum UsageProfileLoginLauncher {
             availabilityCheck = "command -v grok >/dev/null 2>&1"
             let grokHome = shellQuote(profileHome.appendingPathComponent(".grok").path)
             command = "HOME=\(home) GROK_HOME=\(grokHome) grok login"
-        case .cursor:
+        case .antigravity, .cursor:
             missing = "\(provider.displayName) profile login is not exposed by UsageDock."
             availabilityCheck = "false"
             command = "true"
@@ -2254,13 +2416,9 @@ private enum UsageProfileLoginLauncher {
 
         let boundaryMessage: String
         switch provider {
-        case .antigravity:
-            boundaryMessage = antigravityEnvironment.isEmpty
-                ? "Uses the official agy native macOS Keychain session."
-                : "Sign in to agy for this UsageDock profile."
         case .grok:
             boundaryMessage = "Uses grok login in an isolated GROK_HOME. Sign in at auth.x.ai with the xAI account that has SuperGrok or your linked X subscription."
-        case .claude, .codex, .kimi, .cursor:
+        case .antigravity, .claude, .codex, .kimi, .cursor:
             boundaryMessage = "This login is isolated from your normal HOME."
         }
         return "\(availabilityCheck) || { printf '%s\\n' \(shellQuote(missing)); exit 127; }; clear; echo 'UsageDock · \(provider.displayName) Login'; echo \(shellQuote(boundaryMessage)); \(command)"

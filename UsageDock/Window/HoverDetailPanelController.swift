@@ -47,8 +47,9 @@ final class HoverDetailPanelController {
 
     func show(target: RailDisplayTarget, index: Int, anchorPanel: NSPanel) {
         visibleTarget = target
-        let summary = usageStore.summary(for: target)
-        let height = HoverDetailMetrics.height(rowCount: summary.aggregates.count)
+        let width: CGFloat = target == .antigravityGroup ? 446 : self.width
+        let height: CGFloat = target == .antigravityGroup
+            ? 366 : HoverDetailMetrics.height(rowCount: usageStore.summary(for: target).aggregates.count)
 
         panel.contentView = NSHostingView(
             rootView: ProviderDetailView(
