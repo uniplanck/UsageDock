@@ -2277,7 +2277,8 @@ final class AntigravityRailQuotaTests: XCTestCase {
         let account = UsageAccount(
             provider: .antigravity,
             name: "Antigravity",
-            source: .currentSession,
+            source: .profile,
+            antigravitySlot: 0,
             railPercentSource: .bucket(quotaID: "antigravity-claude-and-gpt-models-fiveHour"),
             railOuterRingSource: .bucket(quotaID: "antigravity-gemini-models-weekly"),
             railInnerRingSource: .bucket(quotaID: "antigravity-claude-and-gpt-models-weekly"),

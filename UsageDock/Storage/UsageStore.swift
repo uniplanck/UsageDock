@@ -2273,7 +2273,8 @@ private enum AntigravityProfiles {
 
     static func slotTable(for accounts: [UsageAccount]) -> String {
         (0...5).compactMap { slot in
-            accounts.first { $0.antigravityProfileSlot == slot }.map { "\(slot)\t\($0.id.uuidString)\n" }
+            guard let account = accounts.first(where: { $0.antigravityProfileSlot == slot }) else { return nil }
+            return "\(slot)\t\(account.id.uuidString)\n"
         }.joined()
     }
 
