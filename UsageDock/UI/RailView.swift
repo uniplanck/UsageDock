@@ -1104,6 +1104,8 @@ struct RailView: View {
                 NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
                 if account.provider == .grok {
                     usageStore.presentGrokWebLogin(for: account.id)
+                } else if account.provider == .antigravity {
+                    usageStore.signInAntigravityAccount(id: account.id)
                 } else {
                     _ = usageStore.launchLoginProfile(provider: account.provider)
                 }

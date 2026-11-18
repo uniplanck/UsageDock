@@ -401,6 +401,7 @@ final class UsageStore: ObservableObject {
     private var autoRefreshTask: Task<Void, Never>?
     private var refreshHistory: [UUID: AccountRefreshHistory] = [:]
     private var refreshingProviders: Set<ProviderID> = []
+    private var antigravityLoginPolls: Set<UUID> = []
     private var claudeAuthFailures: Set<UUID> = []
 
     private struct AccountRefreshHistory {
@@ -779,9 +780,15 @@ final class UsageStore: ObservableObject {
         }
     }
 
-    /// Claude Ultra has no 5h window, so Claude rows are only fable, then 1w
-    /// (see ClaudeQuotaDisplay). Other providers aggregate unchanged.
+    /// Claude and Antigravity each have a fixed set and order of displayed quotas.
     private func displaySummary(for provider: ProviderID, accounts: [UsageAccount], now: Date) -> ProviderUsageSummary {
+        if provider == .antigravity {
+            let rows = UsageAggregator.aggregates(for: provider, accounts: accounts, now: now)
+            let ordered = AntigravityQuotaDisplay.ordered(rows, quotaID: \.quotaID)
+            return ProviderUsageSummary(
+                provider: provider, aggregates: ordered, pressurePercent: ordered.compactMap(\.percentUsed).max()
+            )
+        }
         guard provider == .claude else {
             return UsageAggregator.summary(for: provider, accounts: accounts, now: now)
         }
@@ -1273,6 +1280,39 @@ final class UsageStore: ObservableObject {
         account.source == .currentSession || account.credentialPath != nil
     }
 
+    @discardableResult
+    func addAntigravityAccount() throws -> UUID {
+        let names = Set(accounts.filter { $0.provider == .antigravity }.map(\.name))
+        var ordinal = names.isEmpty ? 1 : 2
+        while names.contains("Antigravity \(ordinal)") { ordinal += 1 }
+        let id = UUID()
+        let home = try UsageProfileLoginLauncher.profileHome(provider: .antigravity, id: id)
+        accounts.append(UsageAccount(
+            id: id, provider: .antigravity, name: "Antigravity \(ordinal)", source: .profile,
+            profileHomePath: home.path, buckets: []
+        ))
+        return id
+    }
+
+    func addAntigravityAccountAndSignIn() {
+        do {
+            signInAntigravityAccount(id: try addAntigravityAccount())
+        } catch {
+            refreshStates[.antigravity] = .failed(error.localizedDescription)
+        }
+    }
+
+    func signInAntigravityAccount(id: UUID) {
+        guard let account = accounts.first(where: { $0.provider == .antigravity && $0.id == id }) else { return }
+        do {
+            try UsageProfileLoginLauncher.openAntigravityLogin(for: account)
+            scheduleAntigravityLoginRefresh(accountID: id)
+        } catch {
+            accountRefreshStates[id] = .failure(error)
+            refreshStates[.antigravity] = .failed(error.localizedDescription)
+        }
+    }
+
     func launchLoginProfile(provider: ProviderID) -> Bool {
         guard provider.supportsProfileLogin else {
             refreshStates[provider] = .failed("Direct \(provider.displayName) profile login is not available in UsageDock yet.")
@@ -1281,14 +1321,17 @@ final class UsageStore: ObservableObject {
         let ordinal = accounts.filter { $0.provider == provider && $0.source == .profile }.count + 1
         do {
             let account = try profileLoginLauncher(provider, ordinal)
+            let accountID: UUID
             if provider == .antigravity,
                let existing = accounts.firstIndex(where: { $0.provider == .antigravity && $0.source == .currentSession }) {
                 accounts[existing].isEnabled = true
+                accountID = accounts[existing].id
             } else {
                 accounts.append(account)
+                accountID = account.id
             }
             refreshStates[provider] = .idle
-            if provider == .antigravity { scheduleAntigravityLoginRefresh() }
+            if provider == .antigravity { scheduleAntigravityLoginRefresh(accountID: accountID) }
             return true
         } catch {
             refreshStates[provider] = .failed(error.localizedDescription)
@@ -1296,19 +1339,17 @@ final class UsageStore: ObservableObject {
         }
     }
 
-    private func scheduleAntigravityLoginRefresh() {
+    private func scheduleAntigravityLoginRefresh(accountID: UUID) {
+        guard antigravityLoginPolls.insert(accountID).inserted else { return }
         Task { [weak self] in
-            // Browser sign-in completes after the Terminal launcher returns. Poll briefly so
-            // the newly authenticated native agy session appears without waiting a full
-            // auto-refresh interval or requiring a manual Refresh click.
+            defer { self?.antigravityLoginPolls.remove(accountID) }
+            // Browser sign-in completes after the Terminal launcher returns.
             for attempt in 0..<18 {
                 if attempt > 0 { try? await Task.sleep(nanoseconds: 4_000_000_000) }
-                guard let self else { return }
-                await self.refreshProvider(.antigravity)
-                switch self.refreshState(for: .antigravity) {
-                case .live, .partial: return
-                case .idle, .refreshing, .failed: continue
-                }
+                guard let self, self.accounts.contains(where: { $0.id == accountID && $0.isEnabled }) else { return }
+                guard !self.refreshingProviders.contains(.antigravity) else { continue }
+                await self.refreshProvider(.antigravity, loginAccountID: accountID)
+                if case .live = self.accountRefreshState(for: accountID) { return }
             }
         }
     }
@@ -1546,7 +1587,7 @@ final class UsageStore: ObservableObject {
         }
     }
 
-    func refreshProvider(_ provider: ProviderID, manual: Bool = false) async {
+    func refreshProvider(_ provider: ProviderID, manual: Bool = false, loginAccountID: UUID? = nil) async {
         guard refreshingProviders.insert(provider).inserted else { return }
         defer { refreshingProviders.remove(provider) }
         if provider == .kimi { await updateKimiDuplicateAccounts() }
@@ -1570,7 +1611,10 @@ final class UsageStore: ObservableObject {
         var lastSuccessAt: Date?
 
         for accountID in accountIDs {
-            guard shouldFetchUsage(for: accountID, provider: provider, manual: manual) else { continue }
+            guard shouldFetchUsage(
+                for: accountID, provider: provider, manual: manual,
+                isLoginPoll: provider == .antigravity && accountID == loginAccountID
+            ) else { continue }
             let startedAt = now()
             var history = refreshHistory[accountID] ?? AccountRefreshHistory(firstAttemptAt: startedAt)
             history.lastAttemptAt = startedAt
@@ -1623,9 +1667,7 @@ final class UsageStore: ObservableObject {
                         }
                         fetched = first
                     case .antigravity:
-                        let fetchedAccounts = try await AntigravityUsageAdapter(
-                            profileHomePath: account.source == .currentSession ? nil : account.profileHomePath
-                        ).fetchAccounts()
+                        let fetchedAccounts = try await AntigravityUsageAdapter(account: account).fetchAccounts()
                         guard let first = fetchedAccounts.first else {
                             throw UsageAdapterError.invalidResponse("Antigravity returned no account data.")
                         }
@@ -1724,10 +1766,11 @@ final class UsageStore: ObservableObject {
         }
     }
 
-    private func shouldFetchUsage(for accountID: UUID, provider: ProviderID, manual: Bool) -> Bool {
+    private func shouldFetchUsage(for accountID: UUID, provider: ProviderID, manual: Bool, isLoginPoll: Bool) -> Bool {
         guard let history = refreshHistory[accountID] else { return true }
         let date = now()
         if let retryAt = history.retryAt, date < retryAt { return false }
+        if isLoginPoll { return true }
         if provider == .claude, claudeAuthFailures.contains(accountID) {
             return history.lastAttemptAt.map { date.timeIntervalSince($0) >= 30 } ?? true
         }
@@ -2078,26 +2121,59 @@ private enum UsageProfileLoginLauncher {
         guard provider.supportsProfileLogin else {
             throw UsageProfileLoginError.launchFailed("Direct \(provider.displayName) profile login is not available in UsageDock yet.")
         }
-        let id = UUID()
-        guard let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            throw UsageProfileLoginError.launchFailed("Application Support directory is unavailable.")
+        if provider == .antigravity {
+            let account = UsageAccount(provider: provider, name: "Antigravity Login", source: .currentSession, buckets: [])
+            try openAntigravityLogin(for: account)
+            return account
         }
-
-        let profileHome = applicationSupport
-            .appendingPathComponent("UsageDock", isDirectory: true)
-            .appendingPathComponent("Profiles", isDirectory: true)
-            .appendingPathComponent(provider.rawValue, isDirectory: true)
-            .appendingPathComponent(id.uuidString, isDirectory: true)
+        let id = UUID()
+        let profileHome = try Self.profileHome(provider: provider, id: id)
         try FileManager.default.createDirectory(at: profileHome, withIntermediateDirectories: true)
 
         let credentialURL = credentialURL(for: provider, profileHome: profileHome)
-        if provider == .kimi || provider == .antigravity {
+        if provider == .kimi {
             try FileManager.default.createDirectory(at: credentialURL, withIntermediateDirectories: true)
         } else {
             try FileManager.default.createDirectory(at: credentialURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         }
 
-        let command = terminalCommand(provider: provider, profileHome: profileHome)
+        try openTerminal(provider: provider, command: terminalCommand(provider: provider, profileHome: profileHome))
+
+        let supportsMultiplier = provider == .claude || provider == .codex
+        return UsageAccount(
+            id: id,
+            provider: provider,
+            name: provider == .kimi ? "Kimi Profile \(ordinal)" : "Profile \(ordinal)",
+            source: .profile,
+            credentialPath: credentialURL.path,
+            planMultiplier: supportsMultiplier ? 1 : nil,
+            multiplierMode: supportsMultiplier ? .manual : nil,
+            profileHomePath: profileHome.path,
+            buckets: []
+        )
+    }
+
+    static func profileHome(provider: ProviderID, id: UUID) throws -> URL {
+        guard let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            throw UsageProfileLoginError.launchFailed("Application Support directory is unavailable.")
+        }
+        return applicationSupport
+            .appendingPathComponent("UsageDock", isDirectory: true)
+            .appendingPathComponent("Profiles", isDirectory: true)
+            .appendingPathComponent(provider == .antigravity ? "antigravity" : provider.rawValue, isDirectory: true)
+            .appendingPathComponent(id.uuidString, isDirectory: true)
+    }
+
+    static func openAntigravityLogin(for account: UsageAccount) throws {
+        let environment = try AntigravityUsageAdapter.profileEnvironment(for: account)
+        let home = environment["HOME"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? FileManager.default.homeDirectoryForCurrentUser
+        try openTerminal(provider: .antigravity, command: terminalCommand(
+            provider: .antigravity, profileHome: home, antigravityEnvironment: environment
+        ))
+    }
+
+    private static func openTerminal(provider: ProviderID, command: String) throws {
         let appleScript = "tell application \"Terminal\" to do script \"\(appleScriptEscaped(command))\""
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
@@ -2107,20 +2183,6 @@ private enum UsageProfileLoginLauncher {
         guard process.terminationStatus == 0 else {
             throw UsageProfileLoginError.launchFailed("Could not open Terminal for \(provider.displayName) profile login.")
         }
-
-        let supportsMultiplier = provider == .claude || provider == .codex
-        let isAntigravity = provider == .antigravity
-        return UsageAccount(
-            id: id,
-            provider: provider,
-            name: isAntigravity ? "Antigravity Login" : (provider == .kimi ? "Kimi Profile \(ordinal)" : "Profile \(ordinal)"),
-            source: isAntigravity ? .currentSession : .profile,
-            credentialPath: isAntigravity ? nil : credentialURL.path,
-            planMultiplier: supportsMultiplier ? 1 : nil,
-            multiplierMode: supportsMultiplier ? .manual : nil,
-            profileHomePath: isAntigravity ? nil : profileHome.path,
-            buckets: []
-        )
     }
 
     private static func credentialURL(for provider: ProviderID, profileHome: URL) -> URL {
@@ -2140,7 +2202,9 @@ private enum UsageProfileLoginLauncher {
         }
     }
 
-    private static func terminalCommand(provider: ProviderID, profileHome: URL) -> String {
+    private static func terminalCommand(
+        provider: ProviderID, profileHome: URL, antigravityEnvironment: [String: String] = [:]
+    ) -> String {
         let home = shellQuote(profileHome.path)
         let missing: String
         let availabilityCheck: String
@@ -2158,10 +2222,20 @@ private enum UsageProfileLoginLauncher {
             let config = shellQuote(profileHome.appendingPathComponent(".codex").path)
             command = "HOME=\(home) CODEX_HOME=\(config) codex login"
         case .antigravity:
-            let bundledCandidate = shellQuote(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/agy").path)
             missing = "Antigravity CLI (agy) not found. Install the official Antigravity CLI, then retry."
-            availabilityCheck = "command -v agy >/dev/null 2>&1 || test -x \(bundledCandidate)"
-            command = "AGY=$(command -v agy 2>/dev/null || true); if [ -z \"$AGY\" ]; then AGY=\(bundledCandidate); fi; \"$AGY\""
+            let assignments = antigravityEnvironment.sorted { $0.key < $1.key }
+                .map { shellQuote("\($0.key)=\($0.value)") }.joined(separator: " ")
+            let prefix = assignments.isEmpty ? "" : "/usr/bin/env \(assignments) "
+            if let home = antigravityEnvironment["HOME"],
+               let executable = AntigravityUsageAdapter.executableURL(profileHomePath: home) {
+                let agy = shellQuote(executable.path)
+                availabilityCheck = "test -x \(agy)"
+                command = "\(prefix)\(agy)"
+            } else {
+                let bundledCandidate = shellQuote(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/agy").path)
+                availabilityCheck = "command -v agy >/dev/null 2>&1 || test -x \(bundledCandidate)"
+                command = "AGY=$(command -v agy 2>/dev/null || true); if [ -z \"$AGY\" ]; then AGY=\(bundledCandidate); fi; \(prefix)\"$AGY\""
+            }
         case .kimi:
             missing = "Kimi CLI not found. Install Kimi Code, then retry."
             availabilityCheck = "command -v kimi >/dev/null 2>&1 || command -v kimi-code >/dev/null 2>&1"
@@ -2181,7 +2255,9 @@ private enum UsageProfileLoginLauncher {
         let boundaryMessage: String
         switch provider {
         case .antigravity:
-            boundaryMessage = "Uses the official agy native macOS Keychain session."
+            boundaryMessage = antigravityEnvironment.isEmpty
+                ? "Uses the official agy native macOS Keychain session."
+                : "Sign in to agy for this UsageDock profile."
         case .grok:
             boundaryMessage = "Uses grok login in an isolated GROK_HOME. Sign in at auth.x.ai with the xAI account that has SuperGrok or your linked X subscription."
         case .claude, .codex, .kimi, .cursor:

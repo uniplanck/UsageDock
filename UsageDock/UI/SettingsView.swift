@@ -1371,6 +1371,9 @@ private struct ProviderSettingsSection: View {
                             onDelete: {
                                 usageStore.removeAccount(id: account.id)
                             },
+                            onAntigravityLogin: account.provider == .antigravity && account.source == .profile ? {
+                                usageStore.signInAntigravityAccount(id: account.id)
+                            } : nil,
                             onGrokWebLogin: account.provider == .grok ? {
                                 usageStore.presentGrokWebLogin(for: account.id)
                             } : nil,
@@ -1406,6 +1409,15 @@ private struct ProviderSettingsSection: View {
                         .help(provider == .antigravity
                               ? "Opens the official agy login. Antigravity uses its native macOS Keychain session; UsageDock refreshes it automatically after sign-in."
                               : "Opens the official CLI in Terminal with a UsageDock-only HOME so profiles stay separated.")
+                    }
+
+                    if provider == .antigravity {
+                        Button {
+                            usageStore.addAntigravityAccountAndSignIn()
+                        } label: {
+                            Label("Antigravity アカウントを追加", systemImage: "person.crop.circle.badge.plus")
+                        }
+                        .help("専用のプロフィールを作り、別の Google アカウントでサインインするために agy を Terminal で開きます。")
                     }
 
                     if provider == .grok {
@@ -1631,6 +1643,7 @@ struct AccountEditor: View {
     let onMoveDown: () -> Void
     let onAutoDetectMultiplier: () -> Void
     let onDelete: () -> Void
+    var onAntigravityLogin: (() -> Void)? = nil
     var onGrokWebLogin: (() -> Void)? = nil
     var onCopyGrokDiagnostics: (() -> Void)? = nil
     var onCheckClaudeKeychain: (() -> Void)? = nil
@@ -1702,6 +1715,11 @@ struct AccountEditor: View {
                     .foregroundStyle(isStale ? .orange : .secondary)
                     .lineLimit(3)
                     .textSelection(.enabled)
+
+                if let onAntigravityLogin {
+                    Button("Open Antigravity Login", action: onAntigravityLogin)
+                        .controlSize(.small)
+                }
 
                 if onGrokWebLogin != nil {
                     Button("Sign in on grok.com", action: { onGrokWebLogin?() })
@@ -1874,12 +1892,15 @@ struct AccountEditor: View {
     /// Claude rows match its display: fable, then 1w, without 5h (see ClaudeQuotaDisplay).
     private var quotaRows: [Binding<UsageBucket>] {
         let rows = Array($account.buckets)
+        if account.provider == .antigravity {
+            return AntigravityQuotaDisplay.ordered(rows, quotaID: \.wrappedValue.quotaID)
+        }
         guard account.provider == .claude else { return rows }
         return ClaudeQuotaDisplay.ordered(rows, kind: \.wrappedValue.kind, model: \.wrappedValue.model)
     }
 
     private var hasFixedQuotaOrder: Bool {
-        account.provider == .claude
+        account.provider == .claude || account.provider == .antigravity
     }
 
     private func quotaName(_ bucket: UsageBucket) -> String {

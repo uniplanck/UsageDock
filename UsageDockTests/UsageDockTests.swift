@@ -1918,6 +1918,34 @@ final class AntigravityRailQuotaTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testAntigravityOrdersTheFourQuotasInCLIOutputAndDisplay() throws {
+        let expected = [
+            "Gemini Models · 5h", "Gemini Models · 1w",
+            "Claude and GPT models · 5h", "Claude and GPT models · 1w"
+        ]
+        let otherRows = ["Gemini App", "Flow", "Colab"].map {
+            "\($0)\tweekly\t10%\t2026-10-29T17:00:00Z"
+        }
+        let shuffled = Array(fixtureText.components(separatedBy: "\n").reversed()) + otherRows
+        let parsed = try AntigravityUsageAdapter.parseUsage(text: shuffled.joined(separator: "\n"))
+        XCTAssertEqual(parsed.map(\.label), expected)
+
+        let suite = "UsageDockTests.AntigravityQuotaOrder.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = UsageStore(defaults: defaults)
+        let native = UsageAccount(provider: .antigravity, name: "Local Login", source: .currentSession,
+                                  buckets: Array(parsed.dropFirst()))
+        let profile = UsageAccount(provider: .antigravity, name: "Antigravity 2", source: .profile,
+                                   buckets: Array(parsed.reversed()))
+        store.accounts = [native, profile]
+
+        XCTAssertEqual(store.summary(for: .account(id: profile.id, provider: .antigravity), now: fixtureNow)
+            .aggregates.map(\.label), expected)
+        XCTAssertEqual(store.summary(for: .antigravity, now: fixtureNow).aggregates.map(\.label), expected)
+    }
+
     func testAntigravityRailBucketSourcesReturnSelectedValuesAndResetDates() throws {
         let buckets = try fixtureBuckets()
         let accountID = UUID()
@@ -5751,6 +5779,128 @@ final class RailMotionRuntimeTests: XCTestCase {
         }
         XCTAssertTrue(runtime.isWettingSettled)
         XCTAssertEqual(final.wetting, 1, accuracy: 0.01)
+    }
+}
+
+@MainActor
+final class AntigravitySecondAccountTests: XCTestCase {
+    func testProfileEnvironmentUsesAndCreatesBothIsolatedDirectories() throws {
+        let fileManager = FileManager.default
+        let home = fileManager.temporaryDirectory.appendingPathComponent("Antigravity Profile \(UUID())")
+        defer { try? fileManager.removeItem(at: home) }
+        var account = UsageAccount(provider: .antigravity, name: "Antigravity 2", source: .profile,
+                                   profileHomePath: home.path, buckets: [])
+
+        let environment = try AntigravityUsageAdapter.profileEnvironment(for: account)
+
+        XCTAssertEqual(environment, [
+            "HOME": home.path,
+            "ANTIGRAVITY_GEMINI_DIR": home.appendingPathComponent(".gemini/antigravity-cli").path,
+            "ANTIGRAVITY_APP_DATA_DIR": home.appendingPathComponent(".gemini/antigravity-app").path
+        ])
+        for path in environment.values {
+            var isDirectory: ObjCBool = false
+            XCTAssertTrue(fileManager.fileExists(atPath: path, isDirectory: &isDirectory))
+            XCTAssertTrue(isDirectory.boolValue)
+        }
+        account.source = .currentSession
+        XCTAssertEqual(try AntigravityUsageAdapter.profileEnvironment(for: account), [:])
+    }
+
+    func testAddAntigravityAccountNamesAndPreservesTheNativeLogin() throws {
+        let suite = "UsageDockTests.AntigravitySecondAccount.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = UsageStore(defaults: defaults)
+        let native = UsageAccount(provider: .antigravity, name: "Local Login", source: .currentSession, buckets: [])
+        store.accounts = [native]
+
+        let secondID = try store.addAntigravityAccount()
+        let thirdID = try store.addAntigravityAccount()
+
+        XCTAssertEqual(store.accounts.first, native)
+        XCTAssertEqual(store.accounts.map(\.name), ["Local Login", "Antigravity 2", "Antigravity 3"])
+        for id in [secondID, thirdID] {
+            let account = try XCTUnwrap(store.accounts.first { $0.id == id })
+            XCTAssertEqual(account.source, .profile)
+            XCTAssertTrue(try XCTUnwrap(account.profileHomePath).hasSuffix("/Profiles/antigravity/\(id.uuidString)"))
+        }
+
+        store.accounts[1].name = "Google AI Ultra"
+        let reusedID = try store.addAntigravityAccount()
+        XCTAssertEqual(store.accounts.first { $0.id == reusedID }?.name, "Antigravity 2")
+    }
+
+    func testSecondAntigravityAccountNeedsItsOwnLogin() async throws {
+        let suite = "UsageDockTests.AntigravityLogin.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let fileManager = FileManager.default
+        let home = fileManager.temporaryDirectory.appendingPathComponent("Antigravity Profile \(UUID())")
+        defer { try? fileManager.removeItem(at: home) }
+        let executable = home.appendingPathComponent(".local/bin/agy")
+        try fileManager.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        let native = UsageAccount(provider: .antigravity, name: "Local Login", source: .currentSession, buckets: [
+            UsageBucket(quotaID: "antigravity-gemini-models-fiveHour", label: "Gemini Models · 5h",
+                        kind: .fiveHour, percentUsed: 0.4)
+        ])
+        let profile = UsageAccount(provider: .antigravity, name: "Antigravity 2", source: .profile,
+                                   profileHomePath: home.path, buckets: [])
+        var nativeFetches = 0
+        var profileFetches = 0
+        let store = UsageStore(defaults: defaults, now: { Date(timeIntervalSince1970: 1_000_000) }, usageFetcher: { account in
+            if account.id == native.id {
+                nativeFetches += 1
+                return native
+            }
+            profileFetches += 1
+            let fetched = try await AntigravityUsageAdapter(account: account).fetchAccounts()
+            return try XCTUnwrap(fetched.first)
+        })
+        store.accounts = [native, profile]
+        let nativeTarget = RailDisplayTarget.account(id: native.id, provider: .antigravity)
+        let profileTarget = RailDisplayTarget.account(id: profile.id, provider: .antigravity)
+
+        let replies = ["echo 'Please sign in'", "echo 'invalid_grant' >&2; exit 1"]
+        for (index, reply) in replies.enumerated() {
+            try """
+            #!/bin/sh
+            [ "$#" -eq 4 ] && [ "$1" = "-p" ] && [ "$2" = "/usage" ] || exit 2
+            [ "$HOME" = "${0%/.local/bin/agy}" ] || exit 2
+            [ "$ANTIGRAVITY_GEMINI_DIR" = "$HOME/.gemini/antigravity-cli" ] || exit 2
+            [ "$ANTIGRAVITY_APP_DATA_DIR" = "$HOME/.gemini/antigravity-app" ] || exit 2
+            \(reply)
+            """.write(to: executable, atomically: true, encoding: .utf8)
+            try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+            await store.refreshProvider(.antigravity, loginAccountID: index == 0 ? nil : profile.id)
+
+            XCTAssertTrue(store.accountRefreshState(for: profile.id).requiresSignIn)
+            XCTAssertTrue(store.summary(for: profileTarget).aggregates.isEmpty)
+            XCTAssertEqual(store.summary(for: nativeTarget).pressurePercent, 0.4)
+            XCTAssertEqual(store.railTargets(), [nativeTarget, profileTarget])
+            XCTAssertEqual(store.railLoginAccount(for: profileTarget)?.id, profile.id)
+            XCTAssertNil(store.railLoginAccount(for: nativeTarget))
+        }
+        XCTAssertEqual(nativeFetches, 1)
+        XCTAssertEqual(profileFetches, replies.count)
+    }
+
+    func testAntigravityProfileWithoutHomeRequiresSignIn() async {
+        let suite = "UsageDockTests.AntigravityMissingHome.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = UsageStore(defaults: defaults)
+        let account = UsageAccount(provider: .antigravity, name: "Antigravity 2", source: .profile, buckets: [])
+        store.accounts = [account]
+
+        await store.refreshProvider(.antigravity)
+
+        guard case .failed(let message, true) = store.accountRefreshState(for: account.id) else {
+            return XCTFail("An Antigravity profile requires its own home")
+        }
+        XCTAssertTrue(message.contains("profile directory"))
     }
 }
 
