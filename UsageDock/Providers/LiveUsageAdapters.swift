@@ -322,21 +322,33 @@ struct CodexUsageAdapter: UsageProviderAdapter {
 
 struct AntigravityUsageAdapter: UsageProviderAdapter {
     let provider: ProviderID = .antigravity
-    let profileHomePath: String?
-
-    init(profileHomePath: String? = nil) {
-        self.profileHomePath = profileHomePath
-    }
+    let account: UsageAccount
 
     func fetchAccounts() async throws -> [UsageAccount] {
-        let output = try await Self.fetchUsageText(profileHomePath: profileHomePath)
+        let profileEnvironment = try Self.profileEnvironment(for: account)
+        guard let executable = Self.executableURL(profileHomePath: profileEnvironment["HOME"]) else {
+            throw UsageAdapterError.credentialsUnavailable("Antigravity CLI (agy) was not found. Install the official Antigravity CLI, then retry.")
+        }
+        let environment = ProcessInfo.processInfo.environment.merging(profileEnvironment) { _, profile in profile }
+        var fetched = account
+        fetched.buckets = try await Self.fetchBuckets(executable: executable, environment: environment)
+        return [fetched]
+    }
+
+    static func profileEnvironment(for account: UsageAccount) throws -> [String: String] {
+        if account.source == .currentSession { return [:] }
+        guard account.source == .profile, let path = account.profileHomePath, path.hasPrefix("/"), path != "/" else {
+            throw UsageAdapterError.credentialsUnavailable("Antigravity profile directory is unavailable. Add an Antigravity account and sign in.")
+        }
+        let home = URL(fileURLWithPath: path, isDirectory: true)
+        let cli = home.appendingPathComponent(".gemini/antigravity-cli", isDirectory: true)
+        let appData = home.appendingPathComponent(".gemini/antigravity-app", isDirectory: true)
+        try FileManager.default.createDirectory(at: cli, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: appData, withIntermediateDirectories: true)
         return [
-            UsageAccount(
-                provider: .antigravity,
-                name: "Current Session",
-                source: .currentSession,
-                buckets: try Self.parseUsage(text: output)
-            )
+            "HOME": home.path,
+            "ANTIGRAVITY_GEMINI_DIR": cli.path,
+            "ANTIGRAVITY_APP_DATA_DIR": appData.path
         ]
     }
 
@@ -391,18 +403,15 @@ struct AntigravityUsageAdapter: UsageProviderAdapter {
             )
         }
 
-        guard !buckets.isEmpty else {
+        let ordered = AntigravityQuotaDisplay.ordered(buckets, quotaID: \.quotaID)
+        guard !ordered.isEmpty else {
             throw UsageAdapterError.invalidResponse("Antigravity CLI returned no usable quota rows from /usage.")
         }
-        return buckets
+        return ordered
     }
 
-    private static func fetchUsageText(profileHomePath: String?) async throws -> String {
-        guard let executable = executableURL(profileHomePath: profileHomePath) else {
-            throw UsageAdapterError.credentialsUnavailable("Antigravity CLI (agy) was not found. Install the official Antigravity CLI, then retry.")
-        }
-
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+    private static func fetchBuckets(executable: URL, environment: [String: String]) async throws -> [UsageBucket] {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[UsageBucket], Error>) in
             let process = Process()
             let stdout = Pipe()
             let stderr = Pipe()
@@ -411,10 +420,7 @@ struct AntigravityUsageAdapter: UsageProviderAdapter {
             process.standardOutput = stdout
             process.standardError = stderr
 
-            // agy authenticates through its native macOS Keychain/session boundary. HOME
-            // isolation is not a supported multi-profile contract, so quota reads must use
-            // the same native session that the user actually authenticated.
-            process.environment = ProcessInfo.processInfo.environment
+            process.environment = environment
 
             process.terminationHandler = { process in
                 let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
@@ -422,27 +428,28 @@ struct AntigravityUsageAdapter: UsageProviderAdapter {
                 let output = String(data: outputData, encoding: .utf8) ?? ""
                 let errorText = String(data: errorData, encoding: .utf8) ?? ""
 
-                guard process.terminationStatus == 0 else {
-                    let lower = errorText.lowercased()
-                    if lower.contains("authentication required") || lower.contains("sign in") || lower.contains("login") {
-                        continuation.resume(throwing: UsageAdapterError.authenticationExpired(
-                            "Antigravity login is required. Open Antigravity Login and finish the official agy browser sign-in."
-                        ))
-                    } else {
-                        let message = errorText.trimmingCharacters(in: .whitespacesAndNewlines)
-                        continuation.resume(throwing: UsageAdapterError.invalidResponse(
-                            message.isEmpty ? "Antigravity CLI /usage failed." : message
-                        ))
+                continuation.resume(with: Result {
+                    do {
+                        guard process.terminationStatus == 0 else {
+                            throw UsageAdapterError.invalidResponse("Antigravity CLI /usage failed (exit \(process.terminationStatus)).")
+                        }
+                        return try Self.parseUsage(text: output)
+                    } catch {
+                        let diagnostic = (output + "\n" + errorText).lowercased()
+                        let loginMarkers = [
+                            "authentication required", "sign in", "sign-in", "login", "not logged in",
+                            "unauthenticated", "not authenticated", "unauthorized", "invalid_grant",
+                            "no credentials", "credentials not found", "credentials expired",
+                            "expired token", "token expired", "token has expired"
+                        ]
+                        if loginMarkers.contains(where: { diagnostic.contains($0) }) {
+                            throw UsageAdapterError.authenticationExpired(
+                                "Antigravity login is required. Sign in to this account with agy, then retry."
+                            )
+                        }
+                        throw error
                     }
-                    return
-                }
-
-                let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmed.isEmpty else {
-                    continuation.resume(throwing: UsageAdapterError.invalidResponse("Antigravity CLI /usage returned an empty response."))
-                    return
-                }
-                continuation.resume(returning: trimmed)
+                })
             }
 
             do {

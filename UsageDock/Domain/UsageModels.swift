@@ -285,6 +285,8 @@ enum RailQuotaSource: RawRepresentable, Codable, CaseIterable, Hashable, Identif
             // Claude has no 5h window: offer its fable and 1w quotas instead.
             options.removeAll { $0 == .fiveHour }
             buckets = ClaudeQuotaDisplay.ordered(buckets, kind: \.kind, model: \.model)
+        } else if provider == .antigravity {
+            buckets = AntigravityQuotaDisplay.ordered(buckets, quotaID: \.quotaID)
         }
         for bucket in buckets {
             let source = Self.bucket(quotaID: bucket.quotaID)
@@ -333,6 +335,19 @@ enum ClaudeQuotaDisplay {
         [0, 1].flatMap { rank in
             items.filter { position(kind: $0[keyPath: kind], model: $0[keyPath: model]) == rank }
         }
+    }
+}
+
+enum AntigravityQuotaDisplay {
+    private static let quotaIDs = [
+        "antigravity-gemini-models-fiveHour",
+        "antigravity-gemini-models-weekly",
+        "antigravity-claude-and-gpt-models-fiveHour",
+        "antigravity-claude-and-gpt-models-weekly"
+    ]
+
+    static func ordered<Item>(_ rows: [Item], quotaID: KeyPath<Item, String>) -> [Item] {
+        quotaIDs.compactMap { id in rows.first { $0[keyPath: quotaID] == id } }
     }
 }
 
